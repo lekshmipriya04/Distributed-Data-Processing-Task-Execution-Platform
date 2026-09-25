@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-config
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  HDFS_URL: "hdfs://namenode:9000"
+  MLFLOW_TRACKING_URI: "http://mlflow-service:5000"
+  LIVY_URL: "http://livy-service:8998"

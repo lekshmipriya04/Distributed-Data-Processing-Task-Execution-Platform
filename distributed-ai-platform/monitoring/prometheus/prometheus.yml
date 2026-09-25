@@ -1,0 +1,37 @@
+global:
+  scrape_interval: 15s
+
+rule_files:
+  - "rules/*.yml"
+
+scrape_configs:
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:8000']
+  - job_name: 'storage-service'
+    static_configs:
+      - targets: ['storage-service:8001']
+  - job_name: 'preprocessing-service'
+    static_configs:
+      - targets: ['preprocessing-service:8002']
+  - job_name: 'training-service'
+    static_configs:
+      - targets: ['training-service:8003']
+  - job_name: 'evaluation-service'
+    static_configs:
+      - targets: ['evaluation-service:8004']
+  - job_name: 'registry-service'
+    static_configs:
+      - targets: ['registry-service:8005']
+  - job_name: 'serving-service'
+    static_configs:
+      - targets: ['serving-service:8006']
+  - job_name: 'worker-registry'
+    static_configs:
+      - targets: ['worker-registry:8008']
+  - job_name: 'resource-manager'
+    static_configs:
+      - targets: ['resource-manager:8009']
+  - job_name: 'scheduler'
+    static_configs:
+      - targets: ['scheduler:8010']

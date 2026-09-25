@@ -1,0 +1,14 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/* Tailwind CSS directives (assumes Tailwind is installed/configured if needed, but we'll use vanilla CSS for the rules if not using Tailwind. 
+Since we are using Tailwind classes in the App.tsx, we need Tailwind directives here.
+We will set up tailwind next.) */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}

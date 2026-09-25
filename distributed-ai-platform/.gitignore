@@ -1,0 +1,49 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+.dockerignore
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Data/Secrets (CRITICAL: BUG-24 Fix)
+data/
+secrets/
+config/.env
+config/.env.local
+config/certs/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.npm/

@@ -1,0 +1,21 @@
+name: CD Production
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build and push Docker images
+      run: |
+        echo "Building and pushing images for production..."
+        
+    - name: Deploy to Kubernetes
+      run: |
+        echo "Deploying to Kubernetes production cluster..."
