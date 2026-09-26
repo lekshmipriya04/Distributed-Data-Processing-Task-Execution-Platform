@@ -100,9 +100,35 @@ export interface TrainingJobRecord {
 // --- Evaluation Service -------------------------------------------------------
 export interface EvaluationResult {
   id: string;
+  dataset_id: string;
+  model_uri: string;
   status: JobStatus;
   metrics?: Record<string, number>;
   error_message?: string;
+  created_at: string;
+}
+
+export interface MetricPoint {
+  step: number;
+  value: number;
+  timestamp?: number;
+}
+
+export interface ModelMetricHistory {
+  run_id: string;
+  metric_name: string;
+  history: MetricPoint[];
+}
+
+export interface ModelEvaluationSummary {
+  run_id: string;
+  model_name?: string;
+  problem_type?: ProblemType;
+  metrics: Record<string, number>;
+  params?: Record<string, string>;
+  tags?: Record<string, string>;
+  status: string;
+  created_at?: string;
 }
 
 // --- Registry Service -------------------------------------------------------
