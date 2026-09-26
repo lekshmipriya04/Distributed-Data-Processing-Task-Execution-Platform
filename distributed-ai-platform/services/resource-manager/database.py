@@ -1,8 +1,8 @@
 from functools import lru_cache
 from shared.common.database import DatabaseManager
-from config import ResourceManagerSettings
+from config import get_resource_manager_settings
 
 
 @lru_cache(maxsize=1)
-def get_db_manager(settings: ResourceManagerSettings) -> DatabaseManager:
-    return DatabaseManager(settings)
+def get_db_manager() -> DatabaseManager:
+    return DatabaseManager(get_resource_manager_settings())

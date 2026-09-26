@@ -8,6 +8,7 @@ class ResourceManagerSettings(BaseServiceSettings):
     port: int = Field(default=8009)
     worker_registry_url: str = Field(default="http://worker-registry:8008")
     kafka_producer_url: str = Field(default="http://streaming-service:8007")
+    model_config = {"frozen": True}
 
 
 @lru_cache(maxsize=1)

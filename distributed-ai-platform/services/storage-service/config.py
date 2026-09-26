@@ -4,6 +4,8 @@ from pydantic import Field
 from shared.common.config import BaseServiceSettings
 
 class StorageSettings(BaseServiceSettings):
+    model_config = {"frozen": True}
+
     service_name: str = "storage-service"
     port: int = Field(default=8001)
 

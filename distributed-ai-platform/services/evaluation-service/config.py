@@ -3,6 +3,7 @@ from pydantic import Field
 from shared.common.config import BaseServiceSettings
 
 class EvaluationSettings(BaseServiceSettings):
+    model_config = {"frozen": True}
     service_name: str = "evaluation-service"
     port: int = Field(default=8004)
 

@@ -6,6 +6,7 @@ from shared.common.config import BaseServiceSettings
 class WorkerRegistrySettings(BaseServiceSettings):
     service_name: str = "worker-registry"
     port: int = Field(default=8008)
+    model_config = {"frozen": True}
 
 
 @lru_cache(maxsize=1)

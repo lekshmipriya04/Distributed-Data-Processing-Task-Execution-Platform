@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
     settings = get_evaluation_settings()
     configure_logging(level=settings.log_level, service_name=settings.service_name, environment=settings.environment.value)
     
-    db_manager = get_db_manager(settings)
+    db_manager = get_db_manager()
     await db_manager.initialize()
     await db_manager.create_tables()
     logger.info("evaluation_service_started")

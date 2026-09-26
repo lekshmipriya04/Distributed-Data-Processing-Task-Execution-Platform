@@ -5,6 +5,7 @@ from shared.common.config import BaseServiceSettings
 class PreprocessingSettings(BaseServiceSettings):
     service_name: str = "preprocessing-service"
     port: int = Field(default=8002)
+    model_config = {"frozen": True}
 
     # Spark Config for Livy
     executor_memory: str = Field(default="2g")

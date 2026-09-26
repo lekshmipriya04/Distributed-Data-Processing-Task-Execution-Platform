@@ -5,6 +5,7 @@ from shared.common.config import BaseServiceSettings
 class TrainingSettings(BaseServiceSettings):
     service_name: str = "training-service"
     port: int = Field(default=8003)
+    model_config = {"frozen": True}
 
     executor_memory: str = Field(default="4g")
     executor_cores: int = Field(default=4, ge=1)
