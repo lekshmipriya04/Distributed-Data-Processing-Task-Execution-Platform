@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed Compute Request</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #FFFFFF;
+            --card-bg: #FFFFFF;
+            --card-border: rgba(0, 0, 0, 0.1);
+
+            /* Text colors */
+            --text-main: #000000;
+            --text-muted: #4B5563;
+
+            --accent-primary: #3B82F6;
+            --accent-secondary: #8B5CF6;
+
+            --gradient-btn: linear-gradient(135deg, #00C6FF, #0072FF);
+            --gradient-btn-hover: linear-gradient(135deg, #0072FF, #00C6FF);
+
+            --gradient-bg:
+                radial-gradient(circle at top right, rgba(59, 130, 246, 0.15), transparent 40%),
+                radial-gradient(circle at bottom left, rgba(139, 92, 246, 0.15), transparent 40%);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            background-image: var(--gradient-bg);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .dialog-container {
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            padding: 40px;
+            width: 100%;
+            max-width: 600px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            animation: slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .header {
+            margin-bottom: 30px;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 20px;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            background: linear-gradient(to right, #60A5FA, #A78BFA);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .header p {
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        .section-title {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+
+        .resource-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 25px;
+            gap: 20px;
+        }
+
+        .resource-icon {
+            width: 48px;
+            height: 48px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+        }
+
+        .resource-icon svg {
+            width: 24px;
+            height: 24px;
+            stroke: currentColor;
+            stroke-width: 2;
+            fill: none;
+        }
+
+        .resource-info {
+            flex: 1;
+        }
+
+        .resource-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .resource-name {
+            font-weight: 600;
+            font-size: 15px;
+        }
+
+        .resource-value {
+            font-weight: 700;
+            font-size: 14px;
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.1);
+            padding: 4px 12px;
+            border-radius: 20px;
+        }
+
+        .slider-container {
+            position: relative;
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            margin-top: 10px;
+        }
+
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+            position: absolute;
+            top: -7px;
+            left: 0;
+            margin: 0;
+        }
+
+        input[type=range]:focus {
+            outline: none;
+        }
+
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 6px;
+            cursor: pointer;
+            border-radius: 3px;
+            background: transparent;
+        }
+
+        /* The filled portion of the slider */
+        .slider-fill {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            background: linear-gradient(to right, #00C6FF, #0072FF);
+            border-radius: 3px;
+            pointer-events: none;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            height: 20px;
+            width: 20px;
+            border-radius: 50%;
+            background: #FFFFFF;
+            cursor: pointer;
+            -webkit-appearance: none;
+            margin-top: -7px;
+            box-shadow: 0 0 10px rgba(0, 198, 255, 0.5);
+            border: 2px solid #0072FF;
+            transition: transform 0.1s;
+        }
+
+        input[type=range]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        .resource-desc {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .checkbox-container input {
+            position: absolute;
+            opacity: 0;
+            cursor: pointer;
+            height: 0;
+            width: 0;
+        }
+
+        .checkmark {
+            height: 24px;
+            width: 24px;
+            background-color: rgba(255, 255, 255, 0.1);
+            border: 1px solid var(--card-border);
+            border-radius: 6px;
+            margin-right: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .checkbox-container:hover input~.checkmark {
+            background-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .checkbox-container input:checked~.checkmark {
+            background: var(--gradient-btn);
+            border-color: transparent;
+        }
+
+        .checkmark:after {
+            content: "";
+            display: none;
+            width: 6px;
+            height: 12px;
+            border: solid white;
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
+            margin-bottom: 2px;
+        }
+
+        .checkbox-container input:checked~.checkmark:after {
+            display: block;
+        }
+
+        .actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid var(--card-border);
+        }
+
+        button {
+            flex: 1;
+            padding: 16px;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-reject {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid var(--card-border);
+        }
+
+        .btn-reject:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-main);
+        }
+
+        .btn-approve {
+            background: var(--gradient-btn);
+            color: white;
+            box-shadow: 0 4px 15px rgba(0, 114, 255, 0.3);
+        }
+
+        .btn-approve:hover {
+            background: var(--gradient-btn-hover);
+            box-shadow: 0 6px 20px rgba(0, 114, 255, 0.4);
+            transform: translateY(-2px);
+        }
+
+        /* Success screen */
+        .success-screen {
+            display: none;
+            text-align: center;
+            padding: 40px 0;
+        }
+
+        .success-icon {
+            width: 80px;
+            height: 80px;
+            background: rgba(16, 185, 129, 0.1);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            color: #10B981;
+        }
+
+        .success-icon svg {
+            width: 40px;
+            height: 40px;
+            stroke: currentColor;
+            stroke-width: 2;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="dialog-container" id="mainDialog">
+        <div class="header">
+            <h1>Distributed Compute Request</h1>
+            <p>Job ID: ${job_id} • Requestor: ${requestor}</p>
+        </div>
+
+        <div class="section-title">Requested Resources</div>
+
+        <!-- CPU -->
+        <div class="resource-row">
+            <div class="resource-icon">
+                <svg viewBox="0 0 24 24">
+                    <rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect>
+                    <rect x="9" y="9" width="6" height="6"></rect>
+                    <line x1="9" y1="1" x2="9" y2="4"></line>
+                    <line x1="15" y1="1" x2="15" y2="4"></line>
+                    <line x1="9" y1="20" x2="9" y2="23"></line>
+                    <line x1="15" y1="20" x2="15" y2="23"></line>
+                    <line x1="20" y1="9" x2="23" y2="9"></line>
+                    <line x1="20" y1="14" x2="23" y2="14"></line>
+                    <line x1="1" y1="9" x2="4" y2="9"></line>
+                    <line x1="1" y1="14" x2="4" y2="14"></line>
+                </svg>
+            </div>
+            <div class="resource-info">
+                <div class="resource-header">
+                    <span class="resource-name">CPU Cores</span>
+                    <span class="resource-value" id="cpuValText">${cpu_default} CORES</span>
+                </div>
+                <div class="resource-desc">${cpu_requested} Requested / Max ${cpu_available}</div>
+                <div class="slider-container">
+                    <div class="slider-fill" id="cpuFill"></div>
+                    <input type="range" id="cpuSlider" min="1" max="${cpu_available}" value="${cpu_default}">
+                </div>
+            </div>
+        </div>
+
+        <!-- Memory -->
+        <div class="resource-row">
+            <div class="resource-icon">
+                <svg viewBox="0 0 24 24">
+                    <rect x="2" y="7" width="20" height="10" rx="2" ry="2"></rect>
+                    <line x1="6" y1="7" x2="6" y2="17"></line>
+                    <line x1="10" y1="7" x2="10" y2="17"></line>
+                    <line x1="14" y1="7" x2="14" y2="17"></line>
+                    <line x1="18" y1="7" x2="18" y2="17"></line>
+                </svg>
+            </div>
+            <div class="resource-info">
+                <div class="resource-header">
+                    <span class="resource-name">Memory (GB)</span>
+                    <span class="resource-value" id="memValText">${memory_default} GB</span>
+                </div>
+                <div class="resource-desc">${memory_requested} GB Requested / Max ${memory_available} GB</div>
+                <div class="slider-container">
+                    <div class="slider-fill" id="memFill"></div>
+                    <input type="range" id="memSlider" min="0.5" max="${memory_available}" value="${memory_default}"
+                        step="0.5">
+                </div>
+            </div>
+        </div>
+
+        <!-- GPU -->
+        <div class="resource-row" style="display: ${gpu_display}">
+            <div class="resource-icon">
+                <svg viewBox="0 0 24 24">
+                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                </svg>
+            </div>
+            <div class="resource-info" style="display: flex; align-items: center; height: 100%;">
+                <label class="checkbox-container">
+                    <input type="checkbox" id="gpuCheck" ${gpu_checked}>
+                    <span class="checkmark"></span>
+                    Grant GPU Access
+                </label>
+            </div>
+        </div>
+
+        <div class="actions">
+            <button class="btn-reject" onclick="rejectRequest()">Reject</button>
+            <button class="btn-approve" onclick="approveRequest()">Approve</button>
+        </div>
+    </div>
+
+    <div class="dialog-container success-screen" id="successScreen">
+        <div class="success-icon">
+            <svg viewBox="0 0 24 24">
+                <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+        </div>
+        <h1 style="margin-bottom: 10px; font-size: 24px;" id="resultTitle">Resources Approved</h1>
+        <p style="color: var(--text-muted); margin-bottom: 30px;">You can close this window now.</p>
+    </div>
+
+    <script>
+        // Update slider fills dynamically
+        function updateSlider(sliderId, fillId, valId, suffix) {
+            const slider = document.getElementById(sliderId);
+            const fill = document.getElementById(fillId);
+            const valText = document.getElementById(valId);
+
+            const update = () => {
+                const percentage = ((slider.value - slider.min) / (slider.max - slider.min)) * 100;
+                fill.style.width = percentage + '%';
+                valText.innerText = slider.value + ' ' + suffix;
+            };
+
+            slider.addEventListener('input', update);
+            update(); // Init
+        }
+
+        updateSlider('cpuSlider', 'cpuFill', 'cpuValText', 'CORES');
+        updateSlider('memSlider', 'memFill', 'memValText', 'GB');
+
+        function showResult(approved) {
+            document.getElementById('mainDialog').style.display = 'none';
+            document.getElementById('successScreen').style.display = 'block';
+            if (!approved) {
+                document.getElementById('resultTitle').innerText = "Request Rejected";
+                document.querySelector('.success-icon').style.background = "rgba(239, 68, 68, 0.1)";
+                document.querySelector('.success-icon').style.color = "#EF4444";
+                document.querySelector('.success-icon').innerHTML = '<svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+            }
+        }
+
+        async function approveRequest() {
+            const data = {
+                cpu_approved: parseInt(document.getElementById('cpuSlider').value),
+                memory_approved_gb: parseFloat(document.getElementById('memSlider').value),
+                gpu_approved: document.getElementById('gpuCheck') ? document.getElementById('gpuCheck').checked : false,
+                approved: true
+            };
+
+            await fetch('/api/approve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            showResult(true);
+        }
+
+        async function rejectRequest() {
+            await fetch('/api/reject', { method: 'POST' });
+            showResult(false);
+        }
+    </script>
+</body>
+
+</html>

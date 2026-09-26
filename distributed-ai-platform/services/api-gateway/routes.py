@@ -67,3 +67,10 @@ async def proxy_scheduler(request: Request, path: str, settings = Depends(get_ga
     if request.url.query:
         target_url = f"{target_url}?{request.url.query}"
     return await proxy_request(request, target_url)
+
+@router.api_route("/ssh/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def proxy_ssh(request: Request, path: str, settings = Depends(get_gateway_settings)):
+    target_url = f"{settings.ssh_executor_url}/api/v1/ssh/{path}"
+    if request.url.query:
+        target_url = f"{target_url}?{request.url.query}"
+    return await proxy_request(request, target_url)

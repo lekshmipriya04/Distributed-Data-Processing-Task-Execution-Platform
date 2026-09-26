@@ -15,6 +15,7 @@ class GatewaySettings(BaseServiceSettings):
     worker_registry_url: str = Field(default="http://worker-registry:8008")
     resource_manager_url: str = Field(default="http://resource-manager:8009")
     scheduler_url: str = Field(default="http://scheduler:8010")
+    ssh_executor_url: str = Field(default="http://ssh-executor:8011")
 
 @lru_cache(maxsize=1)
 def get_gateway_settings() -> GatewaySettings:

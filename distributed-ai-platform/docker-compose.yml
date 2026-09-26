@@ -458,6 +458,18 @@ services:
       resource-manager:
         condition: service_started
 
+  ssh-executor:
+    build:
+      context: .
+      dockerfile: services/ssh-executor/Dockerfile
+    container_name: ssh-executor
+    env_file:
+      - config/.env
+    ports:
+      - "8011:8011"
+    networks:
+      - platform-net
+
   worker-node-1:
     build:
       context: .

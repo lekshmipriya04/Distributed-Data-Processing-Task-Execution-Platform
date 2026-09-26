@@ -5,6 +5,13 @@ Falls back to CLI if tkinter is not available.
 """
 import asyncio
 import structlog
+import json
+import webbrowser
+import threading
+import os
+import socketserver
+from http.server import SimpleHTTPRequestHandler
+from string import Template
 from typing import Optional
 
 logger = structlog.get_logger(__name__)
@@ -33,7 +40,7 @@ class ResourceApprovalUI:
             None if rejected
         """
         try:
-            return await self._show_tkinter_dialog(
+            return await self._show_web_dialog(
                 request_id=request_id,
                 job_id=job_id,
                 requestor=requestor,
@@ -44,7 +51,8 @@ class ResourceApprovalUI:
                 memory_available_gb=memory_available_gb,
                 gpu_available=gpu_available,
             )
-        except Exception:
+        except Exception as e:
+            logger.error(f"Web UI failed: {e}. Falling back to CLI.")
             # Fall back to CLI
             return await self._show_cli_dialog(
                 request_id=request_id,
@@ -58,140 +66,81 @@ class ResourceApprovalUI:
                 gpu_available=gpu_available,
             )
 
-    async def _show_tkinter_dialog(self, **kwargs) -> Optional[dict]:
-        """Show tkinter-based GUI dialog."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._create_tkinter_dialog, kwargs)
-
-    def _create_tkinter_dialog(self, params: dict) -> Optional[dict]:
-        import tkinter as tk
-        from tkinter import ttk
+    async def _show_web_dialog(self, **kwargs) -> Optional[dict]:
+        """Show web-based modern GUI dialog."""
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
         
-        result = {"approved": False, "cpu": 0, "memory": 0.0, "gpu": False}
+        # Prepare parameters for the template
+        params = kwargs.copy()
+        params["cpu_default"] = min(params["cpu_requested"], params["cpu_available"])
+        params["memory_default"] = min(params["memory_requested_gb"], params["memory_available_gb"])
+        params["gpu_display"] = "flex" if params["gpu_available"] else "none"
+        params["gpu_checked"] = "checked" if params["gpu_requested"] and params["gpu_available"] else ""
         
-        root = tk.Tk()
-        root.title("Resource Request - Distributed AI Platform")
-        root.geometry("500x450")
-        root.configure(bg="#f0f0f0")
+        class ApprovalHandler(SimpleHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+                
+            def do_GET(self):
+                if self.path == "/":
+                    self.send_response(200)
+                    self.send_header("Content-type", "text/html")
+                    self.end_headers()
+                    
+                    static_dir = os.path.join(os.path.dirname(__file__), "static")
+                    template_path = os.path.join(static_dir, "index.html")
+                    
+                    with open(template_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    html = Template(content).safe_substitute(**params)
+                    self.wfile.write(html.encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    
+            def do_POST(self):
+                if self.path == "/api/approve":
+                    content_len = int(self.headers.get("Content-Length", 0))
+                    post_data = self.rfile.read(content_len)
+                    data = json.loads(post_data.decode("utf-8"))
+                    
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'{"status":"ok"}')
+                    
+                    loop.call_soon_threadsafe(future.set_result, data)
+                
+                elif self.path == "/api/reject":
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'{"status":"ok"}')
+                    
+                    loop.call_soon_threadsafe(future.set_result, None)
         
-        # Header
-        header = tk.Label(
-            root,
-            text="⚡ Distributed Compute Request",
-            font=("Arial", 14, "bold"),
-            bg="#2563EB",
-            fg="white",
-            pady=10,
-        )
-        header.pack(fill=tk.X)
+        # Start local server on a random free port
+        httpd = socketserver.TCPServer(("127.0.0.1", 0), ApprovalHandler)
+        port = httpd.server_address[1]
         
-        # Info frame
-        info_frame = tk.Frame(root, bg="#f0f0f0", padx=20, pady=10)
-        info_frame.pack(fill=tk.X)
+        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server_thread.start()
         
-        tk.Label(info_frame, text=f"Job ID: {params['job_id'][:8]}...", bg="#f0f0f0").pack(anchor=tk.W)
-        tk.Label(info_frame, text=f"Requestor: {params['requestor']}", bg="#f0f0f0").pack(anchor=tk.W)
+        # Open default browser
+        webbrowser.open(f"http://127.0.0.1:{port}/")
         
-        # Requested resources
-        req_frame = tk.LabelFrame(root, text="Requested Resources", padx=10, pady=10, bg="#f0f0f0")
-        req_frame.pack(fill=tk.X, padx=20, pady=5)
-        
-        tk.Label(req_frame, text=f"CPU: {params['cpu_requested']} cores", bg="#f0f0f0").pack(anchor=tk.W)
-        tk.Label(req_frame, text=f"Memory: {params['memory_requested_gb']:.1f} GB", bg="#f0f0f0").pack(anchor=tk.W)
-        tk.Label(
-            req_frame,
-            text=f"GPU: {'Yes' if params['gpu_requested'] else 'No'}",
-            bg="#f0f0f0",
-        ).pack(anchor=tk.W)
-        
-        # Approval frame with sliders
-        approve_frame = tk.LabelFrame(root, text="Approve Resources", padx=10, pady=10, bg="#f0f0f0")
-        approve_frame.pack(fill=tk.X, padx=20, pady=5)
-        
-        # CPU slider
-        tk.Label(approve_frame, text="CPU cores to grant:", bg="#f0f0f0").pack(anchor=tk.W)
-        cpu_var = tk.IntVar(value=min(params['cpu_requested'], params['cpu_available']))
-        cpu_slider = ttk.Scale(
-            approve_frame, from_=1, to=params['cpu_available'],
-            variable=cpu_var, orient=tk.HORIZONTAL, length=300
-        )
-        cpu_slider.pack()
-        cpu_label = tk.Label(approve_frame, textvariable=cpu_var, bg="#f0f0f0")
-        cpu_label.pack()
-        
-        # Memory slider
-        tk.Label(approve_frame, text="Memory (GB) to grant:", bg="#f0f0f0").pack(anchor=tk.W)
-        mem_var = tk.DoubleVar(
-            value=min(params['memory_requested_gb'], params['memory_available_gb'])
-        )
-        mem_slider = ttk.Scale(
-            approve_frame,
-            from_=0.5,
-            to=params['memory_available_gb'],
-            variable=mem_var,
-            orient=tk.HORIZONTAL,
-            length=300,
-        )
-        mem_slider.pack()
-        mem_label = tk.Label(approve_frame, textvariable=mem_var, bg="#f0f0f0")
-        mem_label.pack()
-        
-        # GPU checkbox
-        gpu_var = tk.BooleanVar(
-            value=params['gpu_requested'] and params['gpu_available']
-        )
-        if params['gpu_available']:
-            gpu_check = tk.Checkbutton(
-                approve_frame, text="Grant GPU access", variable=gpu_var, bg="#f0f0f0"
-            )
-            gpu_check.pack(anchor=tk.W)
-        
-        # Buttons
-        btn_frame = tk.Frame(root, bg="#f0f0f0")
-        btn_frame.pack(pady=10)
-        
-        def on_approve():
-            result["approved"] = True
-            result["cpu"] = cpu_var.get()
-            result["memory"] = round(mem_var.get(), 1)
-            result["gpu"] = gpu_var.get()
-            root.destroy()
-        
-        def on_reject():
-            result["approved"] = False
-            root.destroy()
-        
-        approve_btn = tk.Button(
-            btn_frame,
-            text="✓ Approve",
-            command=on_approve,
-            bg="#16a34a",
-            fg="white",
-            width=15,
-            font=("Arial", 10, "bold"),
-        )
-        approve_btn.pack(side=tk.LEFT, padx=10)
-        
-        reject_btn = tk.Button(
-            btn_frame,
-            text="✗ Reject",
-            command=on_reject,
-            bg="#dc2626",
-            fg="white",
-            width=15,
-            font=("Arial", 10, "bold"),
-        )
-        reject_btn.pack(side=tk.LEFT, padx=10)
-        
-        root.mainloop()
-        
-        if result["approved"]:
-            return {
-                "cpu_approved": result["cpu"],
-                "memory_approved_gb": result["memory"],
-                "gpu_approved": result["gpu"],
-            }
-        return None
+        try:
+            result = await future
+            if result and result.get("approved"):
+                return {
+                    "cpu_approved": result.get("cpu_approved"),
+                    "memory_approved_gb": result.get("memory_approved_gb"),
+                    "gpu_approved": result.get("gpu_approved"),
+                }
+            return None
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
     async def _show_cli_dialog(self, **kwargs) -> Optional[dict]:
         """CLI fallback approval dialog."""
