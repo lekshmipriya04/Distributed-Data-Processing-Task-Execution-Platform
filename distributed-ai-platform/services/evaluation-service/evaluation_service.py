@@ -37,8 +37,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import EvaluationSettings
 from models import EvaluationRun
-from schemas import EvaluationRequest, EvaluationResponse
+from schemas import (
+    EvaluationRequest,
+    EvaluationResponse,
+    MetricPoint,
+    ModelMetricHistory,
+    ModelEvaluationSummary,
+    ModelComparisonResponse,
+)
 from shared.common.database import DatabaseManager
+from mlflow.tracking import MlflowClient
 
 logger = structlog.get_logger(__name__)
 
@@ -49,6 +57,7 @@ class EvaluationService:
         self._db_manager = db_manager
         self._settings = settings
         mlflow.set_tracking_uri(self._settings.mlflow_tracking_uri)
+        self._mlflow_client = MlflowClient(tracking_uri=self._settings.mlflow_tracking_uri)
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -89,6 +98,97 @@ class EvaluationService:
                 select(EvaluationRun).where(EvaluationRun.id == run_id)
             )
             return result.scalar_one_or_none()
+
+    async def list_runs(self, limit: int = 50) -> list[EvaluationRun]:
+        async with self._db_manager.session() as session:
+            result = await session.execute(
+                select(EvaluationRun).order_by(EvaluationRun.created_at.desc()).limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def get_mlflow_run_metrics(self, run_id: str) -> Optional[ModelEvaluationSummary]:
+        """Fetch metrics, parameters, and tags for a given MLflow run ID."""
+        loop = asyncio.get_event_loop()
+        try:
+            run = await loop.run_in_executor(None, self._mlflow_client.get_run, run_id)
+            if not run:
+                return None
+            
+            data = run.data
+            metrics = {k: float(v) for k, v in data.metrics.items()}
+            params = {k: str(v) for k, v in data.params.items()}
+            tags = {k: str(v) for k, v in data.tags.items()}
+            model_name = tags.get("mlflow.runName") or tags.get("model_name") or f"Model-{run_id[:8]}"
+            problem_type = tags.get("problem_type") or ("regression" if "rmse" in metrics or "r2" in metrics else "classification")
+
+            return ModelEvaluationSummary(
+                run_id=run_id,
+                model_name=model_name,
+                problem_type=problem_type,
+                metrics=metrics,
+                params=params,
+                tags=tags,
+                status=run.info.status,
+                created_at=str(run.info.start_time),
+            )
+        except Exception as exc:
+            logger.warning("failed_to_fetch_mlflow_run", run_id=run_id, error=str(exc))
+            return None
+
+    async def get_metric_history(self, run_id: str, metric_name: str) -> ModelMetricHistory:
+        """Fetch historical steps/epochs for a specific metric in MLflow."""
+        loop = asyncio.get_event_loop()
+        try:
+            history = await loop.run_in_executor(
+                None, self._mlflow_client.get_metric_history, run_id, metric_name
+            )
+            points = [
+                MetricPoint(step=m.step, value=float(m.value), timestamp=m.timestamp)
+                for m in history
+            ]
+            return ModelMetricHistory(run_id=run_id, metric_name=metric_name, history=points)
+        except Exception as exc:
+            logger.warning("failed_to_fetch_metric_history", run_id=run_id, metric=metric_name, error=str(exc))
+            return ModelMetricHistory(run_id=run_id, metric_name=metric_name, history=[])
+
+    async def list_model_summaries(self, experiment_id: Optional[str] = None) -> list[ModelEvaluationSummary]:
+        """List all runs across MLflow experiments with their metrics and parameters."""
+        loop = asyncio.get_event_loop()
+        try:
+            experiments = await loop.run_in_executor(None, self._mlflow_client.search_experiments)
+            exp_ids = [e.experiment_id for e in experiments] if not experiment_id else [experiment_id]
+            
+            if not exp_ids:
+                return []
+                
+            runs = await loop.run_in_executor(
+                None, lambda: self._mlflow_client.search_runs(experiment_ids=exp_ids, max_results=50)
+            )
+            summaries = []
+            for r in runs:
+                data = r.data
+                metrics = {k: float(v) for k, v in data.metrics.items()}
+                params = {k: str(v) for k, v in data.params.items()}
+                tags = {k: str(v) for k, v in data.tags.items()}
+                model_name = tags.get("mlflow.runName") or tags.get("model_name") or f"Model-{r.info.run_id[:8]}"
+                problem_type = tags.get("problem_type") or ("regression" if "rmse" in metrics or "r2" in metrics else "classification")
+
+                summaries.append(
+                    ModelEvaluationSummary(
+                        run_id=r.info.run_id,
+                        model_name=model_name,
+                        problem_type=problem_type,
+                        metrics=metrics,
+                        params=params,
+                        tags=tags,
+                        status=r.info.status,
+                        created_at=str(r.info.start_time),
+                    )
+                )
+            return summaries
+        except Exception as exc:
+            logger.warning("failed_to_search_mlflow_runs", error=str(exc))
+            return []
 
     # ── Background evaluation ──────────────────────────────────────────────
 
