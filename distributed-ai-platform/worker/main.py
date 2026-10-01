@@ -12,6 +12,7 @@ from agent.resource_detector import detect_resources, get_available_resources
 from agent.heartbeat import send_heartbeats
 from communication.client import ControlPlaneClient
 from approval_ui.popup import ResourceApprovalUI
+from shared.common.auth import create_internal_token
 
 logger = structlog.get_logger(__name__)
 
@@ -32,6 +33,18 @@ class WorkerAgent:
         self.stop_event = asyncio.Event()
         self.approval_ui = ResourceApprovalUI()
 
+    def _auth_headers(self) -> dict:
+        """Authorization header for control-plane calls.
+
+        The old code sent the static WORKER_TOKEN as a Bearer token, which the
+        services then tried to decode as a JWT and rejected with 401. We now
+        mint a short-lived JWT signed with the shared secret (matching the
+        server-side validator). WORKER_TOKEN is retained only as a fallback
+        identity/subject for the minted token.
+        """
+        subject = self.token or self.worker_name
+        return {"Authorization": f"Bearer {create_internal_token(subject)}"}
+
     async def register(self) -> None:
         """Register this worker with the registry."""
         resources = detect_resources()
@@ -49,7 +62,7 @@ class WorkerAgent:
             "require_approval": self.require_approval,
         }
         
-        headers = {"Authorization": f"Bearer {self.token}"}
+        headers = self._auth_headers()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{self.worker_registry_url}/api/v1/workers/register",
@@ -113,7 +126,7 @@ class WorkerAgent:
                 "gpu_approved": gpu_requested and self.allow_gpu,
             }
         
-        headers = {"Authorization": f"Bearer {self.token}"}
+        headers = self._auth_headers()
         async with httpx.AsyncClient(timeout=10.0) as client:
             if approval:
                 # Send approval
@@ -138,7 +151,7 @@ class WorkerAgent:
         # Release resources if any allocated
         request_id = message.get("resource_request_id")
         if request_id:
-            headers = {"Authorization": f"Bearer {self.token}"}
+            headers = self._auth_headers()
             async with httpx.AsyncClient(timeout=10.0) as client:
                 await client.post(
                     f"{self.resource_manager_url}/api/v1/resources/requests/{request_id}/release",
@@ -157,16 +170,16 @@ class WorkerAgent:
         ws_client = ControlPlaneClient(
             websocket_url=ws_url,
             worker_id=self.worker_id,
-            token=self.token,
+            token_provider=lambda: create_internal_token(self.token or self.worker_name),
             message_handler=self.handle_message,
         )
-        
+
         # Run heartbeats and WebSocket connection concurrently
         await asyncio.gather(
             send_heartbeats(
                 worker_id=self.worker_id,
                 registry_url=self.worker_registry_url,
-                token=self.token,
+                token_provider=lambda: create_internal_token(self.token or self.worker_name),
                 stop_event=self.stop_event,
             ),
             ws_client.connect_and_listen(self.stop_event),

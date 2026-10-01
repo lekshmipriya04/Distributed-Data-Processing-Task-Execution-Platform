@@ -17,12 +17,12 @@ class ControlPlaneClient:
         self,
         websocket_url: str,
         worker_id: UUID,
-        token: str,
+        token_provider: Callable[[], str],
         message_handler: Callable[[dict], Awaitable[None]],
     ):
         self._url = websocket_url
         self._worker_id = worker_id
-        self._token = token
+        self._token_provider = token_provider
         self._message_handler = message_handler
         self._reconnect_delay = 5  # seconds
         self._max_reconnect_delay = 60
@@ -30,10 +30,11 @@ class ControlPlaneClient:
     async def connect_and_listen(self, stop_event: asyncio.Event) -> None:
         """Maintain persistent WebSocket connection with auto-reconnect."""
         delay = self._reconnect_delay
-        
+
         while not stop_event.is_set():
             try:
-                headers = {"Authorization": f"Bearer {self._token}"}
+                # Mint a fresh token per (re)connect so it is never expired.
+                headers = {"Authorization": f"Bearer {self._token_provider()}"}
                 async with websockets.connect(
                     f"{self._url}/ws/workers/{self._worker_id}",
                     extra_headers=headers,

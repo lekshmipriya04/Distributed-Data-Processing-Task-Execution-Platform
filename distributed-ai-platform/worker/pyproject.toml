@@ -12,4 +12,6 @@ dependencies = [
     "psutil==5.9.8",
     "structlog==24.2.0",
     "pydantic==2.8.2",
+    "pydantic-settings==2.3.4",
+    "pyjwt==2.8.0",
 ]

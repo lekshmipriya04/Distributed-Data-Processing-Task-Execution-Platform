@@ -1,12 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ssh-executor"
 version = "0.1.0"
-description = "Agentless SSH executor service"
+description = "Master-driven SSH resource sharing + parallel task execution"
+requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.109.2",
-    "uvicorn>=0.27.1",
-    "pydantic>=2.6.1",
-    "pydantic-settings>=2.1.0",
-    "structlog>=24.1.0",
+    "fastapi==0.111.1",
+    "uvicorn[standard]==0.30.1",
+    "sqlalchemy[asyncio]==2.0.31",
+    "asyncpg==0.29.0",
+    "pydantic==2.8.2",
+    "pydantic-settings==2.3.4",
+    "structlog==24.2.0",
+    "prometheus-client==0.20.0",
+    "httpx==0.27.0",
+    "pyjwt==2.8.0",
     "paramiko>=3.4.0",
+    "cryptography>=42.0.0",
 ]

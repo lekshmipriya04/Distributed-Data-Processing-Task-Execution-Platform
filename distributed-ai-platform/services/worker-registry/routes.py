@@ -18,8 +18,7 @@ router = APIRouter()
 
 
 async def get_db_session() -> AsyncSession:
-    settings = get_worker_registry_settings()
-    db_manager = get_db_manager(settings)
+    db_manager = get_db_manager()
     async with db_manager.session() as session:
         yield session
 

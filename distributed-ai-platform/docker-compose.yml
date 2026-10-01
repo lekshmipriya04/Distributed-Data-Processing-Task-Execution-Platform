@@ -97,6 +97,11 @@ services:
   datanode-1:
     image: apache/hadoop:3
     container_name: datanode-1
+    # Data dir is a named volume owned by root; the datanode enforces
+    # dfs.datanode.data.dir.perm (700) via chmod on startup, which the image's
+    # non-root `hadoop` user cannot do on a root-owned mount (EPERM -> volume
+    # marked failed -> datanode exits). Running as root lets the chmod succeed.
+    user: root
     command: ["hdfs", "datanode"]
     depends_on:
       namenode:
@@ -113,6 +118,7 @@ services:
   datanode-2:
     image: apache/hadoop:3
     container_name: datanode-2
+    user: root
     command: ["hdfs", "datanode"]
     depends_on:
       namenode:
@@ -129,6 +135,7 @@ services:
   datanode-3:
     image: apache/hadoop:3
     container_name: datanode-3
+    user: root
     command: ["hdfs", "datanode"]
     depends_on:
       namenode:
@@ -213,9 +220,11 @@ services:
       LIVY_SPARK_MASTER: spark://spark-master:7077
       LIVY_SPARK_DEPLOY_MODE: client
     volumes:
-      - ./services/preprocessing-service/app/jobs:/opt/spark/jobs/preprocessing
-      - ./services/training-service/app/jobs:/opt/spark/jobs/training
-      - ./services/streaming-service/app/jobs:/opt/spark/jobs/streaming
+      # The Spark job scripts live at each service's root, not under app/jobs.
+      # Livy runs them from these paths (see the "file": "local:/opt/spark/jobs/..."
+      # references in preprocessing_service.py / training_service.py).
+      - ./services/preprocessing-service/spark_preprocessing_job.py:/opt/spark/jobs/preprocessing/spark_preprocessing_job.py
+      - ./services/training-service/spark_training_job.py:/opt/spark/jobs/training/spark_training_job.py
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8998/sessions"]
       interval: 15s
@@ -237,7 +246,7 @@ services:
       - |
         pip install --quiet psycopg2-binary &&
         mlflow server \
-        --backend-store-uri postgresql://platform:platform_secret@postgres:5432/platform_db \
+        --backend-store-uri postgresql://platform:platform_secret@postgres:5432/mlflow_db \
         --default-artifact-root /mlflow-artifacts \
         --host 0.0.0.0
     volumes:
@@ -465,8 +474,36 @@ services:
     container_name: ssh-executor
     env_file:
       - config/.env
+    environment:
+      # At-rest encryption key for stored SSH credentials (see crypto.py).
+      # Override in config/.env for anything beyond local development.
+      - SSH_CRED_KEY=${SSH_CRED_KEY:-change_me_ssh_cred_key}
     ports:
       - "8011:8011"
+    networks:
+      - platform-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Throwaway provider node for local end-to-end testing of SSH resource
+  # sharing: runs only sshd + python3, exactly the "provider runs nothing but
+  # sshd" model. Login: provider / providerpass. NOT for production use.
+  ssh-provider:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: ssh-provider
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - USER_NAME=provider
+      - USER_PASSWORD=providerpass
+      - PASSWORD_ACCESS=true
+      - SUDO_ACCESS=false
+      # Install python3 + coreutils (nice/taskset/timeout) at startup so the
+      # master can run tasks and pin them to the allocated cores.
+      - DOCKER_MODS=linuxserver/mods:universal-package-install
+      - INSTALL_PACKAGES=python3|coreutils|util-linux
     networks:
       - platform-net
 
@@ -475,11 +512,17 @@ services:
       context: .
       dockerfile: worker/Dockerfile
     container_name: worker-node-1
+    # Share the same env file as the services so the worker signs its JWTs with
+    # the identical JWT_SECRET the services validate against (otherwise the
+    # worker's register/heartbeat calls would 401).
+    env_file:
+      - config/.env
     environment:
       - CONTROL_PLANE_URL=http://api-gateway:8000
       - WORKER_REGISTRY_URL=http://worker-registry:8008
       - RESOURCE_MANAGER_URL=http://resource-manager:8009
-      - WORKER_TOKEN=$${INTERNAL_SERVICE_TOKEN:-internal-token-change-me}
+      # Subject label for the worker's minted JWT (identity only, not a secret).
+      - WORKER_TOKEN=simulated-worker-1
       - WORKER_NAME=simulated-worker-1
       - MAX_CPU=4
       - MAX_MEMORY_GB=8.0

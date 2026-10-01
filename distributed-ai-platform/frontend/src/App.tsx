@@ -10,7 +10,8 @@ import { WorkersPage } from './pages/WorkersPage';
 import { ResourceRequestsPage } from './pages/ResourceRequestsPage';
 import { ModelDashboardPage } from './pages/ModelDashboardPage';
 import { SSHExecutorPage } from './pages/SSHExecutorPage';
-import { Server, ClipboardList, BarChart2, Terminal } from 'lucide-react';
+import { SettingsPage } from './pages/SettingsPage';
+import { Server, ClipboardList, BarChart2, Terminal, Settings } from 'lucide-react';
 
 function Dashboard() {
   const [metrics, setMetrics] = useState({
@@ -56,6 +57,8 @@ function Layout() {
       ? 'Resource Requests'
       : currentPath === '/ssh'
       ? 'SSH Executor'
+      : currentPath === '/settings'
+      ? 'Settings'
       : currentPath.substring(1).charAt(0).toUpperCase() + currentPath.substring(2);
 
   return (
@@ -78,6 +81,7 @@ function Layout() {
           <NavItem to="/workers" icon={<Server size={20} />} label="Workers" active={currentPath === '/workers'} />
           <NavItem to="/resources" icon={<ClipboardList size={20} />} label="Resource Requests" active={currentPath === '/resources'} />
           <NavItem to="/ssh" icon={<Terminal size={20} />} label="SSH Executor" active={currentPath === '/ssh'} />
+          <NavItem to="/settings" icon={<Settings size={20} />} label="Settings" active={currentPath === '/settings'} />
         </nav>
       </div>
 
@@ -106,6 +110,7 @@ function Layout() {
             <Route path="/workers" element={<WorkersPage />} />
             <Route path="/resources" element={<ResourceRequestsPage />} />
             <Route path="/ssh" element={<SSHExecutorPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>
       </div>

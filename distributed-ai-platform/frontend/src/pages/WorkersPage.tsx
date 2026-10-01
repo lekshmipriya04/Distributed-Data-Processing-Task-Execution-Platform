@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Server, Cpu, HardDrive, Activity, RefreshCw, Radio, CheckCircle, ShieldCheck } from 'lucide-react';
+import { Server, Cpu, HardDrive, Activity, RefreshCw, Radio, ShieldCheck } from 'lucide-react';
 import { Card, SectionTitle, StatusBadge, SecondaryButton } from '../components/common/Primitives';
 
 interface Worker {

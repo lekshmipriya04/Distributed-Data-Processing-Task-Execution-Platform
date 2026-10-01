@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import { Card, SectionTitle } from '../common/Primitives';
 import type { AlgorithmValue, HyperparameterGrid, ProblemType } from '../../types';

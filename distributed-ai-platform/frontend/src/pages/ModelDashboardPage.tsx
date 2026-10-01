@@ -1,24 +1,18 @@
 import { useState, useEffect } from 'react';
 import {
   BarChart2,
-  TrendingUp,
-  Award,
   Layers,
   Sliders,
-  CheckCircle2,
-  Clock,
   RefreshCw,
   Search,
-  ArrowRight,
-  ChevronRight,
   GitCompare,
   Zap,
 } from 'lucide-react';
-import { listModels, getModelMetricHistory } from '../api/evaluation';
-import { registerModel, promoteModel } from '../api/registry';
+import { listModels } from '../api/evaluation';
+import { promoteModel } from '../api/registry';
 import { useToast } from '../context/ToastContext';
 import { Card, SectionTitle, PrimaryButton, SecondaryButton, StatusBadge, ConfirmDialog } from '../components/common/Primitives';
-import type { ModelEvaluationSummary, ModelMetricHistory, ProblemType } from '../types';
+import type { ModelEvaluationSummary } from '../types';
 
 // Sample fallback models if backend MLflow is starting fresh
 const SAMPLE_MODELS: ModelEvaluationSummary[] = [

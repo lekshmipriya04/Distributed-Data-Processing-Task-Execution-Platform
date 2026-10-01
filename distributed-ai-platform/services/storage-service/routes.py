@@ -1,5 +1,6 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from schemas import DatasetResponse, DatasetListResponse
@@ -8,12 +9,12 @@ from hdfs_service import HDFSService
 from config import get_storage_settings, StorageSettings
 from database import get_db_manager
 from shared.common.auth import get_current_user
+from shared.common.exceptions import ValidationError
 
 router = APIRouter()
 
 async def get_db_session() -> AsyncSession:
-    settings = get_storage_settings()
-    db_manager = get_db_manager(settings)
+    db_manager = get_db_manager()
     async with db_manager.session() as session:
         yield session
 
@@ -48,6 +49,30 @@ async def get_dataset(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     return dataset
+
+@router.get("/datasets/{dataset_id}/download")
+async def download_dataset(
+    dataset_id: UUID,
+    user: dict = Depends(get_current_user),
+    service: DatasetService = Depends(get_dataset_service)
+):
+    """Stream the raw dataset file back from HDFS.
+
+    Consumed by the evaluation-service (and any client that needs the raw
+    bytes). Returns the file with a content type matching its stored format.
+    """
+    try:
+        content, file_format = await service.download_dataset(dataset_id)
+    except ValidationError:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    media_type = "text/csv" if file_format == "csv" else "application/octet-stream"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{dataset_id}.{file_format}"'},
+    )
+
 
 @router.get("/datasets", response_model=DatasetListResponse)
 async def list_datasets(

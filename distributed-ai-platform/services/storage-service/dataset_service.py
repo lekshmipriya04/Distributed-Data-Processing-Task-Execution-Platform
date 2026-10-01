@@ -76,6 +76,18 @@ class DatasetService:
         result = await self._db.execute(select(Dataset).where(Dataset.id == dataset_id))
         return result.scalar_one_or_none()
 
+    async def download_dataset(self, dataset_id: uuid.UUID) -> tuple[bytes, str]:
+        """Fetch the raw file bytes for a dataset from HDFS.
+
+        Returns (content, file_format). Raises ValidationError if the dataset
+        does not exist so the route can translate it into a 404.
+        """
+        dataset = await self.get_dataset(dataset_id)
+        if dataset is None:
+            raise ValidationError("Dataset not found")
+        content = await self._hdfs.download_file(dataset.hdfs_path)
+        return content, dataset.file_format
+
     async def list_datasets(self, skip: int = 0, limit: int = 100) -> tuple[list[Dataset], int]:
         total = await self._db.scalar(select(func.count()).select_from(Dataset))
         if total is None:

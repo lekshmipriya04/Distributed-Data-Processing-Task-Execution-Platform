@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { CheckCircle, XCircle, AlertCircle, RefreshCw } from 'lucide-react';
+import { CheckCircle, XCircle, AlertCircle } from 'lucide-react';
 import { Card, SectionTitle, PrimaryButton, SecondaryButton } from '../components/common/Primitives';
 import { useToast } from '../context/ToastContext';
 
@@ -66,7 +66,7 @@ export function ResourceRequestsPage() {
 
   const handleApprove = async (requestId: string, values: { cpu: number; memory: number; gpu: boolean }) => {
     try {
-      await fetch(`/api/v1/resources/requests/${requestId}/approve`, {
+      const res = await fetch(`/api/v1/resources/requests/${requestId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -75,26 +75,32 @@ export function ResourceRequestsPage() {
           gpu_approved: values.gpu,
         }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || data.message || `Approve failed (${res.status})`);
+      }
       showSuccess(`Approved allocation for ${requestId} (${values.cpu} cores, ${values.memory} GB RAM)`);
       setRequests((prev) => prev.filter((r) => r.id !== requestId));
     } catch (err: any) {
-      showSuccess(`Approved allocation for ${requestId} (${values.cpu} cores, ${values.memory} GB RAM)`);
-      setRequests((prev) => prev.filter((r) => r.id !== requestId));
+      showError(err.message || `Failed to approve ${requestId}`);
     }
   };
 
   const handleReject = async (requestId: string) => {
     try {
-      await fetch(`/api/v1/resources/requests/${requestId}/reject`, {
+      const res = await fetch(`/api/v1/resources/requests/${requestId}/reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Owner declined via dashboard' }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || data.message || `Reject failed (${res.status})`);
+      }
       showError(`Rejected resource request ${requestId}`);
       setRequests((prev) => prev.filter((r) => r.id !== requestId));
     } catch (err: any) {
-      showError(`Rejected resource request ${requestId}`);
-      setRequests((prev) => prev.filter((r) => r.id !== requestId));
+      showError(err.message || `Failed to reject ${requestId}`);
     }
   };
 

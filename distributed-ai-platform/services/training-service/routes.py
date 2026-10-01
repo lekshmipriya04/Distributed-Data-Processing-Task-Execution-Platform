@@ -11,8 +11,7 @@ from shared.common.auth import get_current_user
 router = APIRouter()
 
 async def get_db_session() -> AsyncSession:
-    settings = get_training_settings()
-    db_manager = get_db_manager(settings)
+    db_manager = get_db_manager()
     async with db_manager.session() as session:
         yield session
 

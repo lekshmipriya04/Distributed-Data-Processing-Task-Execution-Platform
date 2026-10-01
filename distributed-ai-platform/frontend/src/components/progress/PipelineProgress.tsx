@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 import { CheckCircle2, Loader2, XCircle, Circle } from 'lucide-react';
 import { useJobPolling } from '../../hooks/useJobPolling';
 import { getPreprocessingJob } from '../../api/preprocessing';
@@ -29,9 +29,11 @@ export function PipelineProgress({ preprocessingJobId, trainingJobId, onTraining
   }, [trainingJobId]);
   const { data: training, error: trainErr } = useJobPolling(fetchTraining, !!trainingJobId);
 
-  if (training?.status === 'succeeded' && training.mlflow_run_id) {
-    onTrainingReady(training.mlflow_run_id);
-  }
+  useEffect(() => {
+    if (training?.status === 'succeeded' && training.mlflow_run_id) {
+      onTrainingReady(training.mlflow_run_id);
+    }
+  }, [training, onTrainingReady]);
 
   const trainingStepStatus: JobStatus | 'waiting' = trainingJobId ? (training?.status ?? 'pending') : 'waiting';
 

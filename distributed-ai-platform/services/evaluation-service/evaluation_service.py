@@ -253,10 +253,12 @@ class EvaluationService:
         # 6. Compute metrics based on problem type
         problem_type = getattr(request, "problem_type", "classification")
         if problem_type == "regression":
+            # sklearn >= 1.6 removed the `squared=` kwarg; derive RMSE from MSE.
+            mse = float(mean_squared_error(y_true, y_pred))
             metrics: dict[str, Any] = {
                 "r2": float(r2_score(y_true, y_pred)),
-                "rmse": float(mean_squared_error(y_true, y_pred, squared=False)),
-                "mse": float(mean_squared_error(y_true, y_pred)),
+                "rmse": mse ** 0.5,
+                "mse": mse,
             }
         else:
             # classification (default)

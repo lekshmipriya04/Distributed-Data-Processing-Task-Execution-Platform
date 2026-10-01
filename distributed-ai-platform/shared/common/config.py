@@ -54,6 +54,25 @@ class BaseServiceSettings(BaseSettings):
     jwt_algorithm: str = Field(default="HS256")
     jwt_expire_minutes: int = Field(default=60, ge=1)
 
+    # Browser origins allowed to call the APIs. Locked to the local frontend
+    # dev origins by default; override via CORS_ORIGINS in production. A wildcard
+    # is never a safe default for credentialed, auth-bearing endpoints.
+    cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://localhost:8000",
+        ]
+    )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _split_cors_origins(cls, v):
+        # Allow a comma-separated string from the environment.
+        if isinstance(v, str):
+            return [o.strip() for o in v.split(",") if o.strip()]
+        return v
+
     # ── Observability ─────────────────────────
     log_level: str = Field(default="INFO")
     metrics_enabled: bool = Field(default=True)
@@ -61,6 +80,10 @@ class BaseServiceSettings(BaseSettings):
 
     # ── HDFS ─────────────────────────────────
     hdfs_url: str = Field(default="hdfs://namenode:9000")
+    # WebHDFS REST endpoint (namenode HTTP port) used by the storage service to
+    # upload/read files over the two-step CREATE protocol.
+    hdfs_webhdfs_url: str = Field(default="http://namenode:9870")
+    hdfs_user: str = Field(default="hadoop")
     hdfs_base_path: str = Field(default="/platform")
 
     # ── MLflow ───────────────────────────────

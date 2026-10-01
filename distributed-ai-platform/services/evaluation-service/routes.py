@@ -22,7 +22,7 @@ router = APIRouter()
 # EvaluationService now owns session lifecycle for background tasks.
 def get_evaluation_service() -> EvaluationService:
     settings = get_evaluation_settings()
-    db_manager = get_db_manager(settings)
+    db_manager = get_db_manager()
     return EvaluationService(db_manager, settings)
 
 

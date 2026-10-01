@@ -9,6 +9,7 @@ import structlog
 from typing import Optional
 
 from config import SchedulerSettings
+from shared.common.auth import create_internal_token
 
 logger = structlog.get_logger(__name__)
 
@@ -136,8 +137,9 @@ class SchedulerService:
             "memory_requested_gb": memory_requested_gb,
             "gpu_requested": gpu_requested,
         }
-        # Use service token for internal calls
-        headers = {"Authorization": f"Bearer {self._settings.internal_service_token}"}
+        # Internal call: mint a real JWT signed with the shared secret so the
+        # resource-manager accepts it (a static secret is not a valid JWT).
+        headers = {"Authorization": f"Bearer {create_internal_token('scheduler-service')}"}
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 f"{self._settings.resource_manager_url}/api/v1/resources/requests",

@@ -42,3 +42,23 @@ class HDFSService:
             except Exception as e:
                 logger.error("hdfs_upload_error", error=str(e), path=hdfs_path)
                 raise StorageError(f"Failed to upload file to HDFS: {e}")
+
+    async def download_file(self, hdfs_path: str) -> bytes:
+        """
+        Reads a file back from HDFS using the WebHDFS OPEN operation.
+
+        WebHDFS answers the namenode request with a 307 redirect to the
+        datanode that actually holds the block; httpx follows that redirect
+        automatically, so the final response body is the file content.
+        """
+        url = f"{self.webhdfs_url}/webhdfs/v1{hdfs_path}?op=OPEN&user.name={self.user}"
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                logger.info("file_downloaded_from_hdfs", path=hdfs_path)
+                return response.content
+            except Exception as e:
+                logger.error("hdfs_download_error", error=str(e), path=hdfs_path)
+                raise StorageError(f"Failed to download file from HDFS: {e}")
