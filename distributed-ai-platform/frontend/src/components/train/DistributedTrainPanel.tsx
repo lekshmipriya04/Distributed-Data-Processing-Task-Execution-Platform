@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Cpu, Server, Loader2, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
+import { Cpu, Server, Loader2, CheckCircle2, XCircle, AlertTriangle, Download, Plus } from 'lucide-react';
 import { DataUpload, QuickSplitConfig } from '../data/DataUpload';
 import { ClusterConfigForm } from '../cluster/ClusterConfigForm';
-import { Card, SectionTitle, PrimaryButton } from '../common/Primitives';
+import { Card, SectionTitle, PrimaryButton, SecondaryButton } from '../common/Primitives';
 import { useClusterConfig } from '../../context/ClusterConfigContext';
 import { useToast } from '../../context/ToastContext';
 import { sshApi } from '../../api/ssh';
@@ -41,10 +41,22 @@ export function DistributedTrainPanel() {
   const [nodes, setNodes] = useState<NodeResponse[]>([]);
   const [run, setRun] = useState<TrainRunResponse | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
-    sshApi.listNodes().then((r) => setNodes(r.items)).catch(() => {});
+    sshApi.listNodes()
+      .then((nodeResponse) => setNodes(nodeResponse.items))
+      .catch(() => {});
+    sshApi.listTrainingRuns()
+      .then((runs) => {
+        const latest = runs[0];
+        if (latest) {
+          setRun(latest);
+          if (latest.status !== 'completed' && latest.status !== 'failed') poll(latest.id);
+        }
+      })
+      .catch(() => {});
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
@@ -59,6 +71,7 @@ export function DistributedTrainPanel() {
     quickSplit.numericFeatures.length > 0 &&
     !!quickSplit.targetColumn &&
     (!isMulti || onlineNodes.length > 0) &&
+    (!run || run.status === 'failed') &&
     !submitting;
 
   const poll = (id: string) => {
@@ -99,6 +112,20 @@ export function DistributedTrainPanel() {
       setSubmitting(false);
     }
   };
+
+  const resetForNewTraining = () => setRun(null);
+  const handleDownloadModel = async () => {
+    if (!run) return;
+    setDownloading(true);
+    try {
+      await sshApi.downloadTrainingModel(run.id);
+    } catch (e: any) {
+      showError(e.message ?? 'Failed to download model');
+    } finally {
+      setDownloading(false);
+    }
+  };
+  const activeRun = run && run.status !== 'completed' && run.status !== 'failed';
 
   return (
     <div className="w-full max-w-4xl mx-auto space-y-6">
@@ -189,6 +216,17 @@ export function DistributedTrainPanel() {
 
       {run && <TrainingResult run={run} nodes={nodes} />}
 
+      {run?.status === 'completed' && (
+        <div className="flex justify-end gap-2">
+          <SecondaryButton onClick={handleDownloadModel} disabled={downloading}>
+            <Download size={16} /> {downloading ? 'Preparing…' : 'Download model'}
+          </SecondaryButton>
+          <SecondaryButton onClick={resetForNewTraining}>
+            <Plus size={16} /> New training
+          </SecondaryButton>
+        </div>
+      )}
+
       <Card>
         <div className="flex items-center justify-between">
           <div className="text-sm text-slate-600 font-medium">
@@ -200,9 +238,11 @@ export function DistributedTrainPanel() {
             )}
             {canSubmit && <span className="text-emerald-600 font-semibold">Ready to train.</span>}
           </div>
-          <PrimaryButton onClick={handleTrain} disabled={!canSubmit}>
-            {submitting ? 'Starting…' : 'Start Distributed Training'}
-          </PrimaryButton>
+          {!activeRun && (
+            <PrimaryButton onClick={handleTrain} disabled={!canSubmit}>
+              {submitting ? 'Starting…' : 'Start Distributed Training'}
+            </PrimaryButton>
+          )}
         </div>
       </Card>
     </div>

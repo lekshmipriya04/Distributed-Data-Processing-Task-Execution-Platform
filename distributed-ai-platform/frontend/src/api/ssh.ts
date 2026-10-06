@@ -5,7 +5,7 @@
 // endpoint requires auth. Credentials are only ever sent on connect/register
 // requests and are never returned by the API.
 // ---------------------------------------------------------------------------
-import { apiRequest } from './client';
+import { apiRequest, getAuthHeaders } from './client';
 
 export type AuthType = 'password' | 'private_key';
 
@@ -151,4 +151,27 @@ export const sshApi = {
 
   getTrainingRun: (id: string) =>
     apiRequest<TrainRunResponse>(`/api/v1/ssh/train/${id}`),
+
+  listTrainingRuns: () =>
+    apiRequest<TrainRunResponse[]>('/api/v1/ssh/train'),
+
+  downloadTrainingModel: async (id: string) => {
+    const response = await fetch(`/api/v1/ssh/train/${id}/model`, {
+      headers: getAuthHeaders(),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || 'Failed to download model');
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `model-${id}.onnx`;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
 };

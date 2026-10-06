@@ -1,35 +1,33 @@
-import { useState } from 'react';
-import { Plus, Trash2, Cpu, Server } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Trash2, Cpu, Server } from 'lucide-react';
 import { useClusterConfig } from '../../context/ClusterConfigContext';
-import { Card, SectionTitle, PrimaryButton } from '../common/Primitives';
-import type { ClusterNode } from '../../types';
-
-const IP_REGEX = /^(\d{1,3}\.){3}\d{1,3}$/;
+import { Card, SectionTitle } from '../common/Primitives';
+import { sshApi } from '../../api/ssh';
+import type { NodeResponse } from '../../api/ssh';
 
 export function ClusterConfigForm() {
   const { config, setConfig } = useClusterConfig();
-  const [newIp, setNewIp] = useState('');
-  const [newCores, setNewCores] = useState(4);
-  const [ipError, setIpError] = useState<string | null>(null);
+  const [registeredNodes, setRegisteredNodes] = useState<NodeResponse[]>([]);
 
-  const addNode = () => {
-    if (!IP_REGEX.test(newIp)) {
-      setIpError('Enter a valid IPv4 address, e.g. 192.168.1.10');
-      return;
-    }
-    if (config.nodes.some((n) => n.ip === newIp)) {
-      setIpError('That IP is already added.');
-      return;
-    }
-    const node: ClusterNode = { id: `${Date.now()}`, ip: newIp, cores: newCores };
-    setConfig({ ...config, nodes: [...config.nodes, node] });
-    setNewIp('');
-    setNewCores(4);
-    setIpError(null);
-  };
+  useEffect(() => {
+    sshApi.listNodes()
+      .then((response) => setRegisteredNodes(response.items))
+      .catch(() => setRegisteredNodes([]));
+  }, []);
 
   const removeNode = (id: string) => {
     setConfig({ ...config, nodes: config.nodes.filter((n) => n.id !== id) });
+  };
+
+  const toggleRegisteredNode = (node: NodeResponse) => {
+    const selected = config.nodes.some((selectedNode) => selectedNode.id === node.id);
+    const nodes = selected
+      ? config.nodes.filter((selectedNode) => selectedNode.id !== node.id)
+      : [
+          ...config.nodes,
+          { id: node.id, ip: node.host, cores: Math.max(1, node.allocated_cpu) },
+        ];
+    setConfig({ ...config, nodes });
   };
 
   const totalCores =
@@ -82,6 +80,46 @@ export function ClusterConfigForm() {
         <div>
           <label className="text-sm font-medium text-slate-700 mb-2 block">Devices in this cluster</label>
 
+          <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-3 mb-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-blue-900">Registered SSH providers</span>
+              <span className="text-xs text-blue-700">Select devices to use</span>
+            </div>
+            {registeredNodes.length === 0 ? (
+              <p className="text-xs text-blue-800">
+                No registered providers found. Add a provider in SSH Executor first.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {registeredNodes.map((node) => {
+                  const selected = config.nodes.some((selectedNode) => selectedNode.id === node.id);
+                  const online = node.status === 'online';
+                  return (
+                    <button
+                      key={node.id}
+                      type="button"
+                      onClick={() => toggleRegisteredNode(node)}
+                      className={`w-full flex items-center gap-3 text-left rounded-lg border px-3 py-2 transition-colors ${
+                        selected
+                          ? 'border-blue-500 bg-white text-blue-900'
+                          : 'border-blue-100 bg-white/70 text-slate-700 hover:border-blue-300'
+                      }`}
+                    >
+                      <Server size={15} className={selected ? 'text-blue-600' : 'text-slate-400'} />
+                      <span className="font-medium text-sm">{node.name}</span>
+                      <span className="font-mono text-xs text-slate-500">{node.host}:{node.port}</span>
+                      <span className="ml-auto text-xs text-slate-500">{node.allocated_cpu} cores</span>
+                      <span className={`text-xs font-medium ${online ? 'text-emerald-600' : 'text-rose-600'}`}>
+                        {online ? 'online' : node.status}
+                      </span>
+                      <span className="text-xs font-semibold text-blue-700">{selected ? 'Selected' : 'Select'}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           <div className="space-y-2 mb-4">
             {config.nodes.map((node) => (
               <div
@@ -101,34 +139,6 @@ export function ClusterConfigForm() {
             )}
           </div>
 
-          <div className="flex gap-2 items-start">
-            <div className="flex-1">
-              <input
-                placeholder="IP address, e.g. 192.168.1.10"
-                value={newIp}
-                onChange={(e) => {
-                  setNewIp(e.target.value);
-                  setIpError(null);
-                }}
-                className="w-full bg-white rounded-lg px-3 py-2 text-slate-900 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm"
-              />
-              {ipError && <p className="text-rose-600 text-xs mt-1">{ipError}</p>}
-            </div>
-            <input
-              type="number"
-              min={1}
-              max={64}
-              value={newCores}
-              onChange={(e) => setNewCores(Number(e.target.value))}
-              className="w-24 bg-white rounded-lg px-3 py-2 text-slate-900 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm"
-              title="cores on this device"
-            />
-            <PrimaryButton onClick={addNode}>
-              <span className="flex items-center gap-1">
-                <Plus size={16} /> Add
-              </span>
-            </PrimaryButton>
-          </div>
         </div>
       )}
 

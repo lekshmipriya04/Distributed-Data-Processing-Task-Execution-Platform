@@ -26,6 +26,11 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+export function getAuthHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export class ApiError extends Error {
   status: number;
   detail?: unknown;

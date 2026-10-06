@@ -14,7 +14,8 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy import select
+from fastapi.responses import Response
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from batch_service import BatchService
@@ -22,6 +23,7 @@ from database import get_db_manager
 from dispatcher import dispatch_batch
 from models import TrainingRun
 from node_service import NodeService
+from onnx_export import build_onnx_model
 from schemas import (
     BatchCreateRequest,
     BatchResponse,
@@ -243,6 +245,21 @@ async def start_training(
     return _train_run_response(run)
 
 
+@router.get("/train", response_model=list[TrainRunResponse])
+async def list_training_runs(
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Return the owner's recent training runs for UI rehydration."""
+    result = await session.execute(
+        select(TrainingRun)
+        .where(TrainingRun.owner_id == user.get("sub"))
+        .order_by(desc(TrainingRun.created_at))
+        .limit(20)
+    )
+    return [_train_run_response(run) for run in result.scalars().all()]
+
+
 @router.get("/train/{run_id}", response_model=TrainRunResponse)
 async def get_training_run(
     run_id: UUID,
@@ -259,3 +276,33 @@ async def get_training_run(
     if not run:
         raise HTTPException(status_code=404, detail="Training run not found")
     return _train_run_response(run)
+
+
+@router.get("/train/{run_id}/model")
+async def download_training_model(
+    run_id: UUID,
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Download a completed SSH model as a portable ONNX artifact."""
+    run = (
+        await session.execute(
+            select(TrainingRun).where(
+                TrainingRun.id == run_id, TrainingRun.owner_id == user.get("sub")
+            )
+        )
+    ).scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Training run not found")
+    if run.status != "completed" or not run.weights_json:
+        raise HTTPException(status_code=409, detail="Model is not available until training completes")
+
+    try:
+        model_bytes = build_onnx_model(run.model_type, run.weights_json)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not export model: {exc}") from exc
+    return Response(
+        content=model_bytes,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="model-{run.id}.onnx"'},
+    )

@@ -20,4 +20,5 @@ dependencies = [
     "pyjwt==2.8.0",
     "paramiko>=3.4.0",
     "cryptography>=42.0.0",
+    "onnx==1.16.1",
 ]

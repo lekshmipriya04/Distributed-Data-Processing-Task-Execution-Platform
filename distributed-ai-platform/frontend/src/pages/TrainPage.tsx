@@ -29,7 +29,9 @@ export function TrainPage() {
   const { config: clusterConfig } = useClusterConfig();
   const { showError } = useToast();
 
-  const [engine, setEngine] = useState<Engine>('spark');
+  const [engine, setEngine] = useState<Engine>(() =>
+    (localStorage.getItem('training-engine') as Engine | null) ?? 'spark'
+  );
   const [step, setStep] = useState<WizardStep>('configure');
 
   // data selection
@@ -124,7 +126,10 @@ export function TrainPage() {
         <div className="text-sm font-semibold text-slate-700 mb-3">Training engine</div>
         <div className="flex gap-3">
           <button
-            onClick={() => setEngine('spark')}
+            onClick={() => {
+              setEngine('spark');
+              localStorage.setItem('training-engine', 'spark');
+            }}
             className={`flex-1 flex items-center gap-2 justify-center px-4 py-3 rounded-xl border text-sm font-medium transition-all ${
               engine === 'spark'
                 ? 'bg-blue-50 border-blue-500 text-blue-700 shadow-xs'
@@ -135,7 +140,10 @@ export function TrainPage() {
             Spark pipeline (existing)
           </button>
           <button
-            onClick={() => setEngine('ssh')}
+            onClick={() => {
+              setEngine('ssh');
+              localStorage.setItem('training-engine', 'ssh');
+            }}
             className={`flex-1 flex items-center gap-2 justify-center px-4 py-3 rounded-xl border text-sm font-medium transition-all ${
               engine === 'ssh'
                 ? 'bg-blue-50 border-blue-500 text-blue-700 shadow-xs'
