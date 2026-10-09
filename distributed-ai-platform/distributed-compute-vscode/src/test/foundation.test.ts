@@ -71,7 +71,7 @@ describe('ApiClient', () => {
   }
 
   it('sends bearer token, request id, and json body', async () => {
-    const fetchImpl = vi.fn(async () => fakeResponse(200, { ok: true }));
+    const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => fakeResponse(200, { ok: true }));
     const client = new ApiClient({
       baseUrl: 'http://localhost:8000',
       getToken: () => 'tok123',
@@ -91,7 +91,7 @@ describe('ApiClient', () => {
   });
 
   it('omits Authorization when no token', async () => {
-    const fetchImpl = vi.fn(async () => fakeResponse(200, {}));
+    const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => fakeResponse(200, {}));
     const client = new ApiClient({ baseUrl: 'http://localhost:8000', getToken: () => undefined, fetchImpl });
     await client.request('/x');
     const [, init] = fetchImpl.mock.calls[0];
