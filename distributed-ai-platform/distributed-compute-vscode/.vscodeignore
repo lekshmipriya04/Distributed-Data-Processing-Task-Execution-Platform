@@ -1,0 +1,18 @@
+# Exclude everything that should not ship in the .vsix.
+.vscode/**
+src/**
+node_modules/**
+schemas/*.ts
+esbuild.js
+eslint.config.js
+tsconfig.json
+vitest.config.ts
+.gitignore
+.eslintrc*
+**/*.map
+**/*.ts
+!dist/**
+IMPLEMENTATION_PLAN.md
+docs/**
+**/tsconfig.json
+**/.DS_Store

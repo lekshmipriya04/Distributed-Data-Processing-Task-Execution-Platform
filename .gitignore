@@ -1,0 +1,50 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- Virtual envs ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Node / frontend / VS Code extension ----
+node_modules/
+dist/
+out/
+build/
+*.vsix
+*.tsbuildinfo
+.vite/
+
+# ---- Secrets & local env ----
+.env
+.env.*
+!.env.example
+
+# ---- Go ----
+# built binaries live outside the repo; keep module files tracked
+
+# ---- IDE / OS ----
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- Claude Code harness scratch ----
+.claude/.cc-writes/
+**/.claude/.cc-writes/
+
+# ---- Logs & local databases ----
+*.log
+*.sqlite3

@@ -1,0 +1,125 @@
+{
+  "name": "distributed-compute",
+  "displayName": "Distributed Compute",
+  "description": "Developer control interface for the Distributed Data Processing & Task Execution Platform — manage compute nodes, submit distributed/Spark/Ray/training jobs, and monitor executions without leaving VS Code.",
+  "version": "0.0.1",
+  "publisher": "REPLACE_WITH_PUBLISHER",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": { "type": "git", "url": "https://example.com/REPLACE/distributed-compute-vscode" },
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other", "Machine Learning", "Visualization"],
+  "icon": "media/icons/distributed-compute.png",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:distributedCompute.nodes",
+    "onView:distributedCompute.jobs",
+    "onView:distributedCompute.executions"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "distributedCompute",
+          "title": "Distributed Compute",
+          "icon": "media/icons/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "distributedCompute": [
+        { "id": "distributedCompute.nodes", "name": "Compute Nodes" },
+        { "id": "distributedCompute.jobs", "name": "Jobs" },
+        { "id": "distributedCompute.executions", "name": "Executions" }
+      ]
+    },
+    "commands": [
+      { "command": "distributedCompute.connect", "title": "Distributed Compute: Connect to Master" },
+      { "command": "distributedCompute.disconnect", "title": "Distributed Compute: Disconnect from Master" },
+      { "command": "distributedCompute.configureMaster", "title": "Distributed Compute: Configure Master URL" },
+      { "command": "distributedCompute.configureAuth", "title": "Distributed Compute: Configure Authentication" },
+      { "command": "distributedCompute.showConnectionStatus", "title": "Distributed Compute: Show Connection Status" },
+      { "command": "distributedCompute.refreshState", "title": "Distributed Compute: Refresh Platform State", "icon": "$(refresh)" },
+      { "command": "distributedCompute.addNode", "title": "Distributed Compute: Add Compute Node", "icon": "$(add)" },
+      { "command": "distributedCompute.refreshNodes", "title": "Distributed Compute: Refresh Nodes", "icon": "$(refresh)" },
+      { "command": "distributedCompute.testNode", "title": "Distributed Compute: Test Node Connection" },
+      { "command": "distributedCompute.viewNode", "title": "Distributed Compute: View Node Details" },
+      { "command": "distributedCompute.drainNode", "title": "Distributed Compute: Drain Node" },
+      { "command": "distributedCompute.resumeNode", "title": "Distributed Compute: Resume Node" },
+      { "command": "distributedCompute.removeNode", "title": "Distributed Compute: Remove Node" },
+      { "command": "distributedCompute.runDistributed", "title": "Distributed Compute: Run Distributed Task" },
+      { "command": "distributedCompute.runPythonFile", "title": "Distributed Compute: Run Python File" },
+      { "command": "distributedCompute.runSpark", "title": "Distributed Compute: Run with Spark" },
+      { "command": "distributedCompute.runRay", "title": "Distributed Compute: Run with Ray" },
+      { "command": "distributedCompute.submitTraining", "title": "Distributed Compute: Submit Training Job" },
+      { "command": "distributedCompute.viewJobs", "title": "Distributed Compute: View Jobs" },
+      { "command": "distributedCompute.viewLogs", "title": "Distributed Compute: View Execution Logs" },
+      { "command": "distributedCompute.cancelExecution", "title": "Distributed Compute: Cancel Execution" },
+      { "command": "distributedCompute.retryExecution", "title": "Distributed Compute: Retry Execution" },
+      { "command": "distributedCompute.retrieveResults", "title": "Distributed Compute: Retrieve Results" },
+      { "command": "distributedCompute.initProject", "title": "Distributed Compute: Initialize Project" },
+      { "command": "distributedCompute.validateProject", "title": "Distributed Compute: Validate Project Configuration" },
+      { "command": "distributedCompute.showCluster", "title": "Distributed Compute: Show Cluster Status" },
+      { "command": "distributedCompute.showDiagnostics", "title": "Distributed Compute: Show Diagnostics" }
+    ],
+    "configuration": {
+      "title": "Distributed Compute",
+      "properties": {
+        "distributedCompute.masterUrl": { "type": "string", "default": "", "description": "Base URL of the master API Gateway (HTTPS for remote; HTTP allowed only for local dev)." },
+        "distributedCompute.autoConnect": { "type": "boolean", "default": false, "description": "Attempt to connect to the configured master on activation." },
+        "distributedCompute.refreshIntervalSeconds": { "type": "number", "default": 15, "minimum": 5, "description": "Polling interval for platform state (minimum 5s)." },
+        "distributedCompute.enableCodeLens": { "type": "boolean", "default": true, "description": "Show Run Distributed CodeLens on configured entrypoints." },
+        "distributedCompute.defaultRuntime": { "type": "string", "enum": ["python", "spark", "ray"], "default": "python", "description": "Default runtime for new jobs." },
+        "distributedCompute.defaultTimeoutSeconds": { "type": "number", "default": 600, "minimum": 1, "description": "Default job timeout in seconds." },
+        "distributedCompute.showNotifications": { "type": "boolean", "default": true, "description": "Show job lifecycle notifications." },
+        "distributedCompute.logLevel": { "type": "string", "enum": ["error", "warn", "info", "debug"], "default": "info", "description": "Diagnostics Output Channel verbosity." }
+      }
+    },
+    "jsonValidation": [
+      { "fileMatch": "distributed.json", "url": "./schemas/distributed.schema.json" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "distributedCompute.refreshNodes", "when": "view == distributedCompute.nodes", "group": "navigation" },
+        { "command": "distributedCompute.addNode", "when": "view == distributedCompute.nodes", "group": "navigation" },
+        { "command": "distributedCompute.refreshState", "when": "view == distributedCompute.jobs", "group": "navigation" },
+        { "command": "distributedCompute.refreshState", "when": "view == distributedCompute.executions", "group": "navigation" }
+      ],
+      "view/item/context": [
+        { "command": "distributedCompute.viewNode", "when": "view == distributedCompute.nodes && viewItem =~ /^node:/", "group": "inline" },
+        { "command": "distributedCompute.drainNode", "when": "view == distributedCompute.nodes && viewItem =~ /^node:(online|busy|degraded)$/" },
+        { "command": "distributedCompute.resumeNode", "when": "view == distributedCompute.nodes && viewItem == node:draining" },
+        { "command": "distributedCompute.removeNode", "when": "view == distributedCompute.nodes && viewItem =~ /^node:/" },
+        { "command": "distributedCompute.viewLogs", "when": "viewItem =~ /^execution:/" },
+        { "command": "distributedCompute.cancelExecution", "when": "viewItem =~ /^execution:.*:active$/" },
+        { "command": "distributedCompute.retryExecution", "when": "viewItem =~ /^execution:.*:terminal$/" },
+        { "command": "distributedCompute.retrieveResults", "when": "viewItem =~ /^execution:completed:/" }
+      ],
+      "editor/context": [
+        { "command": "distributedCompute.runPythonFile", "when": "resourceLangId == python", "group": "distributedCompute@1" },
+        { "command": "distributedCompute.runSpark", "when": "resourceLangId == python", "group": "distributedCompute@2" },
+        { "command": "distributedCompute.runRay", "when": "resourceLangId == python", "group": "distributedCompute@3" }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "npm run typecheck && node ./esbuild.js",
+    "build:prod": "npm run typecheck && node ./esbuild.js --production",
+    "watch": "node ./esbuild.js --watch",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p ./",
+    "test": "vitest run",
+    "vscode:prepublish": "npm run build:prod",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.26.0",
+    "esbuild": "^0.21.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^1.6.0"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/distributed.schema.json",
+  "title": "Distributed Compute project configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "entrypoint", "runtime"],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "entrypoint": { "type": "string", "minLength": 1, "description": "Workspace-relative path to the task entrypoint." },
+    "runtime": { "type": "string", "enum": ["python", "spark", "ray"] },
+    "dataset": { "type": "string", "description": "Workspace-relative dataset path or a storage-service dataset reference." },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": { "type": "integer", "minimum": 1 },
+        "memory": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(GB|MB)$" },
+        "gpu": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "maxRetries": { "type": "integer", "minimum": 0 },
+        "placement": { "type": "string", "enum": ["spread", "pack", "balanced", "gpu_first", "memory_first"] }
+      }
+    },
+    "output": { "type": "string", "description": "Workspace-relative output directory." }
+  }
+}
