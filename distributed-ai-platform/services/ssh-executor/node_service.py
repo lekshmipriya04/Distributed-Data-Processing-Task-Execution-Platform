@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import get_settings
 from crypto import decrypt_secret, encrypt_secret
 from models import SSHNode
+from os_adapters import detect_adapter
 from schemas import NodeConnectRequest, NodeRegisterRequest
 from ssh_client import SSHExecutor
 
@@ -128,4 +129,5 @@ def build_executor(node: SSHNode) -> SSHExecutor:
         host_key_type=node.host_key_type,
         host_key_b64=node.host_key_b64,
         connect_timeout=settings.connect_timeout,
+        os_type=detect_adapter(node.os_info).os_type,
     )

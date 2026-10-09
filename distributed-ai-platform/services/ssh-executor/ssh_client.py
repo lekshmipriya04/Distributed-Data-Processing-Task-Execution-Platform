@@ -18,12 +18,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
-import shlex
 import uuid
 from typing import Any, Dict, Optional
 
 import paramiko
 import structlog
+
+from os_adapters import OSAdapter, get_adapter
+from resource_spec import ResourceSpec
 
 logger = structlog.get_logger(__name__)
 
@@ -62,6 +64,7 @@ class SSHExecutor:
         host_key_type: Optional[str] = None,
         host_key_b64: Optional[str] = None,
         connect_timeout: int = 10,
+        os_type: str = "linux",
     ):
         self.host = host
         self.port = port
@@ -71,6 +74,8 @@ class SSHExecutor:
         self.host_key_type = host_key_type
         self.host_key_b64 = host_key_b64
         self.connect_timeout = connect_timeout
+        self.os_type = os_type
+        self._adapter: OSAdapter = get_adapter(os_type)
 
     # -- connection -------------------------------------------------------
     def _load_pkey(self) -> paramiko.PKey:
@@ -222,15 +227,14 @@ class SSHExecutor:
             finally:
                 sftp.close()
 
-            cores = ",".join(str(i) for i in range(max(1, allocated_cpu)))
-            quoted = shlex.quote(remote_path)
-            confine = f"nice -n {nice} timeout {timeout_seconds}s python3 {quoted}"
-            # Pin to the borrowed cores when taskset exists; fall back to just
-            # nice/timeout otherwise. An if/else runs exactly one branch, so a
-            # task that legitimately exits non-zero is never re-run unpinned.
-            cmd = (
-                f"if command -v taskset >/dev/null 2>&1; then "
-                f"taskset -c {cores} {confine}; else {confine}; fi"
+            cmd = self._adapter.build_execute_command(
+                remote_path,
+                ResourceSpec(
+                    cpu_cores=max(1, allocated_cpu),
+                    memory_gb=0.0,
+                    timeout_seconds=timeout_seconds,
+                ),
+                nice=nice,
             )
 
             stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout_seconds + 15)
