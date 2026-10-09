@@ -73,7 +73,7 @@ describe('GatewayApi', () => {
 
   it('submits an execution with the provided request id', async () => {
     const fetchImpl = vi.fn(
-      async () =>
+      async (_url: string, _init: RequestInit) =>
         ({ ok: true, status: 201, json: async () => ({ id: 'e1', runtime: 'python', status: 'created', total: 0, completed: 0, failed: 0, createdAt: 'now' }) }) as unknown as Response,
     );
     const api = new GatewayApi(new ApiClient({ baseUrl: 'http://x', getToken: () => undefined, fetchImpl }));
