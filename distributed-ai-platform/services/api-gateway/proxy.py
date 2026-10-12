@@ -30,7 +30,12 @@ async def proxy_request(request: Request, target_url: str) -> StreamingResponse:
     # Read the full request body (needed for POST/PUT/PATCH)
     body = await request.body()
 
-    client = httpx.AsyncClient()
+    # Generous timeout: this is a reverse proxy in front of services that do
+    # real work (HDFS writes on dataset upload, Spark/Ray submits, training
+    # reads). httpx's 5s default made cold-HDFS uploads (~5-6s) surface as a
+    # spurious 502 even though storage-service had already persisted the row.
+    # Allow a fast connect but a long read/write for slow upstream operations.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
     try:
         req = client.build_request(
             method=request.method,

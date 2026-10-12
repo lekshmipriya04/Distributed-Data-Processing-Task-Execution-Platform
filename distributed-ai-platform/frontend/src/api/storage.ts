@@ -31,6 +31,10 @@ export async function getDataset(id: string): Promise<Dataset> {
   return apiRequest(`${BASE}/datasets/${id}`);
 }
 
+export async function deleteDataset(id: string): Promise<void> {
+  await apiRequest(`${BASE}/datasets/${id}`, { method: 'DELETE' });
+}
+
 // --------------------------------------------------------------------------
 // KNOWN BACKEND GAP: there is no endpoint to introspect a dataset's columns.
 // The Dataset ORM model (services/storage-service/app/models/dataset.py) has

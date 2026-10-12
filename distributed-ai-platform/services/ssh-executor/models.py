@@ -46,6 +46,25 @@ class SSHNode(Base):
     allocated_cpu: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     allocated_memory_gb: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
 
+    # Cross-platform capabilities (Phase 2 discovery)
+    os_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # linux|macos|windows
+    gpu_vendor: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    gpu_backend: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    gpu_model: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    gpu_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    gpu_memory_gb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    python_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    java_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    spark_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    ray_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    execution_backend: Mapped[str] = mapped_column(String(32), nullable=False, default="ssh")
+    resource_enforcement: Mapped[str] = mapped_column(String(16), nullable=False, default="best_effort")
+    capabilities_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Master-driven SSH health (no permanent agent)
+    health_status: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    last_health_check: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="online")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -53,6 +72,49 @@ class SSHNode(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class ResourceLease(Base):
+    """A bounded reservation of a node's borrowed cores/memory for one job.
+
+    Node capacity is always derived as ``allocated − Σ(active lease allocations)``
+    rather than a mutable counter, so it self-heals when a lease is released,
+    expires, or is recovered after a crash.
+    """
+
+    __tablename__ = "resource_leases"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    # Free-form job identifier (batch id, training-run id, execution id, ...).
+    job_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ssh_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    cpu_requested: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    memory_requested_gb: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    gpu_requested: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cpu_allocated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    memory_allocated_gb: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    gpu_allocated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # pending | reserved | running | released | expired | failed
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="reserved", index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TaskBatch(Base):
@@ -119,6 +181,7 @@ class TrainingRun(Base):
     dataset_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     model_type: Mapped[str] = mapped_column(String(64), nullable=False)
     mode: Mapped[str] = mapped_column(String(16), nullable=False)  # single | multi
+    engine: Mapped[str] = mapped_column(String(16), nullable=False, default="spark")  # spark | ray
     rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     hyperparams_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")

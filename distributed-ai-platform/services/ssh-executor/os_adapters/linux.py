@@ -69,7 +69,8 @@ class LinuxAdapter(OSAdapter):
         cpu_quota = spec.cpu_cores * 100  # systemd CPUQuota is % of one core
         strict_cmd = (
             "systemd-run --scope --quiet --collect "
-            f"-p CPUQuota={cpu_quota}% -p MemoryMax={spec.memory_mb}M "
+            f"-p CPUQuota={cpu_quota}% -p AllowedCPUs={spec.core_list} "
+            f"-p MemoryMax={spec.memory_mb}M -p MemorySwapMax=0 "
             f"-p TasksMax={spec.max_processes} {confine}"
         )
         # Prefer cgroups-v2 enforcement; fall back to affinity+priority when

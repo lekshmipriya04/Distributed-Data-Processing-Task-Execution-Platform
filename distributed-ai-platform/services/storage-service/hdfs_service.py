@@ -62,3 +62,19 @@ class HDFSService:
             except Exception as e:
                 logger.error("hdfs_download_error", error=str(e), path=hdfs_path)
                 raise StorageError(f"Failed to download file from HDFS: {e}")
+
+    async def delete_file(self, hdfs_path: str) -> None:
+        """Delete a file from HDFS via the WebHDFS DELETE operation.
+
+        Best-effort: a missing file (already gone) is not treated as an error,
+        so deleting a dataset whose bytes never landed still succeeds.
+        """
+        url = f"{self.webhdfs_url}/webhdfs/v1{hdfs_path}?op=DELETE&user.name={self.user}&recursive=false"
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            try:
+                response = await client.delete(url)
+                response.raise_for_status()
+                logger.info("file_deleted_from_hdfs", path=hdfs_path)
+            except Exception as e:
+                logger.error("hdfs_delete_error", error=str(e), path=hdfs_path)
+                raise StorageError(f"Failed to delete file from HDFS: {e}")

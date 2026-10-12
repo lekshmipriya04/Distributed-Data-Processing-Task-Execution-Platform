@@ -1,4 +1,4 @@
-import { ReactNode } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 import type { JobStatus } from '../../types';
 
 export function StatusBadge({ status }: { status: JobStatus | string }) {
@@ -109,15 +109,34 @@ export function TagInput({
   onChange: (values: string[]) => void;
   placeholder?: string;
 }) {
+  // Accept one or many names at once: Enter or comma commits, and pasting a
+  // comma/space/newline-separated list (e.g. "p0,p1,...,p63") adds them all.
+  const addMany = (raw: string) => {
+    const parts = raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+    if (!parts.length) return;
+    const merged = [...values];
+    for (const p of parts) if (!merged.includes(p)) merged.push(p);
+    onChange(merged);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     const input = e.currentTarget;
-    if (e.key === 'Enter' && input.value.trim()) {
+    if ((e.key === 'Enter' || e.key === ',') && input.value.trim()) {
       e.preventDefault();
-      if (!values.includes(input.value.trim())) onChange([...values, input.value.trim()]);
+      addMany(input.value);
       input.value = '';
     }
     if (e.key === 'Backspace' && !input.value && values.length) {
       onChange(values.slice(0, -1));
+    }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData('text');
+    if (/[,\s]/.test(text)) {
+      e.preventDefault();
+      addMany(text);
+      e.currentTarget.value = '';
     }
   };
 
@@ -133,9 +152,83 @@ export function TagInput({
       ))}
       <input
         onKeyDown={handleKeyDown}
-        placeholder={placeholder ?? 'type & press Enter'}
+        onPaste={handlePaste}
+        placeholder={placeholder ?? 'type or paste a comma-separated list'}
         className="flex-1 min-w-[120px] bg-transparent outline-none text-slate-900 text-sm placeholder:text-slate-400"
       />
     </div>
+  );
+}
+
+// Controlled numeric field backed by a string so editing is natural: typing
+// over a leading 0 replaces it ("0" + "8" -> "8", not "08"), the field can be
+// cleared mid-edit, and decimals like "0.05" type cleanly. Emits a number via
+// onChange; falls back to `fallback` (or min, or 0) on blur when left empty.
+export function NumberField({
+  value,
+  onChange,
+  min,
+  max,
+  step,
+  fallback,
+  className = '',
+}: {
+  value: number;
+  onChange: (n: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  fallback?: number;
+  className?: string;
+}) {
+  const fmt = (n: number) => (Number.isFinite(n) ? String(n) : '');
+  const [text, setText] = useState<string>(fmt(value));
+
+  // Re-sync when the value is changed programmatically (reset, engine switch),
+  // but don't clobber what the user is actively typing (same numeric value).
+  useEffect(() => {
+    const current = text.trim() === '' ? NaN : Number(text);
+    if (current !== value) setText(fmt(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  const clamp = (n: number) => {
+    if (min !== undefined && n < min) return min;
+    if (max !== undefined && n > max) return max;
+    return n;
+  };
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    // Strip leading zeros that sit in front of another digit ("08" -> "8"),
+    // but keep "0", "0." and "0.05" so decimals can be typed.
+    const raw = e.target.value.replace(/^(-?)0+(?=\d)/, '$1');
+    setText(raw);
+    if (raw === '' || raw === '-' || raw === '.' || raw === '-.' || raw.endsWith('.')) return;
+    const n = Number(raw);
+    if (!Number.isNaN(n)) onChange(clamp(n));
+  };
+
+  const handleBlur = () => {
+    if (text.trim() === '' || Number.isNaN(Number(text))) {
+      const fb = fallback ?? min ?? 0;
+      setText(fmt(fb));
+      onChange(fb);
+      return;
+    }
+    const n = clamp(Number(text));
+    setText(fmt(n));
+    onChange(n);
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={text}
+      step={step}
+      onChange={handleChange}
+      onBlur={handleBlur}
+      className={className}
+    />
   );
 }

@@ -8,6 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -20,6 +21,38 @@ from sqlalchemy.pool import NullPool
 from shared.common.config import BaseServiceSettings
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Lightweight additive migrations.
+#
+# ``Base.metadata.create_all`` only creates *missing tables* — it never ALTERs a
+# table that already exists. When a new column is added to a model whose table
+# already shipped, every SELECT then fails with ``UndefinedColumn``. Each entry
+# below is an idempotent ``ADD COLUMN IF NOT EXISTS`` for such a column. Every
+# service runs these on startup; ``ALTER TABLE IF EXISTS`` means a service that
+# doesn't own a table simply skips it instead of erroring.
+# ---------------------------------------------------------------------------
+_ADDITIVE_COLUMNS: tuple[str, ...] = (
+    # ssh-executor: Phase 2 cross-platform node capabilities.
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS os_type VARCHAR(32)",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS gpu_vendor VARCHAR(32)",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS gpu_backend VARCHAR(32)",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS gpu_model VARCHAR(256)",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS gpu_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS gpu_memory_gb DOUBLE PRECISION",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS python_version VARCHAR(32)",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS java_version VARCHAR(64)",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS spark_version VARCHAR(32)",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS ray_version VARCHAR(32)",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS execution_backend VARCHAR(32) NOT NULL DEFAULT 'ssh'",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS resource_enforcement VARCHAR(16) NOT NULL DEFAULT 'best_effort'",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS capabilities_json TEXT",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS health_status VARCHAR(16) NOT NULL DEFAULT 'unknown'",
+    "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS last_health_check TIMESTAMPTZ",
+    # ssh-executor: Phase 9 training engine label (spark | ray).
+    "ALTER TABLE IF EXISTS training_runs ADD COLUMN IF NOT EXISTS engine VARCHAR(16) NOT NULL DEFAULT 'spark'",
+)
 
 
 class Base(DeclarativeBase):
@@ -80,11 +113,13 @@ class DatabaseManager:
         logger.info("Database engine initialized")
 
     async def create_tables(self) -> None:
-        """Create all tables defined on Base metadata."""
+        """Create missing tables, then apply idempotent additive column migrations."""
         assert self._engine is not None, "Call initialize() first"
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables created")
+            for statement in _ADDITIVE_COLUMNS:
+                await conn.execute(text(statement))
+        logger.info("Database tables created and additive migrations applied")
 
     async def dispose(self) -> None:
         """Cleanly close all connections. Call on app shutdown."""

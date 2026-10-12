@@ -1,221 +1,331 @@
-import { useState } from 'react';
-import { Zap, Network } from 'lucide-react';
-import { ClusterConfigForm } from '../components/cluster/ClusterConfigForm';
+import { useEffect, useRef, useState } from 'react';
+import { Zap, Boxes, Cpu, Server, Loader2, CheckCircle2, XCircle, Download, Plus, Trash2 } from 'lucide-react';
 import { DataUpload, QuickSplitConfig } from '../components/data/DataUpload';
-import { ModelConfig } from '../components/train/ModelConfig';
-import { DistributedTrainPanel } from '../components/train/DistributedTrainPanel';
-import { PipelineProgress } from '../components/progress/PipelineProgress';
-import { ResultsPanel } from '../components/results/ResultsPanel';
-import { PrimaryButton, Card } from '../components/common/Primitives';
+import { ClusterConfigForm } from '../components/cluster/ClusterConfigForm';
+import { Card, SectionTitle, PrimaryButton, SecondaryButton, NumberField } from '../components/common/Primitives';
 import { useClusterConfig } from '../context/ClusterConfigContext';
 import { useToast } from '../context/ToastContext';
-import { submitPreprocessingJob } from '../api/preprocessing';
-import { submitTrainingJob } from '../api/training';
-import type { Dataset, HyperparameterGrid, ProblemType, PreprocessingConfig, TrainingConfig } from '../types';
+import { sshApi } from '../api/ssh';
+import type { TrainEngine, TrainModelType, TrainRunResponse, NodeResponse } from '../api/ssh';
+import type { Dataset } from '../types';
 
-type WizardStep = 'configure' | 'progress' | 'results';
-type Engine = 'spark' | 'ssh';
-
-const DEFAULT_QUICK_SPLIT: QuickSplitConfig = {
+const DEFAULT_SPLIT: QuickSplitConfig = {
   numericFeatures: [],
   categoricalFeatures: [],
-  targetColumn: '',
+  targetColumns: [],
   trainRatio: 0.7,
   validationRatio: 0.15,
   testRatio: 0.15,
 };
 
+// Engine → dataset modality + available models. Spark trains tabular/text
+// (linear/logistic via PySpark MLlib); Ray trains images (baseline CNN).
+const ENGINES: {
+  value: TrainEngine; label: string; blurb: string; icon: JSX.Element;
+  models: { value: TrainModelType; label: string; blurb: string }[];
+}[] = [
+  {
+    value: 'spark', label: 'Spark — text / tabular', blurb: 'PySpark MLlib on borrowed cores',
+    icon: <Zap size={18} />,
+    models: [
+      { value: 'logistic_regression', label: 'Logistic Regression', blurb: 'Binary 0/1 target · accuracy / F1' },
+      { value: 'linear_regression', label: 'Linear Regression', blurb: 'Numeric target · MSE / RMSE / R²' },
+    ],
+  },
+  {
+    value: 'ray', label: 'Ray — images', blurb: 'Ray + baseline CNN on borrowed cores',
+    icon: <Boxes size={18} />,
+    models: [
+      { value: 'cnn', label: 'Baseline CNN', blurb: 'Flattened-pixel image dataset · accuracy / F1' },
+    ],
+  },
+];
+
 export function TrainPage() {
   const { config: clusterConfig } = useClusterConfig();
-  const { showError } = useToast();
+  const { showError, showSuccess } = useToast();
 
-  const [engine, setEngine] = useState<Engine>(() =>
-    (localStorage.getItem('training-engine') as Engine | null) ?? 'spark'
-  );
-  const [step, setStep] = useState<WizardStep>('configure');
-
-  // data selection
+  const [engine, setEngine] = useState<TrainEngine>('spark');
+  const [modelType, setModelType] = useState<TrainModelType>('logistic_regression');
   const [dataset, setDataset] = useState<Dataset | null>(null);
-  const [quickSplit, setQuickSplit] = useState<QuickSplitConfig>(DEFAULT_QUICK_SPLIT);
+  const [quickSplit, setQuickSplit] = useState<QuickSplitConfig>(DEFAULT_SPLIT);
+  const [learningRate, setLearningRate] = useState(0.01);
+  const [epochs, setEpochs] = useState(10);
+  const [rounds, setRounds] = useState(3);
+  const [numClasses, setNumClasses] = useState(0);
 
-  // model selection
-  const [problemType, setProblemType] = useState<ProblemType>('classification');
-  const [algorithms, setAlgorithms] = useState<HyperparameterGrid[]>([]);
-  const [cvFolds, setCvFolds] = useState(3);
-  const [primaryMetric, setPrimaryMetric] = useState('f1');
-
-  // job tracking
-  const [preprocessingJobId, setPreprocessingJobId] = useState<string | null>(null);
-  const [trainingJobId, setTrainingJobId] = useState<string | null>(null);
-  const [mlflowRunId, setMlflowRunId] = useState<string | null>(null);
+  const [nodes, setNodes] = useState<NodeResponse[]>([]);
+  const [run, setRun] = useState<TrainRunResponse | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const pollRef = useRef<number | null>(null);
 
-  const ratioSum = quickSplit.trainRatio + quickSplit.validationRatio + quickSplit.testRatio;
+  useEffect(() => {
+    sshApi.listNodes().then((r) => setNodes(r.items)).catch(() => {});
+    return () => { if (pollRef.current) window.clearInterval(pollRef.current); };
+  }, []);
+
+  const activeEngine = ENGINES.find((e) => e.value === engine)!;
+  const onSelectEngine = (e: TrainEngine) => {
+    setEngine(e);
+    setModelType(ENGINES.find((x) => x.value === e)!.models[0].value);
+  };
+
+  const onlineNodes = nodes.filter((n) => n.status === 'online');
+  const isMulti = clusterConfig.mode === 'multi';
+  const selectedIds = clusterConfig.nodes.map((n) => n.id);
+
   const canSubmit =
     !!dataset &&
     quickSplit.numericFeatures.length > 0 &&
-    (problemType === 'clustering' || !!quickSplit.targetColumn) &&
-    Math.abs(ratioSum - 1) < 0.01 &&
-    algorithms.length > 0;
+    quickSplit.targetColumns.length > 0 &&
+    (!isMulti || clusterConfig.nodes.length > 0) &&
+    (!run || run.status === 'failed' || run.status === 'completed') &&
+    !submitting;
 
-  const handleStartTraining = async () => {
+  const poll = (id: string) => {
+    pollRef.current = window.setInterval(async () => {
+      try {
+        const latest = await sshApi.getTrainingRun(id);
+        setRun(latest);
+        if (latest.status === 'completed' || latest.status === 'failed') {
+          if (pollRef.current) window.clearInterval(pollRef.current);
+        }
+      } catch { /* transient */ }
+    }, 2000);
+  };
+
+  const handleTrain = async () => {
     if (!dataset) return;
     setSubmitting(true);
+    setRun(null);
     try {
-      const preprocessingConfig: PreprocessingConfig = {
-        numeric_features: quickSplit.numericFeatures,
-        categorical_features: quickSplit.categoricalFeatures,
-        target_column: problemType === 'clustering' ? null : quickSplit.targetColumn,
-        drop_columns: [],
-        null_strategy: 'drop', // data is already preprocessed; kept minimal/safe default
-        scaler_type: 'standard',
-        train_ratio: quickSplit.trainRatio,
-        validation_ratio: quickSplit.validationRatio,
-        test_ratio: quickSplit.testRatio,
-        random_seed: 42,
-      };
-
-      const preJob = await submitPreprocessingJob(dataset.id, preprocessingConfig, clusterConfig);
-      setPreprocessingJobId(preJob.job_id);
-      setStep('progress');
-
-      // NOTE: this fires the training submission immediately rather than
-      // waiting for preprocessing to actually finish, because the backend
-      // doesn't expose a webhook/callback the frontend can await -- see
-      // PipelineProgress.tsx's note on job-status polling gaps. In a
-      // finished backend, training submission should instead be triggered
-      // automatically once preprocessing's status flips to "succeeded".
-      const trainingConfig: TrainingConfig = {
-        problem_type: problemType,
-        algorithms,
-        cv_folds: cvFolds,
-        primary_metric: primaryMetric,
-        higher_is_better: primaryMetric !== 'rmse',
-        parallelism: 3,
-      };
-      const trainJob = await submitTrainingJob(preJob.job_id, trainingConfig, clusterConfig);
-      setTrainingJobId(trainJob.job_id);
+      const created = await sshApi.startTraining({
+        dataset_id: dataset.id,
+        model_type: modelType,
+        engine,
+        target_column: quickSplit.targetColumns[0],
+        feature_columns: quickSplit.numericFeatures,
+        mode: clusterConfig.mode,
+        local_cores: clusterConfig.localCores,
+        learning_rate: learningRate,
+        epochs,
+        rounds,
+        num_classes: modelType === 'cnn' ? numClasses : undefined,
+        node_ids: isMulti ? selectedIds : undefined,
+      });
+      setRun(created);
+      poll(created.id);
     } catch (e: any) {
-      showError(e.message ?? 'Failed to start the pipeline');
-      setStep('configure');
+      showError(e.message ?? 'Failed to start training');
     } finally {
       setSubmitting(false);
     }
   };
 
-  if (step === 'results' && mlflowRunId && dataset) {
-    return <ResultsPanel mlflowRunId={mlflowRunId} dataset={dataset} problemType={problemType} />;
-  }
+  const newTraining = () => {
+    if (pollRef.current) window.clearInterval(pollRef.current);
+    setRun(null);
+  };
 
-  if (step === 'progress' && preprocessingJobId) {
-    return (
-      <PipelineProgress
-        preprocessingJobId={preprocessingJobId}
-        trainingJobId={trainingJobId}
-        onTrainingReady={(runId) => {
-          setMlflowRunId(runId);
-          setStep('results');
-        }}
-      />
-    );
-  }
+  const removePrevious = async () => {
+    if (!run) return;
+    setBusy(true);
+    try {
+      await sshApi.deleteTrainingRun(run.id);
+      showSuccess('Previous training removed');
+      newTraining();
+    } catch (e: any) {
+      showError(e.message ?? 'Failed to remove training');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const download = async (fn: () => Promise<void>, what: string) => {
+    setBusy(true);
+    try { await fn(); } catch (e: any) { showError(e.message ?? `Failed to download ${what}`); }
+    finally { setBusy(false); }
+  };
 
   return (
     <div className="w-full max-w-4xl mx-auto space-y-6">
+      {/* 1. Engine (dataset modality) */}
       <Card>
-        <div className="text-sm font-semibold text-slate-700 mb-3">Training engine</div>
-        <div className="flex gap-3">
-          <button
-            onClick={() => {
-              setEngine('spark');
-              localStorage.setItem('training-engine', 'spark');
-            }}
-            className={`flex-1 flex items-center gap-2 justify-center px-4 py-3 rounded-xl border text-sm font-medium transition-all ${
-              engine === 'spark'
-                ? 'bg-blue-50 border-blue-500 text-blue-700 shadow-xs'
-                : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
-            }`}
-          >
-            <Zap size={18} className={engine === 'spark' ? 'text-blue-600' : 'text-slate-400'} />
-            Spark pipeline (existing)
-          </button>
-          <button
-            onClick={() => {
-              setEngine('ssh');
-              localStorage.setItem('training-engine', 'ssh');
-            }}
-            className={`flex-1 flex items-center gap-2 justify-center px-4 py-3 rounded-xl border text-sm font-medium transition-all ${
-              engine === 'ssh'
-                ? 'bg-blue-50 border-blue-500 text-blue-700 shadow-xs'
-                : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
-            }`}
-          >
-            <Network size={18} className={engine === 'ssh' ? 'text-blue-600' : 'text-slate-400'} />
-            SSH providers (distributed)
-          </button>
+        <SectionTitle>Engine &amp; dataset type</SectionTitle>
+        <div className="grid grid-cols-2 gap-3">
+          {ENGINES.map((e) => (
+            <button
+              key={e.value}
+              onClick={() => onSelectEngine(e.value)}
+              className={`text-left px-4 py-3 rounded-xl border text-sm transition-all flex items-start gap-3 ${
+                engine === e.value ? 'bg-blue-50 border-blue-500 text-blue-800 shadow-xs' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+              }`}
+            >
+              <span className={engine === e.value ? 'text-blue-600' : 'text-slate-400'}>{e.icon}</span>
+              <span>
+                <span className="font-semibold block">{e.label}</span>
+                <span className="text-xs text-slate-500">{e.blurb}</span>
+              </span>
+            </button>
+          ))}
         </div>
-        <p className="text-xs text-slate-500 mt-3 leading-relaxed">
-          {engine === 'spark'
-            ? 'Runs the full AutoML pipeline on the Spark cluster (preprocessing + model search).'
-            : 'Trains a pure-Python model distributed over borrowed cores via SSH — split locally across cores (single) or across your registered providers (multiple devices), combined by federated averaging.'}
-        </p>
       </Card>
 
-      {engine === 'ssh' ? (
-        <DistributedTrainPanel />
-      ) : (
-        <>
-          <ClusterConfigForm />
+      {/* 2. Model */}
+      <Card>
+        <SectionTitle>Model</SectionTitle>
+        <div className="grid grid-cols-2 gap-3">
+          {activeEngine.models.map((m) => (
+            <button
+              key={m.value}
+              onClick={() => setModelType(m.value)}
+              className={`text-left px-4 py-3 rounded-xl border text-sm transition-all ${
+                modelType === m.value ? 'bg-blue-50 border-blue-500 text-blue-800 shadow-xs' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+              }`}
+            >
+              <div className="font-semibold">{m.label}</div>
+              <div className="text-xs text-slate-500 mt-0.5">{m.blurb}</div>
+            </button>
+          ))}
+        </div>
+      </Card>
 
-          <DataUpload
-            selectedDataset={dataset}
-            onSelectDataset={setDataset}
-            quickSplit={quickSplit}
-            onQuickSplitChange={setQuickSplit}
-          />
+      {/* 3. Compute configuration (single local / multi with worker select) */}
+      <ClusterConfigForm />
 
-          <ModelConfig
-            problemType={problemType}
-            onProblemTypeChange={setProblemType}
-            selected={algorithms}
-            onSelectedChange={setAlgorithms}
-            cvFolds={cvFolds}
-            onCvFoldsChange={setCvFolds}
-            primaryMetric={primaryMetric}
-            onPrimaryMetricChange={setPrimaryMetric}
-          />
+      {isMulti && (
+        <div className="text-xs rounded-lg px-3.5 py-2.5 bg-blue-50 border border-blue-200 text-blue-800 flex gap-2">
+          <Server size={16} className="shrink-0 mt-0.5" />
+          <span>
+            {clusterConfig.nodes.length} selected · {onlineNodes.length} online provider(s).
+            {clusterConfig.nodes.length === 0 && ' Select at least one device above.'}
+          </span>
+        </div>
+      )}
 
-          <Card>
-            <div className="flex items-center justify-between">
-              <div className="text-sm text-slate-600 font-medium">
-                {!dataset && 'Select a dataset to continue.'}
+      {/* 4. Dataset upload + column config */}
+      <DataUpload
+        selectedDataset={dataset}
+        onSelectDataset={setDataset}
+        quickSplit={quickSplit}
+        onQuickSplitChange={setQuickSplit}
+      />
 
-                {dataset &&
-                  Math.abs(ratioSum - 1) >= 0.01 &&
-                  'Split ratios must sum to 1.0.'}
+      {/* 5. Hyperparameters */}
+      <Card>
+        <SectionTitle>Hyperparameters</SectionTitle>
+        <div className="grid grid-cols-3 gap-3">
+          <label className="text-sm">
+            <span className="text-xs text-slate-500 font-medium block mb-1">Learning rate</span>
+            <NumberField value={learningRate} min={0.0001} step={0.001} onChange={setLearningRate}
+              className="w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
+          </label>
+          <label className="text-sm">
+            <span className="text-xs text-slate-500 font-medium block mb-1">Epochs / shard</span>
+            <NumberField value={epochs} min={1} max={1000} step={1} onChange={setEpochs}
+              className="w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
+          </label>
+          <label className="text-sm">
+            <span className="text-xs text-slate-500 font-medium block mb-1">Averaging rounds</span>
+            <NumberField value={rounds} min={1} max={50} step={1} onChange={setRounds}
+              className="w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
+          </label>
+        </div>
+        {modelType === 'cnn' && (
+          <label className="text-sm block mt-3 max-w-[220px]">
+            <span className="text-xs text-slate-500 font-medium block mb-1">Number of classes <span className="text-slate-400">(0 = auto)</span></span>
+            <NumberField value={numClasses} min={0} max={1000} step={1} onChange={setNumClasses}
+              className="w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
+          </label>
+        )}
+      </Card>
 
-                {dataset &&
-                  Math.abs(ratioSum - 1) < 0.01 &&
-                  algorithms.length === 0 &&
-                  'Select at least one algorithm.'}
+      {run && <TrainingResult run={run} nodes={nodes} />}
 
-                {canSubmit && (
-                  <span className="text-emerald-600 font-semibold">
-                    Ready to train.
-                  </span>
-                )}
-              </div>
+      {(run?.status === 'completed' || run?.status === 'failed') && (
+        <div className="flex flex-wrap justify-end gap-2">
+          {run.status === 'completed' && (
+            <>
+              <SecondaryButton onClick={() => download(() => sshApi.downloadTrainingData(run.id), 'training data')} disabled={busy}>
+                <Download size={16} /> Training data (JSON)
+              </SecondaryButton>
+              <SecondaryButton onClick={() => download(() => sshApi.downloadTrainingModel(run.id), 'model')} disabled={busy}>
+                <Download size={16} /> Model (ONNX)
+              </SecondaryButton>
+            </>
+          )}
+          <SecondaryButton onClick={newTraining}><Plus size={16} /> New training</SecondaryButton>
+          <SecondaryButton onClick={removePrevious} disabled={busy}><Trash2 size={16} /> Remove previous</SecondaryButton>
+        </div>
+      )}
 
-              <PrimaryButton
-                onClick={handleStartTraining}
-                disabled={!canSubmit || submitting}
-              >
-                {submitting ? 'Starting…' : 'Start Training'}
-              </PrimaryButton>
+      {/* 6. Start — hidden once a run exists; "New training" brings it back. */}
+      {!run && (
+        <Card>
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600 font-medium flex items-center gap-2">
+              <Cpu size={15} className="text-slate-400" />
+              {!dataset && 'Select a dataset to continue.'}
+              {dataset && quickSplit.numericFeatures.length === 0 && 'Add at least one feature column.'}
+              {dataset && quickSplit.numericFeatures.length > 0 && quickSplit.targetColumns.length === 0 && 'Set the target column.'}
+              {isMulti && clusterConfig.nodes.length === 0 && dataset && <span className="text-rose-600">Select a worker above.</span>}
+              {canSubmit && <span className="text-emerald-600 font-semibold">Ready to train on {engine}.</span>}
             </div>
-          </Card>
-        </>
+            <PrimaryButton onClick={handleTrain} disabled={!canSubmit}>
+              {submitting ? 'Starting…' : 'Start Training'}
+            </PrimaryButton>
+          </div>
+        </Card>
       )}
     </div>
+  );
+}
+
+function TrainingResult({ run, nodes }: { run: TrainRunResponse; nodes: NodeResponse[] }) {
+  const nodeName = (id?: string | null) => {
+    if (!id) return '—';
+    if (id === 'local') return 'local cores';
+    return nodes.find((n) => n.id === id)?.name ?? `${id.slice(0, 8)}…`;
+  };
+  const metricEntries = run.metrics ? Object.entries(run.metrics) : [];
+  return (
+    <Card>
+      <div className="flex items-center gap-2 mb-4">
+        {run.status === 'completed' && <CheckCircle2 size={18} className="text-emerald-600" />}
+        {run.status === 'failed' && <XCircle size={18} className="text-rose-600" />}
+        {run.status !== 'completed' && run.status !== 'failed' && <Loader2 size={18} className="text-blue-600 animate-spin" />}
+        <SectionTitle>Training {run.status}{run.engine ? ` · ${run.engine}` : ''}</SectionTitle>
+      </div>
+      {run.message && <p className="text-sm text-slate-600 mb-4">{run.message}</p>}
+      {metricEntries.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+          {metricEntries.filter(([k]) => k !== 'n').map(([k, v]) => (
+            <div key={k} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5">
+              <div className="text-xs text-slate-500 uppercase tracking-wide">{k}</div>
+              <div className="text-lg font-bold text-slate-900">{Number(v).toFixed(4)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {run.shards && run.shards.length > 0 && (
+        <div>
+          <div className="text-xs font-medium text-slate-500 mb-2">Shards</div>
+          <div className="space-y-1.5">
+            {run.shards.map((s) => (
+              <div key={s.shard} className="flex items-center gap-3 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                <Server size={14} className="text-blue-600" />
+                <span className="font-mono text-slate-700">shard {s.shard}</span>
+                <span className="text-slate-500">{s.rows} rows</span>
+                <span className="ml-auto text-slate-600">{nodeName(s.node_id)}</span>
+                <span className={`text-xs px-2 py-0.5 rounded-full ${
+                  s.status === 'completed' || s.status === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                }`}>{s.status ?? 'n/a'}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }

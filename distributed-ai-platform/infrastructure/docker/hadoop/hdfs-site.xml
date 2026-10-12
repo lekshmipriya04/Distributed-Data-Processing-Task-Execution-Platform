@@ -20,4 +20,17 @@
     <name>dfs.webhdfs.enabled</name>
     <value>true</value>
   </property>
+  <!-- In Docker, the namenode would otherwise return each datanode's random
+       container-ID hostname in WebHDFS redirects (e.g. http://484a4bf7a689:9864),
+       which the embedded DNS cannot resolve, so uploads hang then fail. Using the
+       datanode hostname (set to the service name via compose `hostname:`) keeps
+       the redirect resolvable on platform-net. -->
+  <property>
+    <name>dfs.datanode.use.datanode.hostname</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>dfs.client.use.datanode.hostname</name>
+    <value>true</value>
+  </property>
 </configuration>

@@ -12,6 +12,23 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+class _CapabilityFields(BaseModel):
+    """Cross-platform node capabilities (Phase 2) shared across detect/register/response."""
+
+    os_type: Optional[str] = None  # linux | macos | windows
+    gpu_vendor: Optional[str] = None
+    gpu_backend: Optional[str] = None
+    gpu_model: Optional[str] = None
+    gpu_count: int = 0
+    gpu_memory_gb: Optional[float] = None
+    python_version: Optional[str] = None
+    java_version: Optional[str] = None
+    spark_version: Optional[str] = None
+    ray_version: Optional[str] = None
+    execution_backend: str = "ssh"
+    resource_enforcement: str = "best_effort"
+
+
 # --- provider nodes ------------------------------------------------------
 class NodeConnectRequest(BaseModel):
     """Probe a node (SSH in + auto-detect) without persisting anything."""
@@ -24,7 +41,7 @@ class NodeConnectRequest(BaseModel):
     private_key: Optional[str] = None
 
 
-class NodeDetectResponse(BaseModel):
+class NodeDetectResponse(_CapabilityFields):
     """Auto-detected resources + host-key fingerprint shown in the dialog."""
 
     status: str
@@ -38,7 +55,7 @@ class NodeDetectResponse(BaseModel):
     message: Optional[str] = None
 
 
-class NodeRegisterRequest(BaseModel):
+class NodeRegisterRequest(_CapabilityFields):
     """Persist a node with the operator-chosen allocation (<= detected)."""
 
     name: str
@@ -62,7 +79,7 @@ class NodeRegisterRequest(BaseModel):
     allocated_memory_gb: float = Field(default=1.0, ge=0.0)
 
 
-class NodeResponse(BaseModel):
+class NodeResponse(_CapabilityFields):
     id: UUID
     owner_id: str
     name: str
@@ -77,6 +94,8 @@ class NodeResponse(BaseModel):
     allocated_cpu: int
     allocated_memory_gb: float
     status: str
+    health_status: str = "unknown"
+    last_health_check: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -90,10 +109,18 @@ class NodeListResponse(BaseModel):
 
 # --- task batches --------------------------------------------------------
 class BatchCreateRequest(BaseModel):
-    """Code plus one input shard per task; the master keeps all the data."""
+    """Code plus one input shard per task; the master keeps all the data.
+
+    ``node_ids`` optionally restricts the run to a chosen subset of the owner's
+    online providers (empty = use all online). ``runtime`` selects the execution
+    engine (python today; spark/ray in later phases).
+    """
 
     code: str
     inputs: list[str] = Field(default_factory=list)
+    node_ids: list[UUID] = Field(default_factory=list)
+    runtime: Literal["python", "spark", "ray"] = "python"
+    cpu_per_task: int = Field(default=1, ge=1)
 
 
 class TaskResponse(BaseModel):
@@ -127,17 +154,50 @@ class BatchTasksResponse(BaseModel):
     tasks: list[TaskResponse]
 
 
+# --- resource leases (Phase 3) ------------------------------------------
+class LeaseCreateRequest(BaseModel):
+    node_id: UUID
+    cpu: int = Field(default=1, ge=1)
+    memory_gb: float = Field(default=0.0, ge=0.0)
+    gpu: int = Field(default=0, ge=0)
+    job_id: Optional[str] = None
+    ttl_seconds: int = Field(default=3600, ge=1)
+
+
+class LeaseResponse(BaseModel):
+    id: UUID
+    owner_id: str
+    job_id: Optional[str]
+    node_id: UUID
+    cpu_requested: int
+    memory_requested_gb: float
+    gpu_requested: int
+    cpu_allocated: int
+    memory_allocated_gb: float
+    gpu_allocated: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    expires_at: Optional[datetime]
+    released_at: Optional[datetime]
+
+    model_config = {"from_attributes": True}
+
+
 # --- distributed ML training --------------------------------------------
 class TrainRequest(BaseModel):
-    """Train a model distributed over borrowed cores (federated averaging).
+    """Train a model distributed over borrowed cores.
 
-    ``mode='single'`` splits the data across local cores (data never leaves the
-    master); ``mode='multi'`` splits it across the owner's online SSH providers
-    (each shard's rows are streamed to its provider transiently, then wiped).
+    ``engine`` selects the real compute runtime: ``spark`` (tabular/text →
+    linear/logistic via PySpark MLlib) or ``ray`` (image → baseline CNN). Each
+    node bootstraps the runtime over SSH (RuntimeManager) and the master
+    federated-averages the per-node results. ``node_ids`` optionally restricts
+    the run to a chosen subset of online providers.
     """
 
     dataset_id: UUID
-    model_type: Literal["linear_regression", "logistic_regression"]
+    model_type: Literal["linear_regression", "logistic_regression", "cnn"]
+    engine: Literal["spark", "ray"] = "spark"
     target_column: str
     feature_columns: list[str] = Field(default_factory=list)  # empty = all other numeric cols
     mode: Literal["single", "multi"] = "multi"
@@ -145,6 +205,8 @@ class TrainRequest(BaseModel):
     learning_rate: float = Field(default=0.01, gt=0)
     epochs: int = Field(default=10, ge=1)
     rounds: int = Field(default=3, ge=1)
+    num_classes: int = Field(default=0, ge=0)  # CNN only; 0 = infer from labels
+    node_ids: list[UUID] = Field(default_factory=list)
 
 
 class TrainRunResponse(BaseModel):
@@ -152,6 +214,7 @@ class TrainRunResponse(BaseModel):
     owner_id: str
     dataset_id: UUID
     model_type: str
+    engine: Optional[str] = None
     mode: str
     rounds: int
     status: str

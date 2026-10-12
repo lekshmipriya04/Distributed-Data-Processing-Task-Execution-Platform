@@ -88,6 +88,25 @@ class DatasetService:
         content = await self._hdfs.download_file(dataset.hdfs_path)
         return content, dataset.file_format
 
+    async def delete_dataset(self, dataset_id: uuid.UUID) -> bool:
+        """Remove a dataset: drop its HDFS file (best-effort) and DB row.
+
+        Returns False if the dataset does not exist. HDFS removal failures are
+        logged but do not block deleting the record, so a dataset whose bytes
+        are already gone can still be cleared from the list.
+        """
+        dataset = await self.get_dataset(dataset_id)
+        if dataset is None:
+            return False
+        try:
+            await self._hdfs.delete_file(dataset.hdfs_path)
+        except Exception as e:  # best-effort; the DB row is the source of truth for the UI
+            logger.warning("dataset_hdfs_delete_failed", dataset_id=str(dataset_id), error=str(e))
+        await self._db.delete(dataset)
+        await self._db.commit()
+        logger.info("dataset_deleted", dataset_id=str(dataset_id))
+        return True
+
     async def list_datasets(self, skip: int = 0, limit: int = 100) -> tuple[list[Dataset], int]:
         total = await self._db.scalar(select(func.count()).select_from(Dataset))
         if total is None:

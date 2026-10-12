@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Trash2, Cpu, Server } from 'lucide-react';
 import { useClusterConfig } from '../../context/ClusterConfigContext';
-import { Card, SectionTitle } from '../common/Primitives';
+import { Card, SectionTitle, NumberField } from '../common/Primitives';
 import { sshApi } from '../../api/ssh';
 import type { NodeResponse } from '../../api/ssh';
 
@@ -67,12 +67,12 @@ export function ClusterConfigForm() {
       {config.mode === 'single' ? (
         <div>
           <label className="text-sm font-medium text-slate-700 mb-2 block">Number of cores to use</label>
-          <input
-            type="number"
+          <NumberField
+            value={config.localCores}
             min={1}
             max={64}
-            value={config.localCores}
-            onChange={(e) => setConfig({ ...config, localCores: Number(e.target.value) })}
+            step={1}
+            onChange={(n) => setConfig({ ...config, localCores: n })}
             className="w-40 bg-white rounded-lg px-3 py-2 text-slate-900 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm"
           />
         </div>

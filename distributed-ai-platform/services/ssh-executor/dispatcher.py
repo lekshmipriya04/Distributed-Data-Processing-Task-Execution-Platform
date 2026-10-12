@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from config import get_settings
 from database import get_db_manager
+from execution_manager import release_leases, reserve_node_leases
 from models import SSHNode, Task, TaskBatch
 from node_service import build_executor
 
@@ -132,8 +133,12 @@ async def _finalize_batch(batch_id: uuid.UUID) -> None:
         session.add(batch)
 
 
-async def dispatch_batch(batch_id: uuid.UUID) -> None:
-    """Execute every task in ``batch_id`` in parallel across the owner's nodes."""
+async def dispatch_batch(batch_id: uuid.UUID, node_ids: list | None = None) -> None:
+    """Execute every task in ``batch_id`` in parallel across the owner's nodes.
+
+    ``node_ids`` optionally restricts the run to a chosen subset of the owner's
+    online providers (empty/None = all online).
+    """
     settings = get_settings()
     db = get_db_manager()
 
@@ -155,17 +160,12 @@ async def dispatch_batch(batch_id: uuid.UUID) -> None:
             .scalars()
             .all()
         )
-        nodes = list(
-            (
-                await session.execute(
-                    select(SSHNode).where(
-                        SSHNode.owner_id == owner_id, SSHNode.status == "online"
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        node_query = select(SSHNode).where(
+            SSHNode.owner_id == owner_id, SSHNode.status == "online"
         )
+        if node_ids:
+            node_query = node_query.where(SSHNode.id.in_(list(node_ids)))
+        nodes = list((await session.execute(node_query)).scalars().all())
 
     if not nodes:
         for task in tasks:
@@ -177,6 +177,16 @@ async def dispatch_batch(batch_id: uuid.UUID) -> None:
         return
 
     await _set_batch_status(batch_id, "running")
+
+    # Hold a lease on each selected node for the batch's lifetime (Phase 3/6);
+    # released in finally so capacity is restored even on error / crash (and
+    # lease recovery sweeps it if the master dies mid-run).
+    lease_ids: list = []
+    async with db.session() as lsession:
+        lease_ids = await reserve_node_leases(
+            lsession, owner_id, nodes, job_id=str(batch_id),
+            ttl_seconds=settings.lease_ttl_seconds,
+        )
 
     async def on_update(idx, phase, node_id, attempts, result):
         task = tasks[idx]
@@ -202,14 +212,19 @@ async def dispatch_batch(batch_id: uuid.UUID) -> None:
                 attempts=attempts,
             )
 
-    await run_across_nodes(
-        nodes,
-        batch_code,
-        [task.input_data or "" for task in tasks],
-        nice=settings.task_nice,
-        timeout_seconds=settings.task_timeout_seconds,
-        max_output_bytes=settings.max_output_bytes,
-        on_update=on_update,
-    )
-    await _finalize_batch(batch_id)
+    try:
+        await run_across_nodes(
+            nodes,
+            batch_code,
+            [task.input_data or "" for task in tasks],
+            nice=settings.task_nice,
+            timeout_seconds=settings.task_timeout_seconds,
+            max_output_bytes=settings.max_output_bytes,
+            on_update=on_update,
+        )
+    finally:
+        await _finalize_batch(batch_id)
+        if lease_ids:
+            async with db.session() as rsession:
+                await release_leases(rsession, owner_id, lease_ids)
     logger.info("dispatch_batch_done", batch_id=str(batch_id), tasks=len(tasks))

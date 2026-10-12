@@ -51,17 +51,35 @@ class MacOSAdapter(OSAdapter):
     def build_execute_command(
         self, remote_path: str, spec: ResourceSpec, *, nice: int = _DEFAULT_NICE, strict: bool = False
     ) -> str:
-        # strict is accepted for interface parity; macOS cannot honour a hard
-        # memory cap, so it always runs the best-effort form. macOS does not ship
-        # timeout(1); use coreutils gtimeout when present, otherwise run without
-        # a wall-clock bound (the master-side watchdog still applies).
+        # macOS has no hard memory cgroup. Honest enforcement:
+        #  * best-effort (default): nice + wall-clock timeout only.
+        #  * strict (opt-in): add a lightweight RSS watchdog that samples the
+        #    process memory every second and kills it on breach (exit 137),
+        #    with the same wall-clock bound (exit 124). Still best-effort — the
+        #    task can briefly spike above the cap between samples.
         quoted = shlex.quote(remote_path)
-        run = f"nice -n {nice} {self.python_command()} {quoted}"
+        py = self.python_command()
         t = spec.timeout_seconds
+
+        if strict and spec.memory_mb > 0:
+            mem_kb = spec.memory_mb * 1024
+            return (
+                f"nice -n {nice} {py} {quoted} & p=$!; "
+                f"lim={mem_kb}; end=$(( $(date +%s) + {t} )); "
+                "while kill -0 $p 2>/dev/null; do "
+                "rss=$(ps -o rss= -p $p 2>/dev/null | tr -d ' '); "
+                'if [ -n "$rss" ] && [ "$rss" -gt "$lim" ]; then '
+                f'kill -9 $p 2>/dev/null; wait $p 2>/dev/null; echo "[killed: memory exceeded {spec.memory_mb}MB]" >&2; exit 137; fi; '
+                'if [ "$(date +%s)" -ge "$end" ]; then '
+                'kill -9 $p 2>/dev/null; wait $p 2>/dev/null; echo "[task timed out]" >&2; exit 124; fi; '
+                "sleep 1; done; wait $p; exit $?"
+            )
+
+        run = f"nice -n {nice} {py} {quoted}"
         return (
             f"if command -v timeout >/dev/null 2>&1; then "
-            f"nice -n {nice} timeout {t}s {self.python_command()} {quoted}; "
+            f"nice -n {nice} timeout {t}s {py} {quoted}; "
             f"elif command -v gtimeout >/dev/null 2>&1; then "
-            f"nice -n {nice} gtimeout {t}s {self.python_command()} {quoted}; "
+            f"nice -n {nice} gtimeout {t}s {py} {quoted}; "
             f"else {run}; fi"
         )

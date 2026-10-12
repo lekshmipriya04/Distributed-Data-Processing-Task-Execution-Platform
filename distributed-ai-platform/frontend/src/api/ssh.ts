@@ -24,6 +24,15 @@ export interface NodeDetectResponse {
   detected_memory_gb: number;
   detected_gpu: number;
   os_info?: string | null;
+  os_type?: string | null;
+  gpu_vendor?: string | null;
+  gpu_backend?: string | null;
+  gpu_model?: string | null;
+  python_version?: string | null;
+  java_version?: string | null;
+  spark_version?: string | null;
+  ray_version?: string | null;
+  resource_enforcement?: string | null;
   host_key_type?: string | null;
   host_key_b64?: string | null;
   fingerprint?: string | null;
@@ -38,6 +47,15 @@ export interface NodeRegisterRequest extends NodeConnectRequest {
   detected_memory_gb: number;
   detected_gpu: number;
   os_info?: string | null;
+  os_type?: string | null;
+  gpu_vendor?: string | null;
+  gpu_backend?: string | null;
+  gpu_model?: string | null;
+  python_version?: string | null;
+  java_version?: string | null;
+  spark_version?: string | null;
+  ray_version?: string | null;
+  resource_enforcement?: string | null;
   allocated_cpu: number;
   allocated_memory_gb: number;
 }
@@ -54,6 +72,15 @@ export interface NodeResponse {
   detected_memory_gb: number;
   detected_gpu: number;
   os_info?: string | null;
+  os_type?: string | null;
+  gpu_vendor?: string | null;
+  gpu_model?: string | null;
+  python_version?: string | null;
+  java_version?: string | null;
+  spark_version?: string | null;
+  ray_version?: string | null;
+  resource_enforcement?: string | null;
+  health_status?: string | null;
   allocated_cpu: number;
   allocated_memory_gb: number;
   status: string;
@@ -89,12 +116,14 @@ export interface BatchTasksResponse {
 }
 
 // --- distributed ML training --------------------------------------------
-export type TrainModelType = 'linear_regression' | 'logistic_regression';
+export type TrainModelType = 'linear_regression' | 'logistic_regression' | 'cnn';
+export type TrainEngine = 'spark' | 'ray';
 export type TrainMode = 'single' | 'multi';
 
 export interface TrainRequest {
   dataset_id: string;
   model_type: TrainModelType;
+  engine: TrainEngine;
   target_column: string;
   feature_columns: string[];
   mode: TrainMode;
@@ -102,6 +131,8 @@ export interface TrainRequest {
   learning_rate: number;
   epochs: number;
   rounds: number;
+  num_classes?: number;
+  node_ids?: string[];
 }
 
 export interface TrainShardInfo {
@@ -117,6 +148,7 @@ export interface TrainRunResponse {
   owner_id: string;
   dataset_id: string;
   model_type: string;
+  engine?: string | null;
   mode: string;
   rounds: number;
   status: string;
@@ -140,7 +172,7 @@ export const sshApi = {
   deleteNode: (id: string) =>
     apiRequest<null>(`/api/v1/ssh/nodes/${id}`, { method: 'DELETE' }),
 
-  createBatch: (body: { code: string; inputs: string[] }) =>
+  createBatch: (body: { code: string; inputs: string[]; node_ids?: string[]; runtime?: string }) =>
     apiRequest<BatchResponse>('/api/v1/ssh/batches', { method: 'POST', body }),
 
   getBatchTasks: (id: string) =>
@@ -174,4 +206,25 @@ export const sshApi = {
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   },
+
+  downloadTrainingData: async (id: string) => {
+    const response = await fetch(`/api/v1/ssh/train/${id}/data`, { headers: getAuthHeaders() });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || 'Failed to download training data');
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `train_data-${id}.json`;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
+
+  deleteTrainingRun: (id: string) =>
+    apiRequest<null>(`/api/v1/ssh/train/${id}`, { method: 'DELETE' }),
 };

@@ -83,3 +83,16 @@ async def list_datasets(
 ):
     datasets, total = await service.list_datasets(skip, limit)
     return DatasetListResponse(items=datasets, total=total)
+
+
+@router.delete("/datasets/{dataset_id}", status_code=204)
+async def delete_dataset(
+    dataset_id: UUID,
+    user: dict = Depends(get_current_user),
+    service: DatasetService = Depends(get_dataset_service)
+):
+    """Remove a dataset from the list (DB row + best-effort HDFS file)."""
+    deleted = await service.delete_dataset(dataset_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return None

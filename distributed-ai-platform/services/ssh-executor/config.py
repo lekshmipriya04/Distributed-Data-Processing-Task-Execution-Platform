@@ -21,6 +21,13 @@ class SSHExecutorSettings(BaseServiceSettings):
     # Priority (nice) applied to remote tasks so the provider is not disturbed.
     task_nice: int = Field(default=19, ge=0, le=19)
 
+    # --- generic user-code execution (Phase 6) ---------------------------
+    # Guardrails on the authorized remote-code-execution surface.
+    max_code_bytes: int = Field(default=1_000_000, ge=1024)
+    max_inputs_per_batch: int = Field(default=10_000, ge=1)
+    allowed_runtimes: list[str] = Field(default_factory=lambda: ["python", "spark", "ray"])
+    lease_ttl_seconds: int = Field(default=3600, ge=1)
+
     # --- distributed ML training (federated averaging over the fan-out) ---
     # Where to fetch uploaded datasets from (whole-file CSV download).
     storage_service_url: str = Field(default="http://storage-service:8001")

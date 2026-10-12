@@ -19,8 +19,12 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from batch_service import BatchService
+from config import get_settings
 from database import get_db_manager
 from dispatcher import dispatch_batch
+from execution_manager import validate_execution_request
+from lease_logic import CapacityError
+from lease_service import LeaseService
 from models import TrainingRun
 from node_service import NodeService
 from onnx_export import build_onnx_model
@@ -28,6 +32,8 @@ from schemas import (
     BatchCreateRequest,
     BatchResponse,
     BatchTasksResponse,
+    LeaseCreateRequest,
+    LeaseResponse,
     NodeConnectRequest,
     NodeDetectResponse,
     NodeListResponse,
@@ -38,7 +44,7 @@ from schemas import (
     TrainRunResponse,
 )
 from shared.common.auth import get_current_user
-from training_orchestrator import run_training
+from training_orchestrator import _load_dataset_rows, build_train_data, run_training
 
 logger = structlog.get_logger(__name__)
 
@@ -57,6 +63,10 @@ def get_node_service(session: AsyncSession = Depends(get_db_session)) -> NodeSer
 
 def get_batch_service(session: AsyncSession = Depends(get_db_session)) -> BatchService:
     return BatchService(session)
+
+
+def get_lease_service(session: AsyncSession = Depends(get_db_session)) -> LeaseService:
+    return LeaseService(session)
 
 
 # --- per-owner rate limiting --------------------------------------------
@@ -143,6 +153,104 @@ async def delete_node(
     return None
 
 
+@router.post("/nodes/{node_id}/runtime-check")
+async def runtime_check(
+    node_id: UUID,
+    user: dict = Depends(get_current_user),
+    service: NodeService = Depends(get_node_service),
+):
+    """Re-probe a node for Python/Java/Spark/Ray readiness (no persistence)."""
+    result = await service.detect_runtime(node_id, user.get("sub"))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return result
+
+
+@router.post("/nodes/{node_id}/health-check", response_model=NodeResponse)
+async def health_check_node(
+    node_id: UUID,
+    user: dict = Depends(get_current_user),
+    service: NodeService = Depends(get_node_service),
+):
+    """Master-driven SSH health probe; updates health_status + last_health_check."""
+    node = await service.health_check(node_id, user.get("sub"))
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return node
+
+
+# --- resource leases (Phase 3) ------------------------------------------
+@router.get("/nodes/{node_id}/capacity")
+async def node_capacity(
+    node_id: UUID,
+    user: dict = Depends(get_current_user),
+    service: LeaseService = Depends(get_lease_service),
+):
+    """Live capacity for a node = borrowed total − Σ active lease allocations."""
+    cap = await service.get_node_capacity(node_id, user.get("sub"))
+    if cap is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return cap
+
+
+@router.post("/leases", response_model=LeaseResponse, status_code=201)
+async def create_lease(
+    request: LeaseCreateRequest,
+    user: dict = Depends(get_current_user),
+    service: LeaseService = Depends(get_lease_service),
+):
+    """Reserve bounded capacity on a node (409 if the node is full)."""
+    try:
+        lease = await service.reserve(
+            owner_id=user.get("sub"),
+            node_id=request.node_id,
+            cpu=request.cpu,
+            memory_gb=request.memory_gb,
+            gpu=request.gpu,
+            job_id=request.job_id,
+            ttl_seconds=request.ttl_seconds,
+        )
+    except CapacityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return lease
+
+
+@router.get("/leases", response_model=list[LeaseResponse])
+async def list_leases(
+    node_id: UUID | None = None,
+    active_only: bool = False,
+    user: dict = Depends(get_current_user),
+    service: LeaseService = Depends(get_lease_service),
+):
+    return await service.list_leases(user.get("sub"), node_id=node_id, active_only=active_only)
+
+
+@router.post("/leases/{lease_id}/activate", response_model=LeaseResponse)
+async def activate_lease(
+    lease_id: UUID,
+    user: dict = Depends(get_current_user),
+    service: LeaseService = Depends(get_lease_service),
+):
+    lease = await service.activate(lease_id, user.get("sub"))
+    if not lease:
+        raise HTTPException(status_code=404, detail="Lease not found")
+    return lease
+
+
+@router.post("/leases/{lease_id}/release", response_model=LeaseResponse)
+async def release_lease(
+    lease_id: UUID,
+    user: dict = Depends(get_current_user),
+    service: LeaseService = Depends(get_lease_service),
+):
+    lease = await service.release(lease_id, user.get("sub"))
+    if not lease:
+        raise HTTPException(status_code=404, detail="Lease not found")
+    return lease
+
+
 # --- task batches --------------------------------------------------------
 @router.post(
     "/batches",
@@ -156,9 +264,22 @@ async def create_batch(
     user: dict = Depends(get_current_user),
     service: BatchService = Depends(get_batch_service),
 ):
+    settings = get_settings()
+    try:
+        validate_execution_request(
+            request.code,
+            request.inputs,
+            runtime=request.runtime,
+            allowed_runtimes=settings.allowed_runtimes,
+            max_code_bytes=settings.max_code_bytes,
+            max_inputs=settings.max_inputs_per_batch,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     batch = await service.create_batch(request, user.get("sub"))
-    # Fan out across the owner's nodes without blocking the response.
-    background.add_task(dispatch_batch, batch.id)
+    # Fan out across the owner's nodes (optionally a chosen subset) without
+    # blocking the response.
+    background.add_task(dispatch_batch, batch.id, request.node_ids or None)
     return batch
 
 
@@ -198,6 +319,7 @@ def _train_run_response(run: TrainingRun) -> TrainRunResponse:
         owner_id=run.owner_id,
         dataset_id=run.dataset_id,
         model_type=run.model_type,
+        engine=getattr(run, "engine", None),
         mode=run.mode,
         rounds=run.rounds,
         status=run.status,
@@ -228,12 +350,15 @@ async def start_training(
         "local_cores": request.local_cores,
         "target_column": request.target_column,
         "feature_columns": request.feature_columns,
+        "num_classes": request.num_classes,
+        "node_ids": [str(n) for n in request.node_ids],
     }
     run = TrainingRun(
         owner_id=user.get("sub"),
         dataset_id=request.dataset_id,
         model_type=request.model_type,
         mode=request.mode,
+        engine=request.engine,
         rounds=request.rounds,
         hyperparams_json=json.dumps(hyper),
         status="pending",
@@ -306,3 +431,65 @@ async def download_training_model(
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="model-{run.id}.onnx"'},
     )
+
+
+@router.get("/train/{run_id}/data")
+async def download_training_data(
+    run_id: UUID,
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Download ``train_data.json``: the exact numeric rows the run used plus the
+    full training manifest (engine, hyperparameters incl. epochs, metrics, history)."""
+    run = (
+        await session.execute(
+            select(TrainingRun).where(
+                TrainingRun.id == run_id, TrainingRun.owner_id == user.get("sub")
+            )
+        )
+    ).scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Training run not found")
+
+    hyper = json.loads(run.hyperparams_json or "{}")
+    try:
+        rows, feature_names = await _load_dataset_rows(
+            run.dataset_id,
+            hyper.get("target_column", ""),
+            hyper.get("feature_columns", []) or [],
+            get_settings(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not rebuild training data: {exc}")
+
+    payload = build_train_data(
+        run, rows, feature_names, hyper,
+        metrics=json.loads(run.metrics_json) if run.metrics_json else None,
+        history=json.loads(run.history_json) if run.history_json else None,
+    )
+    return Response(
+        content=json.dumps(payload, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="train_data-{run.id}.json"'},
+    )
+
+
+@router.delete("/train/{run_id}", status_code=204)
+async def delete_training_run(
+    run_id: UUID,
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Remove a training run (owner-scoped) so a fresh run starts clean."""
+    run = (
+        await session.execute(
+            select(TrainingRun).where(
+                TrainingRun.id == run_id, TrainingRun.owner_id == user.get("sub")
+            )
+        )
+    ).scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Training run not found")
+    await session.delete(run)
+    await session.commit()
+    return None

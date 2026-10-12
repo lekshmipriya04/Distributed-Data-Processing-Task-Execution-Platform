@@ -89,6 +89,109 @@ def train_core(model_type, lr, epochs, weights, rows):
 
 
 # --- master-side aggregation + evaluation (never runs remotely) ----------
+def _cnn_init(arch: dict, seed: int = 1234) -> list:
+    """Deterministic initial flat parameter vector for the baseline CNN.
+
+    Layout (shared with ray_templates + onnx_export):
+    ``[conv_w(F*9), conv_b(F), fc_w(flat*C), fc_b(C)]`` with
+    ``oh=side-2``, ``ph=oh//2``, ``flat=F*ph*ph``.
+    """
+    import random
+
+    f = int(arch["F"]); side = int(arch["side"]); c = int(arch["C"])
+    ph = (side - 2) // 2
+    flat = f * ph * ph
+    total = f * 9 + f + flat * c + c
+    rng = random.Random(seed)
+    s1 = (2.0 / 9.0) ** 0.5
+    s2 = (2.0 / max(1, flat)) ** 0.5
+    out = [rng.uniform(-s1, s1) for _ in range(f * 9)] + [0.0] * f
+    out += [rng.uniform(-s2, s2) for _ in range(flat * c)] + [0.0] * c
+    return out
+
+
+def _evaluate_cnn(weights: dict, rows: list) -> dict:
+    """Forward-only accuracy + macro-F1 for the baseline CNN (pure stdlib).
+
+    Must mirror the forward pass in ray_templates / the ONNX graph exactly:
+    conv(valid 3x3) -> relu -> 2x2 maxpool -> flatten -> dense -> argmax.
+    """
+    params = weights.get("w") or []
+    arch = weights.get("arch") or {}
+    if not params or not rows:
+        return {}
+    d = len(rows[0]) - 1
+    f = int(arch.get("F", 8))
+    side = int(arch.get("side", 0)) or int(d ** 0.5)
+    side -= side % 2
+    if side < 4:
+        side = 4
+    c = int(arch.get("C", 0)) or (max(int(round(float(r[d]))) for r in rows) + 1)
+    px = side * side
+    oh = side - 2
+    ph = oh // 2
+    flat = f * ph * ph
+    fc_base = f * 9 + f
+    fc_w0 = fc_base
+    fc_b0 = fc_base + flat * c
+
+    def predict(row) -> int:
+        x = [float(v) for v in row[:px]] + [0.0] * max(0, px - len(row[:d]))
+        pooled = [0.0] * flat
+        for ff in range(f):
+            cb = params[f * 9 + ff]
+            base_w = ff * 9
+            for a in range(ph):
+                for b in range(ph):
+                    best = None
+                    for di in range(2):
+                        i = a * 2 + di
+                        for dj in range(2):
+                            j = b * 2 + dj
+                            s = cb
+                            for u in range(3):
+                                for v in range(3):
+                                    s += params[base_w + u * 3 + v] * x[(i + u) * side + (j + v)]
+                            if s < 0.0:
+                                s = 0.0  # relu
+                            if best is None or s > best:
+                                best = s
+                    pooled[ff * ph * ph + a * ph + b] = best if best is not None else 0.0
+        best_c, best_logit = 0, None
+        for cc in range(c):
+            s = params[fc_b0 + cc]
+            for k in range(flat):
+                s += params[fc_w0 + k * c + cc] * pooled[k]
+            if best_logit is None or s > best_logit:
+                best_logit, best_c = s, cc
+        return best_c
+
+    n = len(rows)
+    correct = 0
+    tp = [0] * c; fp = [0] * c; fn = [0] * c
+    for row in rows:
+        y = int(round(float(row[d])))
+        y = 0 if y < 0 else (c - 1 if y >= c else y)
+        p = predict(row)
+        if p == y:
+            correct += 1
+            tp[y] += 1
+        else:
+            fp[p] += 1
+            fn[y] += 1
+    f1s = []
+    for cc in range(c):
+        prec = tp[cc] / (tp[cc] + fp[cc]) if (tp[cc] + fp[cc]) else 0.0
+        rec = tp[cc] / (tp[cc] + fn[cc]) if (tp[cc] + fn[cc]) else 0.0
+        f1s.append(2 * prec * rec / (prec + rec) if (prec + rec) else 0.0)
+    return {
+        "accuracy": round(correct / n if n else 0.0, 4),
+        "f1": round(sum(f1s) / len(f1s) if f1s else 0.0, 4),
+        "classes": c,
+        "n": n,
+    }
+
+
 def aggregate(results: list) -> Optional[dict]:
     """Weighted mean of shard weights (FedAvg), weighted by shard size ``n``."""
     valid = [r for r in results if r and r.get("n", 0) > 0 and r.get("w")]
@@ -114,6 +217,8 @@ def evaluate(model_type: str, weights: Optional[dict], rows: list) -> dict:
     """
     if not weights or not weights.get("w") or not rows:
         return {}
+    if model_type == "cnn":
+        return _evaluate_cnn(weights, rows)
     w = weights["w"]
     b = float(weights.get("b", 0.0))
     d = len(w)

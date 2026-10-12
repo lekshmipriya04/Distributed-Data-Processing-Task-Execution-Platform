@@ -33,44 +33,7 @@ services:
       retries: 10
       start_period: 10s
 
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.4.0
-    container_name: zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    networks:
-      - platform-net
-    healthcheck:
-      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  kafka:
-    image: confluentinc/cp-kafka:7.4.0
-    container_name: kafka
-    depends_on:
-      zookeeper:
-        condition: service_healthy
-    ports:
-      - "9092:9092"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-    networks:
-      - platform-net
-    healthcheck:
-      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 20s
-
+ 
   namenode:
     image: apache/hadoop:3
     container_name: namenode
@@ -97,6 +60,7 @@ services:
   datanode-1:
     image: apache/hadoop:3
     container_name: datanode-1
+    hostname: datanode-1
     # Data dir is a named volume owned by root; the datanode enforces
     # dfs.datanode.data.dir.perm (700) via chmod on startup, which the image's
     # non-root `hadoop` user cannot do on a root-owned mount (EPERM -> volume
@@ -118,6 +82,7 @@ services:
   datanode-2:
     image: apache/hadoop:3
     container_name: datanode-2
+    hostname: datanode-2
     user: root
     command: ["hdfs", "datanode"]
     depends_on:
@@ -135,6 +100,7 @@ services:
   datanode-3:
     image: apache/hadoop:3
     container_name: datanode-3
+    hostname: datanode-3
     user: root
     command: ["hdfs", "datanode"]
     depends_on:
@@ -259,34 +225,6 @@ services:
       timeout: 10s
       retries: 10
       start_period: 30s
-
-  # ==========================================
-  # Monitoring Stack
-  # ==========================================
-  prometheus:
-    image: prom/prometheus:v2.45.0
-    container_name: prometheus
-    volumes:
-      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    ports:
-      - "9090:9090"
-    networks:
-      - platform-net
-
-  grafana:
-    image: grafana/grafana:10.0.3
-    container_name: grafana
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
-    volumes:
-      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
-      - grafana_data:/var/lib/grafana
-    ports:
-      - "3001:3000"
-    networks:
-      - platform-net
-
 
   # ==========================================
   # Microservices
@@ -447,8 +385,6 @@ services:
         condition: service_healthy
       worker-registry:
         condition: service_started
-      kafka:
-        condition: service_healthy
 
   scheduler:
     build:
@@ -507,33 +443,6 @@ services:
     networks:
       - platform-net
 
-  worker-node-1:
-    build:
-      context: .
-      dockerfile: worker/Dockerfile
-    container_name: worker-node-1
-    # Share the same env file as the services so the worker signs its JWTs with
-    # the identical JWT_SECRET the services validate against (otherwise the
-    # worker's register/heartbeat calls would 401).
-    env_file:
-      - config/.env
-    environment:
-      - CONTROL_PLANE_URL=http://api-gateway:8000
-      - WORKER_REGISTRY_URL=http://worker-registry:8008
-      - RESOURCE_MANAGER_URL=http://resource-manager:8009
-      # Subject label for the worker's minted JWT (identity only, not a secret).
-      - WORKER_TOKEN=simulated-worker-1
-      - WORKER_NAME=simulated-worker-1
-      - MAX_CPU=4
-      - MAX_MEMORY_GB=8.0
-      - ALLOW_GPU=false
-      - REQUIRE_APPROVAL=true
-    networks:
-      - platform-net
-    depends_on:
-      - api-gateway
-      - worker-registry
-      - resource-manager
 
 volumes:
   postgres_data:
@@ -542,5 +451,3 @@ volumes:
   hadoop_datanode_2:
   hadoop_datanode_3:
   mlflow_data:
-  prometheus_data:
-  grafana_data:

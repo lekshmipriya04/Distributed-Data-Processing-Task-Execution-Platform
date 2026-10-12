@@ -1,20 +1,14 @@
 import { useEffect, useState } from 'react';
-import { Terminal, Cpu, Trash2, Plus, Play, Server } from 'lucide-react';
+import { Cpu, Trash2, Plus, Server, Boxes } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
-import { Card, PrimaryButton, SecondaryButton, StatusBadge } from '../components/common/Primitives';
+import { Card, PrimaryButton, SecondaryButton, StatusBadge, NumberField } from '../components/common/Primitives';
 import { ApiError } from '../api/client';
 import {
   sshApi,
   type AuthType,
   type NodeDetectResponse,
   type NodeResponse,
-  type BatchTasksResponse,
 } from '../api/ssh';
-
-const DEFAULT_CODE = `import sys
-# Input for this task arrives on stdin (data stays with the master).
-data = sys.stdin.read().strip()
-print(f"processed: {data} -> {len(data)} chars")`;
 
 export function SSHExecutorPage() {
   const { showSuccess, showError } = useToast();
@@ -36,13 +30,6 @@ export function SSHExecutorPage() {
   const [allocMem, setAllocMem] = useState(1);
   const [registering, setRegistering] = useState(false);
 
-  // Parallel tasks ---------------------------------------------------------
-  const [code, setCode] = useState(DEFAULT_CODE);
-  const [inputsText, setInputsText] = useState('alpha\nbeta\ngamma\ndelta');
-  const [submitting, setSubmitting] = useState(false);
-  const [batch, setBatch] = useState<BatchTasksResponse | null>(null);
-  const [batchId, setBatchId] = useState<string | null>(null);
-
   const loadNodes = async () => {
     try {
       const res = await sshApi.listNodes();
@@ -57,6 +44,7 @@ export function SSHExecutorPage() {
     loadNodes();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
   // Step 1: connect to the provider and auto-detect its resources.
   const handleConnect = async () => {
     if (!form.host || !form.username) {
@@ -104,6 +92,15 @@ export function SSHExecutorPage() {
         detected_memory_gb: detected.detected_memory_gb,
         detected_gpu: detected.detected_gpu,
         os_info: detected.os_info,
+        os_type: detected.os_type,
+        gpu_vendor: detected.gpu_vendor,
+        gpu_backend: detected.gpu_backend,
+        gpu_model: detected.gpu_model,
+        python_version: detected.python_version,
+        java_version: detected.java_version,
+        spark_version: detected.spark_version,
+        ray_version: detected.ray_version,
+        resource_enforcement: detected.resource_enforcement,
         allocated_cpu: allocCpu,
         allocated_memory_gb: allocMem,
       });
@@ -128,54 +125,6 @@ export function SSHExecutorPage() {
     }
   };
 
-  // Submit a batch; the master fans the tasks out across allocated cores.
-  const handleSubmitBatch = async () => {
-    const inputs = inputsText.split('\n').map((s) => s.trim()).filter(Boolean);
-    if (!code.trim()) {
-      showError('Task code is required');
-      return;
-    }
-    if (nodes.length === 0) {
-      showError('Register at least one provider first');
-      return;
-    }
-    setSubmitting(true);
-    setBatch(null);
-    try {
-      const created = await sshApi.createBatch({ code, inputs: inputs.length ? inputs : [''] });
-      setBatchId(created.id);
-      showSuccess(`Batch submitted (${created.total} tasks)`);
-    } catch (e) {
-      showError(e instanceof Error ? e.message : 'Submit failed');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  // Poll the running batch until every task settles.
-  useEffect(() => {
-    if (!batchId) return;
-    let active = true;
-    const tick = async () => {
-      try {
-        const res = await sshApi.getBatchTasks(batchId);
-        if (!active) return;
-        setBatch(res);
-        if (['completed', 'completed_with_errors', 'failed'].includes(res.batch.status)) {
-          clearInterval(timer);
-        }
-      } catch {
-        /* transient; keep polling */
-      }
-    };
-    const timer = setInterval(tick, 2000);
-    tick();
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [batchId]);
-
   const totalAllocatedCores = nodes.reduce((sum, n) => sum + n.allocated_cpu, 0);
 
   return (
@@ -187,9 +136,9 @@ export function SSHExecutorPage() {
           <h2 className="text-lg font-semibold text-slate-900">Add Provider</h2>
         </div>
         <p className="text-sm text-slate-500 mb-5">
-          Enter a machine's IP and credentials. We connect over SSH, auto-detect its resources,
-          and you choose how many cores to borrow. The provider only runs <code>sshd</code> — no
-          agent, no files to run, and your task data never leaves the master.
+          Enter a machine's IP and credentials. We connect over SSH, auto-detect its resources and
+          runtimes, and you choose how many cores to borrow. The provider only runs <code>sshd</code> —
+          no agent, no files to run, and your task data never leaves the master.
         </p>
         <div className="grid grid-cols-2 gap-4">
           <div>
@@ -202,7 +151,9 @@ export function SSHExecutorPage() {
           </div>
           <div>
             <label className="block text-sm font-medium mb-1 text-slate-700">Port</label>
-            <input type="number" className="w-full border rounded-lg p-2 outline-none focus:ring-2 focus:ring-blue-500" value={form.port} onChange={(e) => { const p = parseInt(e.target.value, 10); setForm({ ...form, port: Number.isNaN(p) ? 22 : p }); }} />
+            <NumberField value={form.port} min={1} max={65535} step={1}
+              onChange={(n) => setForm({ ...form, port: n })}
+              className="w-full border rounded-lg p-2 outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
           <div>
             <label className="block text-sm font-medium mb-1 text-slate-700">Username</label>
@@ -238,9 +189,10 @@ export function SSHExecutorPage() {
               <Stat label="Memory (GB)" value={String(detected.detected_memory_gb)} />
               <Stat label="GPUs" value={String(detected.detected_gpu)} />
             </div>
-            {detected.os_info && <p className="text-xs text-slate-500 mb-1">OS: {detected.os_info}</p>}
+            {detected.os_info && <p className="text-xs text-slate-500 mb-2">OS: {detected.os_info}</p>}
+            <CapabilityBadges node={detected} />
             {detected.fingerprint && (
-              <p className="text-xs text-slate-500 mb-4 font-mono break-all">
+              <p className="text-xs text-slate-500 mt-3 mb-4 font-mono break-all">
                 Host key pinned: {detected.fingerprint}
               </p>
             )}
@@ -276,75 +228,75 @@ export function SSHExecutorPage() {
         ) : (
           <div className="space-y-2">
             {nodes.map((n) => (
-              <div key={n.id} className="flex items-center justify-between border border-slate-200 rounded-lg px-4 py-3">
-                <div>
-                  <div className="font-medium text-slate-900">{n.name} <span className="text-slate-400 font-normal">({n.host}:{n.port})</span></div>
-                  <div className="text-xs text-slate-500">Borrowing {n.allocated_cpu} / {n.detected_cpu} cores · {n.allocated_memory_gb} / {n.detected_memory_gb} GB</div>
+              <div key={n.id} className="border border-slate-200 rounded-lg px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="font-medium text-slate-900">{n.name} <span className="text-slate-400 font-normal">({n.host}:{n.port})</span></div>
+                    <div className="text-xs text-slate-500">Borrowing {n.allocated_cpu} / {n.detected_cpu} cores · {n.allocated_memory_gb} / {n.detected_memory_gb} GB</div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <StatusBadge status={n.status === 'online' ? 'succeeded' : n.status} />
+                    <button onClick={() => handleDelete(n.id)} className="text-slate-400 hover:text-rose-600 transition-colors" title="Remove provider"><Trash2 size={16} /></button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <StatusBadge status={n.status === 'online' ? 'succeeded' : n.status} />
-                  <button onClick={() => handleDelete(n.id)} className="text-slate-400 hover:text-rose-600 transition-colors" title="Remove provider"><Trash2 size={16} /></button>
+                <div className="mt-2">
+                  <CapabilityBadges node={n} />
                 </div>
               </div>
             ))}
           </div>
         )}
       </Card>
+    </div>
+  );
+}
 
-      {/* Parallel tasks ----------------------------------------------- */}
-      <Card>
-        <div className="flex items-center gap-2 mb-1">
-          <Terminal size={18} className="text-blue-600" />
-          <h2 className="text-lg font-semibold text-slate-900">Parallel Tasks</h2>
-        </div>
-        <p className="text-sm text-slate-500 mb-5">
-          One script, many inputs. The master splits the inputs into tasks and runs them in
-          parallel across your providers' borrowed cores — each task reads its input on stdin,
-          runs niced and pinned to the allocated cores, and is wiped afterwards.
-        </p>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium mb-1 text-slate-700">Task code (Python)</label>
-            <textarea className="w-full border rounded-lg p-3 bg-slate-50 font-mono text-sm h-48 outline-none focus:ring-2 focus:ring-blue-500 shadow-inner" value={code} onChange={(e) => setCode(e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1 text-slate-700">Inputs (one per line = one task)</label>
-            <textarea className="w-full border rounded-lg p-3 font-mono text-sm h-48 outline-none focus:ring-2 focus:ring-blue-500" value={inputsText} onChange={(e) => setInputsText(e.target.value)} />
-          </div>
-        </div>
-        <div className="mt-5">
-          <PrimaryButton onClick={handleSubmitBatch} disabled={submitting}>
-            <span className="flex items-center gap-2"><Play size={16} /> {submitting ? 'Submitting…' : 'Run in Parallel'}</span>
-          </PrimaryButton>
-        </div>
+// Shared capability shape across detect + registered node responses.
+interface Caps {
+  os_type?: string | null;
+  gpu_vendor?: string | null;
+  gpu_model?: string | null;
+  python_version?: string | null;
+  java_version?: string | null;
+  spark_version?: string | null;
+  ray_version?: string | null;
+  resource_enforcement?: string | null;
+}
 
-        {batch && (
-          <div className="mt-6 border-t pt-5">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-slate-900">Batch {batch.batch.id.slice(0, 8)}</h3>
-              <div className="flex items-center gap-3 text-sm">
-                <StatusBadge status={batch.batch.status === 'completed' ? 'succeeded' : batch.batch.status.includes('error') ? 'failed' : 'running'} />
-                <span className="text-slate-500">{batch.batch.completed}/{batch.batch.total} done · {batch.batch.failed} failed</span>
-              </div>
-            </div>
-            <div className="space-y-3">
-              {batch.tasks.map((t) => (
-                <div key={t.id} className="border border-slate-200 rounded-lg overflow-hidden">
-                  <div className="flex items-center justify-between px-4 py-2 bg-slate-50">
-                    <span className="text-sm font-medium text-slate-700">Task #{t.seq}{t.attempts > 1 ? ` (attempt ${t.attempts})` : ''}</span>
-                    <StatusBadge status={t.status === 'completed' ? 'succeeded' : t.status} />
-                  </div>
-                  {(t.stdout || t.stderr) && (
-                    <pre className="bg-[#0f172a] text-emerald-400 text-xs font-mono p-3 overflow-auto whitespace-pre-wrap max-h-40">
-{t.stdout}{t.stderr ? `\n[stderr]\n${t.stderr}` : ''}
-                    </pre>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </Card>
+function CapabilityBadges({ node }: { node: Caps }) {
+  const chips: { label: string; ok: boolean }[] = [
+    { label: node.python_version ? `Python ${node.python_version}` : 'No Python', ok: !!node.python_version },
+    { label: node.java_version ? `Java ${node.java_version}` : 'No Java', ok: !!node.java_version },
+    { label: node.spark_version ? `Spark ${node.spark_version}` : 'No Spark', ok: !!node.spark_version },
+    { label: node.ray_version ? `Ray ${node.ray_version}` : 'No Ray', ok: !!node.ray_version },
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {node.os_type && (
+        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
+          {node.os_type}
+        </span>
+      )}
+      {node.resource_enforcement && (
+        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200" title="Resource enforcement backend">
+          {node.resource_enforcement}
+        </span>
+      )}
+      {(node.gpu_vendor || node.gpu_model) && (
+        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+          <Boxes size={11} /> {node.gpu_model || node.gpu_vendor}
+        </span>
+      )}
+      {chips.map((c) => (
+        <span
+          key={c.label}
+          className={`inline-flex items-center text-xs px-2 py-0.5 rounded-full border ${
+            c.ok ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-slate-50 text-slate-400 border-slate-200'
+          }`}
+        >
+          {c.label}
+        </span>
+      ))}
     </div>
   );
 }
