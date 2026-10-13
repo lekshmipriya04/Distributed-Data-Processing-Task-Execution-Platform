@@ -39,6 +39,31 @@ async def upload_dataset(
     dataset = await service.create_dataset(file, name, description, created_by)
     return dataset
 
+@router.post("/datasets/images", response_model=DatasetResponse, status_code=201)
+async def upload_image_dataset(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    description: str = Form(None),
+    image_size: int = Form(8),
+    color: str = Form("grayscale"),
+    user: dict = Depends(get_current_user),
+    service: DatasetService = Depends(get_dataset_service)
+):
+    """Convert a .zip of label-foldered images into a flattened pixel CSV dataset.
+
+    Layout: ``<label>/<image files>``. Images are grayscaled, resized to a
+    square ``image_size`` and flattened to ``p0 … p{S*S-1}`` + numeric ``label``;
+    the stored artifact is a normal CSV so training is unchanged.
+    """
+    try:
+        content = await file.read()
+        dataset = await service.create_dataset_from_images(
+            content, name, description, user.get("sub"), image_size, color
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return dataset
+
 @router.get("/datasets/{dataset_id}", response_model=DatasetResponse)
 async def get_dataset(
     dataset_id: UUID,

@@ -20,6 +20,26 @@ export async function uploadDataset(
   });
 }
 
+// Upload a .zip of label-foldered images; the backend decodes + resizes +
+// flattens to a pixel CSV and records the image shape in schema_json.
+export async function uploadImageDataset(
+  file: File,
+  name: string,
+  imageSize = 8,
+): Promise<Dataset> {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('name', name);
+  formData.append('image_size', String(imageSize));
+  formData.append('color', 'grayscale');
+
+  return apiRequest<Dataset>(`${BASE}/datasets/images`, {
+    method: 'POST',
+    body: formData,
+    isFormData: true,
+  });
+}
+
 export async function listDatasets(
   skip = 0,
   limit = 20

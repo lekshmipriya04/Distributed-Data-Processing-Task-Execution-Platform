@@ -31,6 +31,7 @@ from database import get_db_manager
 from dispatcher import run_across_nodes
 from ml_templates import (
     _cnn_init,
+    _train_cnn,
     aggregate,
     evaluate,
     generate_remote_script,
@@ -135,8 +136,14 @@ async def _load_dataset_rows(
 
 # --- single-node local training (ProcessPoolExecutor) --------------------
 def _local_worker(args):
-    """Picklable top-level worker: train one shard in a separate process."""
+    """Picklable top-level worker: train one shard in a separate process.
+
+    CNN shards use the stdlib conv trainer; linear/logistic use the shared SGD
+    core. This is what lets single-local-machine mode train a CNN with each
+    core acting as a shard worker (no Ray needed)."""
     model_type, lr, epochs, weights, rows = args
+    if model_type == "cnn":
+        return _train_cnn(weights, rows, lr, epochs)
     return train_core(model_type, lr, epochs, weights, rows)
 
 
@@ -307,11 +314,6 @@ async def run_training(run_id: uuid.UUID) -> None:
             pass
 
     await _update_run(run_id, status="running")
-
-    if mode == "single" and model_type == "cnn":
-        await _update_run(run_id, status="failed",
-                          message="CNN requires multi-node mode with the Ray engine")
-        return
 
     # 1. Load + parse the dataset.
     try:

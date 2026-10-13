@@ -192,6 +192,127 @@ def _evaluate_cnn(weights: dict, rows: list) -> dict:
     }
 
 
+def _train_cnn(weights: dict, rows: list, lr: float, epochs: int) -> dict:
+    """One shard of baseline-CNN training by per-sample SGD (pure stdlib).
+
+    Mirrors the forward pass of :func:`_evaluate_cnn` / ray_templates / the ONNX
+    graph exactly (conv 3x3 valid -> relu -> 2x2 maxpool -> flatten -> dense ->
+    softmax) and backprops cross-entropy. Returns FedAvg-shaped weights so the
+    master can average shards identically to the linear/logistic path:
+    ``{"w": flat_params, "b": 0.0, "arch": arch, "n": len(rows), "loss": ...}``.
+    This is what lets single-local-machine mode train a CNN by treating each
+    core as a shard worker — no Ray required.
+    """
+    arch = (weights or {}).get("arch") or {}
+    params = list((weights or {}).get("w") or [])
+    if not rows or not params:
+        return {"w": params, "b": 0.0, "arch": arch, "n": 0, "loss": 0.0}
+    d = len(rows[0]) - 1
+    f = int(arch.get("F", 8))
+    side = int(arch.get("side", 0)) or int(d ** 0.5)
+    side -= side % 2
+    if side < 4:
+        side = 4
+    c = int(arch.get("C", 0)) or (max(int(round(float(r[d]))) for r in rows) + 1)
+    px = side * side
+    oh = side - 2
+    ph = oh // 2
+    flat = f * ph * ph
+    conv_b0 = f * 9
+    fc_w0 = f * 9 + f
+    fc_b0 = fc_w0 + flat * c
+    n = len(rows)
+    total_loss = 0.0
+    reps = max(1, int(epochs))
+    for _ in range(reps):
+        for row in rows:
+            x = [float(v) for v in row[:px]]
+            if len(x) < px:
+                x += [0.0] * (px - len(x))
+            y = int(round(float(row[d])))
+            y = 0 if y < 0 else (c - 1 if y >= c else y)
+            # ---- forward: conv + relu over oh x oh ----
+            conv_act = [[0.0] * (oh * oh) for _ in range(f)]
+            for ff in range(f):
+                cb = params[conv_b0 + ff]
+                bw = ff * 9
+                for i in range(oh):
+                    for j in range(oh):
+                        s = cb
+                        for u in range(3):
+                            base = (i + u) * side + j
+                            w3 = bw + u * 3
+                            s += (params[w3] * x[base]
+                                  + params[w3 + 1] * x[base + 1]
+                                  + params[w3 + 2] * x[base + 2])
+                        conv_act[ff][i * oh + j] = s if s > 0.0 else 0.0
+            # 2x2 maxpool -> pooled[flat], remember the winning cell for routing
+            pooled = [0.0] * flat
+            arg = [0] * flat
+            for ff in range(f):
+                for a in range(ph):
+                    for b2 in range(ph):
+                        best = None
+                        bidx = 0
+                        for di in range(2):
+                            ii = a * 2 + di
+                            for dj in range(2):
+                                jj = b2 * 2 + dj
+                                val = conv_act[ff][ii * oh + jj]
+                                if best is None or val > best:
+                                    best = val
+                                    bidx = ii * oh + jj
+                        k = ff * ph * ph + a * ph + b2
+                        pooled[k] = best if best is not None else 0.0
+                        arg[k] = bidx
+            # dense -> logits -> softmax
+            logits = [0.0] * c
+            for cc in range(c):
+                s = params[fc_b0 + cc]
+                for k in range(flat):
+                    s += params[fc_w0 + k * c + cc] * pooled[k]
+                logits[cc] = s
+            m = max(logits)
+            exps = [math.exp(v - m) for v in logits]
+            ssum = sum(exps) or 1.0
+            probs = [e / ssum for e in exps]
+            total_loss += -math.log(max(probs[y], 1e-12))
+            # ---- backward: cross-entropy -> dense -> pool -> relu -> conv ----
+            dlogits = [probs[cc] - (1.0 if cc == y else 0.0) for cc in range(c)]
+            dpooled = [0.0] * flat
+            for k in range(flat):
+                pk = pooled[k]
+                base = fc_w0 + k * c
+                dp = 0.0
+                for cc in range(c):
+                    g = dlogits[cc]
+                    dp += params[base + cc] * g   # read pre-update weight
+                    params[base + cc] -= lr * g * pk
+                dpooled[k] = dp
+            for cc in range(c):
+                params[fc_b0 + cc] -= lr * dlogits[cc]
+            # route each pooled gradient to its winning conv cell (relu applied)
+            for ff in range(f):
+                bw = ff * 9
+                for a in range(ph):
+                    for b2 in range(ph):
+                        k = ff * ph * ph + a * ph + b2
+                        g = dpooled[k]
+                        if g == 0.0 or pooled[k] <= 0.0:
+                            continue
+                        cell = arg[k]
+                        i = cell // oh
+                        j = cell % oh
+                        for u in range(3):
+                            base = (i + u) * side + j
+                            w3 = bw + u * 3
+                            params[w3] -= lr * g * x[base]
+                            params[w3 + 1] -= lr * g * x[base + 1]
+                            params[w3 + 2] -= lr * g * x[base + 2]
+                        params[conv_b0 + ff] -= lr * g
+    return {"w": params, "b": 0.0, "arch": arch, "n": n, "loss": total_loss / (n * reps)}
+
+
 def aggregate(results: list) -> Optional[dict]:
     """Weighted mean of shard weights (FedAvg), weighted by shard size ``n``."""
     valid = [r for r in results if r and r.get("n", 0) > 0 and r.get("w")]

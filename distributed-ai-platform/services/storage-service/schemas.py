@@ -16,6 +16,7 @@ class DatasetResponse(BaseModel):
     row_count: Optional[int] = None
     column_count: Optional[int] = None
     size_bytes: Optional[int] = None
+    schema_json: Optional[str] = None
     
     validation_status: str
     validation_message: Optional[str] = None

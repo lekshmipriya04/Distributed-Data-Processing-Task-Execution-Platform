@@ -5,7 +5,11 @@ High-level service for handling dataset lifecycle:
 3. Validate
 4. Persist to PostgreSQL
 """
+import csv
+import io
+import json
 import uuid
+import zipfile
 import structlog
 from typing import Optional
 from fastapi import UploadFile
@@ -71,6 +75,101 @@ class DatasetService:
         except Exception as e:
             logger.error("dataset_upload_failed", error=str(e))
             raise
+
+    async def create_dataset_from_images(
+        self,
+        zip_bytes: bytes,
+        name: str,
+        description: Optional[str],
+        created_by: Optional[str] = None,
+        image_size: int = 8,
+        color: str = "grayscale",
+    ) -> Dataset:
+        """Convert a zip of label-foldered images into a flattened pixel CSV.
+
+        Expected zip layout: ``<label>/<image files>`` (folder name = class).
+        Each image is decoded, grayscaled, resized to a square ``image_size``,
+        and flattened to columns ``p0 … p{S*S-1}`` plus a numeric ``label``.
+        The result is stored as an ordinary CSV via the same HDFS path the CSV
+        upload uses, so the whole training pipeline downstream is unchanged;
+        ``schema_json`` records the image shape + columns so the UI can auto-fill.
+        """
+        from PIL import Image  # imported lazily so the module loads without Pillow
+
+        s = max(4, int(image_size))
+        exts = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
+        samples: list[tuple[str, list[int]]] = []
+        labels_seen: set[str] = set()
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                parts = [p for p in info.filename.replace("\\", "/").split("/") if p]
+                if len(parts) < 2 or not parts[-1].lower().endswith(exts):
+                    continue  # need a label folder; skip top-level / non-images
+                label_name = parts[-2]
+                try:
+                    with z.open(info) as fh:
+                        im = Image.open(io.BytesIO(fh.read())).convert("L").resize((s, s))
+                except Exception:
+                    continue  # skip unreadable files rather than failing the batch
+                samples.append((label_name, list(im.getdata())))
+                labels_seen.add(label_name)
+        if not samples:
+            raise ValidationError(
+                "No images found. Expected a .zip laid out as <label>/<image files>."
+            )
+        # Map label folders -> numeric indices; integer-named folders keep order.
+        def _sort_key(v: str):
+            try:
+                return (0, int(v))
+            except ValueError:
+                return (1, v)
+
+        class_names = sorted(labels_seen, key=_sort_key)
+        label_index = {ln: i for i, ln in enumerate(class_names)}
+        px = s * s
+        headers = [f"p{i}" for i in range(px)] + ["label"]
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(headers)
+        for label_name, pixels in samples:
+            writer.writerow(list(pixels) + [label_index[label_name]])
+        csv_bytes = buf.getvalue().encode("utf-8")
+
+        dataset_id = uuid.uuid4()
+        hdfs_path = f"/platform/raw/{dataset_id}.csv"
+        logger.info("uploading_image_dataset_to_hdfs", dataset_id=str(dataset_id),
+                    path=hdfs_path, images=len(samples), side=s, classes=len(class_names))
+        await self._hdfs.upload_file(io.BytesIO(csv_bytes), hdfs_path)
+
+        schema = {
+            "columns": headers,
+            "feature_columns": headers[:-1],
+            "target_column": "label",
+            "num_classes": len(class_names),
+            "class_names": class_names,
+            "image": {"side": s, "channels": 1},
+        }
+        dataset = Dataset(
+            id=dataset_id,
+            name=name,
+            description=description,
+            hdfs_path=hdfs_path,
+            file_format="csv",
+            created_by=created_by,
+            row_count=len(samples),
+            column_count=px + 1,
+            size_bytes=len(csv_bytes),
+            schema_json=json.dumps(schema),
+            validation_status="pending",
+        )
+        self._db.add(dataset)
+        await self._db.commit()
+        await self._db.refresh(dataset)
+        logger.info("image_dataset_created", dataset_id=str(dataset_id))
+        return dataset
 
     async def get_dataset(self, dataset_id: uuid.UUID) -> Optional[Dataset]:
         result = await self._db.execute(select(Dataset).where(Dataset.id == dataset_id))

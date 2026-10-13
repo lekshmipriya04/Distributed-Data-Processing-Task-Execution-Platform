@@ -18,8 +18,12 @@ class HDFSService:
         2. Submit PUT request with data to the redirection URL.
         """
         url = f"{self.webhdfs_url}/webhdfs/v1{hdfs_path}?op=CREATE&user.name={self.user}&overwrite=true"
-        
-        async with httpx.AsyncClient() as client:
+
+        # Generous timeout: a cold first HDFS write (namenode redirect + datanode
+        # connect) can take 5-6s, which httpx's 5s default would abort as an
+        # empty-message error ("Failed to upload file to HDFS:"). Allow a quick
+        # connect but a long read/write for slow or cold datanodes.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
             # Step 1: Get redirect URL
             try:
                 response = await client.put(url, follow_redirects=False)

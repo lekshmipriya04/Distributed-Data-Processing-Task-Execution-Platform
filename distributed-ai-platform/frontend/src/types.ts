@@ -27,6 +27,9 @@ export interface Dataset {
   hdfs_path: string;
   file_format: string;
   validation_status: string;
+  schema_json?: string | null;
+  row_count?: number | null;
+  column_count?: number | null;
   created_at: string;
 }
 
