@@ -25,12 +25,13 @@ class SSHExecutorSettings(BaseServiceSettings):
     # Guardrails on the authorized remote-code-execution surface.
     max_code_bytes: int = Field(default=1_000_000, ge=1024)
     max_inputs_per_batch: int = Field(default=10_000, ge=1)
-    allowed_runtimes: list[str] = Field(default_factory=lambda: ["python", "spark", "ray"])
+    allowed_runtimes: list[str] = Field(default_factory=lambda: ["python"])
     lease_ttl_seconds: int = Field(default=3600, ge=1)
 
     # --- distributed ML training (federated averaging over the fan-out) ---
-    # Where to fetch uploaded datasets from (whole-file CSV download).
+    # Storage metadata endpoint used to resolve the master-side HDFS path.
     storage_service_url: str = Field(default="http://storage-service:8001")
+    hdfs_url: str = Field(default="hdfs://namenode:9000")
     # A training shard runs many SGD epochs, so it may need longer than a
     # generic task; this timeout is used for the per-shard remote runs.
     training_timeout_seconds: int = Field(default=600, ge=1)

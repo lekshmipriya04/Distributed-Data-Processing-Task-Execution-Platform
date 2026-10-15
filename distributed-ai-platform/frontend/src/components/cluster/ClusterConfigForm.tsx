@@ -38,7 +38,7 @@ export function ClusterConfigForm() {
       <SectionTitle>Compute Configuration</SectionTitle>
 
       <p className="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded-lg px-3.5 py-2.5 mb-5 leading-relaxed">
-        Spark executor cores and memory settings will default to the cluster configurations. Configure your execution target below.
+        Configure the local or SSH execution target and the number of borrowed cores below.
       </p>
 
       <div className="flex gap-3 mb-6">

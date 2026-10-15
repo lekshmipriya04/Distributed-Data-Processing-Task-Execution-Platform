@@ -348,6 +348,7 @@ async def start_training(
         "learning_rate": request.learning_rate,
         "epochs": request.epochs,
         "local_cores": request.local_cores,
+        "engine": request.engine,
         "target_column": request.target_column,
         "feature_columns": request.feature_columns,
         "num_classes": request.num_classes,
@@ -452,12 +453,15 @@ async def download_training_data(
         raise HTTPException(status_code=404, detail="Training run not found")
 
     hyper = json.loads(run.hyperparams_json or "{}")
+    shard_manifest = json.loads(run.shards_json or "[]")
     try:
         rows, feature_names = await _load_dataset_rows(
             run.dataset_id,
             hyper.get("target_column", ""),
             hyper.get("feature_columns", []) or [],
             get_settings(),
+            max(1, len(shard_manifest)),
+            hyper.get("engine") or getattr(run, "engine", None) or "spark",
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not rebuild training data: {exc}")

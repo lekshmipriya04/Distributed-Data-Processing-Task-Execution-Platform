@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-DEFAULT_ALLOWED_RUNTIMES = ("python", "spark", "ray")
+DEFAULT_ALLOWED_RUNTIMES = ("python",)
 
 
 def validate_execution_request(

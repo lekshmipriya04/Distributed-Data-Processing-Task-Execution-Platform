@@ -181,7 +181,7 @@ class TrainingRun(Base):
     dataset_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     model_type: Mapped[str] = mapped_column(String(64), nullable=False)
     mode: Mapped[str] = mapped_column(String(16), nullable=False)  # single | multi
-    engine: Mapped[str] = mapped_column(String(16), nullable=False, default="spark")  # spark | ray
+    engine: Mapped[str] = mapped_column(String(16), nullable=False, default="spark")
     rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     hyperparams_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")

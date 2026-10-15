@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import io
 import json
+import os
+import tempfile
 import uuid
 from concurrent.futures import ProcessPoolExecutor
 from typing import Optional
@@ -26,25 +27,18 @@ import structlog
 from sqlalchemy import select
 
 from config import get_settings
-from crypto import decrypt_secret
 from database import get_db_manager
 from dispatcher import run_across_nodes
 from ml_templates import (
     _cnn_init,
     _train_cnn,
-    aggregate,
     evaluate,
     generate_remote_script,
     parse_result,
     train_core,
 )
 from models import SSHNode, TrainingRun
-from ray_templates import generate_ray_cnn_script
-from runtime_manager import RuntimeManager
 from shared.common.auth import create_internal_token
-from spark_templates import generate_spark_script
-from ssh_transport import SSHTransport
-from task_executor import TaskExecutor, detect_os, select_adapter
 
 logger = structlog.get_logger(__name__)
 
@@ -69,69 +63,195 @@ async def _load_dataset_rows(
     target_column: str,
     feature_columns: list[str],
     settings,
+    num_shards: int,
+    master_engine: str,
 ) -> tuple[list[list[float]], list[str]]:
-    """Fetch the dataset CSV from storage-service and parse numeric rows.
+    """Read and partition the dataset with Spark running on the master.
 
-    Returns ``(rows, feature_names)`` where each row is ``[f1..fD, target]``.
-    Rows that fail numeric conversion are skipped (robust to stray strings).
+    Spark reads the provider-owned HDFS path; workers never receive Spark or
+    Ray. ``toLocalIterator`` keeps transfer from Spark incremental, while the
+    existing max_train_rows guard bounds the master-side model/evaluation data.
     """
-    url = f"{settings.storage_service_url}/api/v1/storage/datasets/{dataset_id}/download"
+    metadata_url = f"{settings.storage_service_url}/api/v1/storage/datasets/{dataset_id}"
     token = create_internal_token("ssh-executor")
     async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        resp = await client.get(metadata_url, headers={"Authorization": f"Bearer {token}"})
         resp.raise_for_status()
-        text = resp.content.decode("utf-8", errors="replace")
+        metadata = resp.json()
+    schema = json.loads(metadata.get("schema_json") or "{}")
+    expected_engine = "ray" if schema.get("image") else "spark"
+    if master_engine != expected_engine:
+        kind = "image" if schema.get("image") else "tabular/text"
+        raise ValueError(f"{kind} datasets must use the master {expected_engine} engine")
+    reader = _read_ray_rows if master_engine == "ray" else _read_spark_rows
+    return await asyncio.to_thread(
+        reader, metadata, target_column, feature_columns, settings, num_shards
+    )
 
-    reader = csv.reader(io.StringIO(text))
+
+def _read_spark_rows(
+    metadata: dict,
+    target_column: str,
+    feature_columns: list[str],
+    settings,
+    num_shards: int,
+) -> tuple[list[list[float]], list[str]]:
+    """Master-only Spark reader used by the SSH training orchestrator."""
+    from pyspark.sql import SparkSession, functions as F
+
+    hdfs_path = metadata.get("hdfs_path")
+    if not hdfs_path:
+        raise ValueError("Dataset metadata does not contain an HDFS path")
+    if not hdfs_path.startswith(("hdfs://", "file://")):
+        hdfs_path = f"{settings.hdfs_url.rstrip('/')}/{hdfs_path.lstrip('/')}"
+
+    spark = (
+        SparkSession.builder
+        .appName("MasterZeroInstallPartitioner")
+        .master("local[*]")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", str(max(1, num_shards)))
+        .getOrCreate()
+    )
+    spark.sparkContext.setLogLevel("WARN")
     try:
-        header = next(reader)
-    except StopIteration:
-        raise ValueError("Dataset is empty")
-    if target_column not in header:
-        raise ValueError(f"Target column '{target_column}' not found in dataset")
-    tgt_idx = header.index(target_column)
+        file_format = metadata.get("file_format", "csv")
+        if file_format == "parquet":
+            frame = spark.read.parquet(hdfs_path)
+        elif file_format == "json":
+            frame = spark.read.json(hdfs_path)
+        else:
+            frame = spark.read.option("header", "true").option("inferSchema", "true").csv(hdfs_path)
 
-    raw_rows = list(reader)
-    if not raw_rows:
-        raise ValueError("Dataset has no data rows")
-
-    if feature_columns:
-        missing = [c for c in feature_columns if c not in header]
-        if missing:
-            raise ValueError(f"Feature columns not found: {', '.join(missing)}")
-        feat_idx = [header.index(c) for c in feature_columns]
-    else:
-        # Auto-select: every non-target column whose first value is numeric.
-        first = raw_rows[0]
-        feat_idx = []
-        for i, _name in enumerate(header):
-            if i == tgt_idx:
-                continue
-            if i < len(first):
-                try:
-                    float(first[i])
-                    feat_idx.append(i)
-                except ValueError:
+        columns = frame.columns
+        if target_column not in columns:
+            raise ValueError(f"Target column '{target_column}' not found in dataset")
+        if feature_columns:
+            missing = [name for name in feature_columns if name not in columns]
+            if missing:
+                raise ValueError(f"Feature columns not found: {', '.join(missing)}")
+            selected_features = feature_columns
+        else:
+            sample = frame.limit(1).collect()
+            if not sample:
+                raise ValueError("Dataset is empty")
+            first = sample[0].asDict()
+            selected_features = []
+            for name in columns:
+                if name == target_column:
                     continue
-    if not feat_idx:
-        raise ValueError("No numeric feature columns available")
+                try:
+                    float(first.get(name))
+                    selected_features.append(name)
+                except (TypeError, ValueError):
+                    continue
+        if not selected_features:
+            raise ValueError("No numeric feature columns available")
 
-    max_idx = max(tgt_idx, *feat_idx)
-    rows: list[list[float]] = []
-    for raw in raw_rows:
-        if len(raw) <= max_idx:
-            continue
-        try:
-            x = [float(raw[i]) for i in feat_idx]
-            y = float(raw[tgt_idx])
-        except ValueError:
-            continue
-        rows.append(x + [y])
-        if len(rows) >= settings.max_train_rows:
-            break
-    if not rows:
-        raise ValueError("No valid numeric rows found in dataset")
-    return rows, [header[i] for i in feat_idx]
+        names = [*selected_features, target_column]
+        numeric = frame.select(
+            *[F.col(name).cast("double").alias(name) for name in names]
+        ).limit(settings.max_train_rows).repartition(max(1, num_shards))
+        rows: list[list[float]] = []
+        for record in numeric.toLocalIterator():
+            values = [record[name] for name in names]
+            if any(value is None for value in values):
+                continue
+            rows.append([float(value) for value in values])
+        if not rows:
+            raise ValueError("No valid numeric rows found in dataset")
+        return rows, selected_features
+    finally:
+        spark.stop()
+
+
+def _read_ray_rows(
+    metadata: dict,
+    target_column: str,
+    feature_columns: list[str],
+    settings,
+    num_shards: int,
+) -> tuple[list[list[float]], list[str]]:
+    """Master-only Ray Data reader for image-derived datasets.
+
+    Stage the file through storage-service rather than Ray's native HDFS
+    filesystem, which requires a separately configured libhdfs/JVM path.
+    """
+    import ray
+
+    if not ray.is_initialized():
+        ray.init(
+            num_cpus=max(1, min(num_shards, 8)),
+            include_dashboard=False,
+            ignore_reinit_error=True,
+            logging_level="ERROR",
+        )
+    file_format = metadata.get("file_format", "csv")
+    dataset_id = metadata.get("id")
+    if not dataset_id:
+        raise ValueError("Dataset metadata does not contain an ID")
+    download_url = (
+        f"{settings.storage_service_url}/api/v1/storage/datasets/"
+        f"{dataset_id}/download"
+    )
+    token = create_internal_token("ssh-executor")
+
+    with tempfile.TemporaryDirectory(prefix="ray-training-") as temp_dir:
+        local_path = os.path.join(temp_dir, f"dataset.{file_format}")
+        with httpx.Client(timeout=120.0) as client:
+            with client.stream(
+                "GET",
+                download_url,
+                headers={"Authorization": f"Bearer {token}"},
+            ) as response:
+                response.raise_for_status()
+                with open(local_path, "wb") as dataset_file:
+                    for chunk in response.iter_bytes():
+                        dataset_file.write(chunk)
+
+        dataset = (
+            ray.data.read_parquet(local_path)
+            if file_format == "parquet"
+            else ray.data.read_csv(local_path)
+        )
+        sample = dataset.take(1)
+        if not sample:
+            raise ValueError("Dataset is empty")
+        columns = list(sample[0].keys())
+        if target_column not in columns:
+            raise ValueError(f"Target column '{target_column}' not found in dataset")
+        if feature_columns:
+            missing = [name for name in feature_columns if name not in columns]
+            if missing:
+                raise ValueError(f"Feature columns not found: {', '.join(missing)}")
+            selected_features = feature_columns
+        else:
+            selected_features = []
+            first = sample[0]
+            for name in columns:
+                if name == target_column:
+                    continue
+                try:
+                    float(first.get(name))
+                    selected_features.append(name)
+                except (TypeError, ValueError):
+                    continue
+        if not selected_features:
+            raise ValueError("No numeric feature columns available")
+
+        names = [*selected_features, target_column]
+        rows: list[list[float]] = []
+        for record in dataset.select_columns(names).limit(settings.max_train_rows).iter_rows():
+            values = [record.get(name) for name in names]
+            if any(value is None for value in values):
+                continue
+            try:
+                rows.append([float(value) for value in values])
+            except (TypeError, ValueError):
+                continue
+        if not rows:
+            raise ValueError("No valid numeric rows found in dataset")
+        return rows, selected_features
 
 
 # --- single-node local training (ProcessPoolExecutor) --------------------
@@ -155,7 +275,44 @@ def _run_local(model_type, lr, epochs, weights, shards, local_cores):
         return list(pool.map(_local_worker, jobs))
 
 
-# --- engine selection + real-engine remote execution --------------------
+def _aggregate_with_ray(results: list[dict]) -> Optional[dict]:
+    """Run weighted FedAvg on the master through a local Ray runtime."""
+    valid = [result for result in results if result and result.get("n", 0) > 0 and result.get("w")]
+    if not valid:
+        return None
+
+    import ray
+
+    if not ray.is_initialized():
+        ray.init(
+            num_cpus=max(1, min(len(valid), 8)),
+            include_dashboard=False,
+            ignore_reinit_error=True,
+            logging_level="ERROR",
+        )
+
+    total = sum(result["n"] for result in valid)
+
+    @ray.remote
+    def weighted_update(result: dict, fraction: float) -> tuple[list[float], float]:
+        return (
+            [fraction * value for value in result["w"]],
+            fraction * float(result.get("b", 0.0)),
+        )
+
+    partials = ray.get(
+        [weighted_update.remote(result, result["n"] / total) for result in valid]
+    )
+    weights = [0.0] * len(partials[0][0])
+    bias = 0.0
+    for partial_weights, partial_bias in partials:
+        for index, value in enumerate(partial_weights):
+            weights[index] += value
+        bias += partial_bias
+    return {"w": weights, "b": bias}
+
+
+# --- model setup ---------------------------------------------------------
 def _cnn_arch(rows: list, num_classes: int = 0) -> dict:
     """Pin one CNN architecture for every shard: square image side from the
     feature count, class count from the data (or the caller's override)."""
@@ -169,82 +326,6 @@ def _cnn_arch(rows: list, num_classes: int = 0) -> dict:
     else:
         c = int(max(int(round(float(r[d]))) for r in rows)) + 1
     return {"F": 8, "side": side, "C": max(2, c)}
-
-
-def engine_script_for(engine: str, model_type: str, lr: float, epochs: int, num_classes: int = 0):
-    """Return ``(script_text, runtime_kind)`` for a real-engine run, or raise."""
-    if engine == "ray" and model_type == "cnn":
-        return generate_ray_cnn_script(lr=lr, epochs=epochs, num_classes=num_classes, num_cpus=0), "ray"
-    if engine == "spark" and model_type in ("linear_regression", "logistic_regression"):
-        return generate_spark_script(model_type, max_iter=epochs, reg_param=0.0), "spark"
-    raise ValueError(f"No real engine for engine={engine!r} model_type={model_type!r}")
-
-
-def _engine_run_blocking(node, runtime_kind, script, payload, timeout, connect_timeout) -> dict:
-    """Blocking: bootstrap the runtime on one node (RuntimeManager) and run the
-    engine script with the shard payload on stdin. run_across_nodes-shaped dict."""
-    secret = decrypt_secret(node.secret_encrypted)
-    transport = SSHTransport(
-        host=node.host, port=node.port, username=node.username,
-        password=secret if node.auth_type == "password" else None,
-        private_key=secret if node.auth_type == "private_key" else None,
-        host_key_type=node.host_key_type, host_key_b64=node.host_key_b64,
-        connect_timeout=connect_timeout,
-    )
-    try:
-        transport.connect()
-        os_type = node.os_type or detect_os(transport, timeout=connect_timeout)
-        adapter = select_adapter(os_type)
-        rm = RuntimeManager(transport, adapter)
-        execu = TaskExecutor(transport, adapter)
-        exec_dir = execu.execution_dir(f"train_{uuid.uuid4().hex}")
-        script_path = execu.script_path(exec_dir)
-        execu._make_dir(exec_dir)
-        transport.put_text(script_path, script)
-        try:
-            if runtime_kind == "spark":
-                rm.ensure_spark()
-                cmd = rm.spark_submit_command(
-                    script_path, max(1, node.allocated_cpu), float(node.allocated_memory_gb or 1.0)
-                )
-            else:
-                rm.ensure_ray()
-                cmd = rm.ray_run_command(script_path)
-            res = transport.exec(cmd, input_data=payload, timeout=timeout, max_output_bytes=1_000_000)
-            status = "success" if res.get("exit_code") == 0 else "error"
-            return {"status": status, "exit_code": res.get("exit_code"),
-                    "stdout": res.get("stdout", ""), "stderr": res.get("stderr", "")}
-        finally:
-            execu._cleanup(exec_dir)
-    except Exception as exc:
-        return {"status": "error", "exit_code": None, "stdout": "", "stderr": str(exc)}
-    finally:
-        transport.close()
-
-
-async def _run_engine_shards(nodes, runtime_kind, script, payloads, timeout, connect_timeout):
-    """Parallel per-shard engine execution across nodes, retrying on another
-    node on failure. Returns a list aligned to ``payloads`` (run_across_nodes shape)."""
-    sems = {n.id: asyncio.Semaphore(max(1, n.allocated_cpu)) for n in nodes}
-    results: list = [None] * len(payloads)
-    max_attempts = min(len(nodes), 3)
-
-    async def run_one(idx, payload, offset):
-        rotated = nodes[offset % len(nodes):] + nodes[: offset % len(nodes)]
-        last = None
-        for node in rotated[:max_attempts]:
-            async with sems[node.id]:
-                res = await asyncio.to_thread(
-                    _engine_run_blocking, node, runtime_kind, script, payload, timeout, connect_timeout
-                )
-            last = res
-            if res.get("status") == "success":
-                results[idx] = {**res, "node_id": node.id}
-                return
-        results[idx] = {**(last or {}), "node_id": None, "status": "failed"}
-
-    await asyncio.gather(*(run_one(i, p, i) for i, p in enumerate(payloads)))
-    return results
 
 
 def build_train_data(run, rows, feature_names, hyper, metrics, history) -> dict:
@@ -296,9 +377,9 @@ async def run_training(run_id: uuid.UUID) -> None:
         dataset_id = run.dataset_id
         model_type = run.model_type
         mode = run.mode
-        engine = getattr(run, "engine", "spark") or "spark"
         rounds = run.rounds
         hyper = json.loads(run.hyperparams_json or "{}")
+        engine = hyper.get("engine", "spark")
 
     lr = float(hyper.get("learning_rate", 0.01))
     epochs = int(hyper.get("epochs", 10))
@@ -315,17 +396,7 @@ async def run_training(run_id: uuid.UUID) -> None:
 
     await _update_run(run_id, status="running")
 
-    # 1. Load + parse the dataset.
-    try:
-        rows, feature_names = await _load_dataset_rows(
-            dataset_id, target_column, feature_columns, settings
-        )
-    except Exception as exc:
-        logger.error("training_load_failed", run_id=str(run_id), error=str(exc))
-        await _update_run(run_id, status="failed", message=f"Dataset load failed: {exc}")
-        return
-
-    # 2. Determine shard count K and the nodes (multi) we fan out to.
+    # 1. Resolve providers before Spark partitions the master-side dataset.
     nodes: list = []
     if mode == "multi":
         nodes = await _online_nodes(owner_id, node_ids)
@@ -334,48 +405,40 @@ async def run_training(run_id: uuid.UUID) -> None:
                 run_id, status="failed", message="No online provider nodes available"
             )
             return
-        k = sum(max(1, n.allocated_cpu) for n in nodes)
+        requested_shards = sum(max(1, n.allocated_cpu) for n in nodes)
     else:
-        k = max(1, local_cores)
+        requested_shards = max(1, local_cores)
+
+    # 2. Spark runs on the master and reads the dataset directly from HDFS.
+    try:
+        rows, feature_names = await _load_dataset_rows(
+            dataset_id, target_column, feature_columns, settings, requested_shards, engine
+        )
+    except Exception as exc:
+        logger.error("training_load_failed", run_id=str(run_id), error=str(exc))
+        await _update_run(run_id, status="failed", message=f"Dataset load failed: {exc}")
+        return
+
+    # 3. Match the master Spark partition count to available execution slots.
+    k = requested_shards
     k = max(1, min(k, len(rows)))
 
     # Round-robin split keeps class balance even across shards.
     shards = [rows[i::k] for i in range(k)]
     shards = [s for s in shards if s]
 
-    # 3. CNN pins one architecture across shards; round 0 seeds from it.
+    # 4. CNN pins one architecture across shards; round 0 seeds from it.
     cnn_arch = _cnn_arch(rows, num_classes) if model_type == "cnn" else None
     weights: Optional[dict] = None
     if cnn_arch is not None:
         weights = {"w": _cnn_init(cnn_arch), "b": 0.0, "arch": cnn_arch}
 
-    # Real-engine (Spark/Ray) runs only in multi-node mode; single mode uses the
-    # local stdlib trainer (linear/logistic only).
-    use_engine = mode == "multi" and engine in ("spark", "ray")
-
-    # 4. Federated rounds: train shards, average weights.
+    # 5. Federated rounds: train shards, average weights on master-side Ray.
     history: list = []
     shard_meta: list = []
     try:
         for rnd in range(rounds):
-            if use_engine:
-                try:
-                    script, kind = engine_script_for(
-                        engine, model_type, lr, epochs,
-                        num_classes=(cnn_arch["C"] if cnn_arch else 0),
-                    )
-                except ValueError as exc:
-                    await _update_run(run_id, status="failed", message=str(exc))
-                    return
-                if kind == "ray":
-                    payloads = [json.dumps({"rows": s, "arch": cnn_arch}) for s in shards]
-                else:
-                    payloads = [json.dumps({"rows": s}) for s in shards]
-                results = await _run_engine_shards(
-                    nodes, kind, script, payloads,
-                    settings.training_timeout_seconds, settings.connect_timeout,
-                )
-            elif mode == "multi":
+            if mode == "multi":
                 code = generate_remote_script(model_type, lr, epochs)
                 payloads = [json.dumps({"weights": weights, "rows": s}) for s in shards]
                 results = await run_across_nodes(
@@ -410,7 +473,9 @@ async def run_training(run_id: uuid.UUID) -> None:
                         for i in range(len(shards))
                     ]
 
-            agg = aggregate([sr for sr in shard_results if sr])
+            agg = await asyncio.to_thread(
+                _aggregate_with_ray, [sr for sr in shard_results if sr]
+            )
             if agg is None:
                 await _update_run(
                     run_id,

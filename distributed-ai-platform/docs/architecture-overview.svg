@@ -1,0 +1,225 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1280" viewBox="0 0 1800 1280" role="img" aria-labelledby="title desc">
+  <title id="title">Distributed Data Processing and Task Execution Platform Architecture</title>
+  <desc id="desc">Architecture overview of the React and VS Code clients, API gateway, ML services, distributed task plane, Spark and Ray execution, HDFS, PostgreSQL, MLflow, observability, and external workers.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f4f8fc"/>
+      <stop offset="1" stop-color="#eaf2f6"/>
+    </linearGradient>
+    <linearGradient id="gateway" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#12374a"/>
+      <stop offset="1" stop-color="#205a63"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#416579"/>
+    </marker>
+    <marker id="arrowLight" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d3e9e4"/>
+    </marker>
+    <style>
+      text { font-family: 'Segoe UI', 'Aptos', sans-serif; fill: #183445; }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 16px; fill: #567080; }
+      .lane-title { font-size: 18px; font-weight: 700; letter-spacing: 1px; }
+      .card-title { font-size: 16px; font-weight: 700; }
+      .card-sub { font-size: 12px; fill: #5c7480; }
+      .small { font-size: 12px; fill: #567080; }
+      .tiny { font-size: 11px; fill: #607987; }
+      .white { fill: #f4faf9; }
+      .white-sub { fill: #c7dedb; }
+      .stroke { stroke: #b9ccd3; stroke-width: 1.5; }
+      .flow { fill: none; stroke: #416579; stroke-width: 2.2; marker-end: url(#arrow); }
+      .flow-dash { fill: none; stroke: #b05d3f; stroke-width: 2.4; stroke-dasharray: 8 6; marker-end: url(#arrow); }
+      .flow-light { fill: none; stroke: #d3e9e4; stroke-width: 2; marker-end: url(#arrowLight); }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1280" fill="url(#bg)"/>
+  <circle cx="1680" cy="86" r="112" fill="#d5e9e3" opacity=".38"/>
+  <circle cx="91" cy="1160" r="120" fill="#f5dfd2" opacity=".35"/>
+
+  <text x="58" y="64" class="title">Distributed Data Processing &amp; Task Execution Platform</text>
+  <text x="60" y="94" class="subtitle">Docker Compose platform overview | ML pipeline plane + SSH task plane + editor control surface</text>
+  <rect x="1480" y="45" width="260" height="34" rx="17" fill="#e1f3eb" stroke="#add8c8"/>
+  <circle cx="1500" cy="62" r="5" fill="#25836d"/>
+  <text x="1513" y="67" class="small" fill="#256953">Primary deployment: Docker Compose</text>
+
+  <!-- Client surfaces -->
+  <text x="60" y="139" class="lane-title">CLIENTS</text>
+  <rect x="60" y="158" width="360" height="104" rx="12" fill="#ffffff" class="stroke"/>
+  <rect x="60" y="158" width="8" height="104" rx="4" fill="#2776a0"/>
+  <text x="86" y="190" class="card-title">React web app</text>
+  <text x="86" y="214" class="card-sub">Browser UI | Vite :3000</text>
+  <text x="86" y="237" class="small">Data upload, training, SSH providers, jobs</text>
+
+  <rect x="448" y="158" width="320" height="104" rx="12" fill="#ffffff" class="stroke"/>
+  <rect x="448" y="158" width="8" height="104" rx="4" fill="#5d927b"/>
+  <text x="474" y="190" class="card-title">Scripts / REST clients</text>
+  <text x="474" y="214" class="card-sub">Bearer JWT | HTTP :8000</text>
+  <text x="474" y="237" class="small">Direct API access for automation</text>
+
+  <rect x="796" y="158" width="390" height="104" rx="12" fill="#ffffff" class="stroke"/>
+  <rect x="796" y="158" width="8" height="104" rx="4" fill="#c77c48"/>
+  <text x="822" y="190" class="card-title">VS Code extension</text>
+  <text x="822" y="214" class="card-sub">TypeScript | SecretStorage | REST :8090</text>
+  <text x="822" y="237" class="small">Developer-facing node and execution views</text>
+
+  <rect x="1214" y="158" width="526" height="104" rx="12" fill="#fff8f2" stroke="#e4b99c" stroke-width="1.5"/>
+  <text x="1240" y="190" class="card-title">Go extension-gateway :8090</text>
+  <text x="1240" y="214" class="card-sub">Separate control surface; in-memory MemStore</text>
+  <text x="1240" y="237" class="small">Stub today: not wired to Python services / PostgreSQL</text>
+
+  <!-- Client ingress lines -->
+  <path d="M240 262 V292 H680 V310" class="flow"/>
+  <text x="286" y="285" class="tiny">/api via Vite proxy</text>
+  <path d="M608 262 V310" class="flow"/>
+  <text x="620" y="288" class="tiny">REST</text>
+  <path d="M991 262 V292 H1510 V310" class="flow-dash"/>
+  <text x="1164" y="285" class="tiny">extension REST; separate store</text>
+
+  <!-- API Gateway -->
+  <rect x="60" y="310" width="1680" height="86" rx="14" fill="url(#gateway)"/>
+  <text x="92" y="346" class="white" font-size="21" font-weight="700">API Gateway :8000</text>
+  <text x="92" y="373" class="white-sub" font-size="13">Reverse proxy for /api/v1/* | forwards Authorization | worker WebSocket | dashboard endpoint</text>
+  <rect x="1256" y="329" width="448" height="46" rx="9" fill="#ffffff" opacity=".12" stroke="#8fb7b2"/>
+  <text x="1280" y="349" class="white" font-size="13" font-weight="600">One ingress for Python platform services</text>
+  <text x="1280" y="368" class="white-sub" font-size="11">Each downstream service validates its own JWT</text>
+
+  <!-- Plane backgrounds -->
+  <rect x="60" y="432" width="820" height="414" rx="16" fill="#edf5fa" stroke="#b8d1df" stroke-width="1.5"/>
+  <rect x="900" y="432" width="840" height="414" rx="16" fill="#edf6f1" stroke="#b7d5c5" stroke-width="1.5"/>
+  <text x="86" y="468" class="lane-title" fill="#1e6380">01  ML PIPELINE PLANE</text>
+  <text x="925" y="468" class="lane-title" fill="#32775e">02  DISTRIBUTED TASK / SSH PLANE</text>
+
+  <!-- Gateway service routing bus -->
+  <path d="M680 396 V415 H470 V432" class="flow"/>
+  <path d="M680 415 H1320 V432" class="flow"/>
+
+  <!-- ML services -->
+  <rect x="86" y="496" width="238" height="78" rx="10" fill="#ffffff" stroke="#a8c7d7"/>
+  <text x="104" y="524" class="card-title">Storage :8001</text>
+  <text x="104" y="547" class="card-sub">Dataset API | WebHDFS</text>
+
+  <rect x="344" y="496" width="238" height="78" rx="10" fill="#ffffff" stroke="#a8c7d7"/>
+  <text x="362" y="524" class="card-title">Preprocessing :8002</text>
+  <text x="362" y="547" class="card-sub">Jobs and feature preparation</text>
+
+  <rect x="602" y="496" width="238" height="78" rx="10" fill="#ffffff" stroke="#a8c7d7"/>
+  <text x="620" y="524" class="card-title">Training :8003</text>
+  <text x="620" y="547" class="card-sub">Livy batch jobs | MLflow</text>
+
+  <rect x="86" y="594" width="238" height="78" rx="10" fill="#ffffff" stroke="#a8c7d7"/>
+  <text x="104" y="622" class="card-title">Evaluation :8004</text>
+  <text x="104" y="645" class="card-sub">Dataset scoring | model metrics</text>
+
+  <rect x="344" y="594" width="238" height="78" rx="10" fill="#ffffff" stroke="#a8c7d7"/>
+  <text x="362" y="622" class="card-title">Registry :8005</text>
+  <text x="362" y="645" class="card-sub">Model versions and aliases</text>
+
+  <rect x="602" y="594" width="238" height="78" rx="10" fill="#ffffff" stroke="#a8c7d7"/>
+  <text x="620" y="622" class="card-title">Serving :8006</text>
+  <text x="620" y="645" class="card-sub">Inference API</text>
+
+  <rect x="86" y="694" width="754" height="118" rx="10" fill="#dcecf2" stroke="#abc9d5"/>
+  <text x="106" y="722" class="card-title">Core data path</text>
+  <text x="106" y="747" class="small">Upload → HDFS raw → Livy / Spark preprocessing → HDFS processed → Spark training</text>
+  <text x="106" y="769" class="small">→ MLflow runs / models → registry → serving; evaluation reads datasets and models.</text>
+  <text x="106" y="793" class="tiny">Separate SSH-training path: master reads data, shards it, dispatches Python, aggregates results.</text>
+
+  <!-- Distributed task/SSH services -->
+  <rect x="926" y="496" width="236" height="78" rx="10" fill="#ffffff" stroke="#a9cfbd"/>
+  <text x="944" y="524" class="card-title">Worker Registry :8008</text>
+  <text x="944" y="547" class="card-sub">Agent registration / heartbeat</text>
+
+  <rect x="1180" y="496" width="236" height="78" rx="10" fill="#ffffff" stroke="#a9cfbd"/>
+  <text x="1198" y="524" class="card-title">Resource Manager :8009</text>
+  <text x="1198" y="547" class="card-sub">Approvals and capacity accounting</text>
+
+  <rect x="1434" y="496" width="278" height="78" rx="10" fill="#ffffff" stroke="#a9cfbd"/>
+  <text x="1452" y="524" class="card-title">Scheduler :8010</text>
+  <text x="1452" y="547" class="card-sub">Selects available agent workers</text>
+
+  <rect x="926" y="594" width="786" height="82" rx="10" fill="#1e5b51"/>
+  <text x="948" y="625" class="white" font-size="18" font-weight="700">SSH Executor :8011 | master-side controller</text>
+  <text x="948" y="651" class="white-sub" font-size="12">Paramiko SSH/SFTP | encrypted credentials | host-key pinning | task timeouts / cleanup</text>
+
+  <rect x="926" y="694" width="786" height="118" rx="10" fill="#fff8f2" stroke="#e2b99d"/>
+  <text x="948" y="722" class="card-title" fill="#864b34">External provider machines</text>
+  <text x="948" y="747" class="small">Linux / macOS / Windows | sshd + Python 3 | receive ephemeral self-contained Python scripts</text>
+  <text x="948" y="770" class="small">Training shards / generic tasks run here; data is streamed over SSH and temp files are removed.</text>
+  <text x="948" y="794" class="tiny">Workers do not host the master Spark cluster; resource limits vary by OS (Windows/macOS best-effort).</text>
+
+  <!-- Task plane relationships -->
+  <path d="M1044 574 V586 H1320 V594" class="flow"/>
+  <path d="M1298 574 V594" class="flow"/>
+  <path d="M1574 574 V586 H1320" class="flow"/>
+  <path d="M1320 676 V694" class="flow-dash"/>
+  <text x="1333" y="690" class="tiny">outbound SSH/SFTP</text>
+
+  <!-- Foundation -->
+  <text x="60" y="891" class="lane-title">03  SHARED INFRASTRUCTURE &amp; DATA PLANE</text>
+  <rect x="60" y="910" width="294" height="144" rx="12" fill="#ffffff" stroke="#bdcbd1" stroke-width="1.5"/>
+  <text x="82" y="941" class="card-title">HDFS</text>
+  <text x="82" y="965" class="card-sub">NameNode :9000 / WebHDFS :9870</text>
+  <text x="82" y="990" class="small">1 NameNode + 3 DataNodes</text>
+  <text x="82" y="1015" class="tiny">Raw / processed datasets and job configs</text>
+
+  <rect x="374" y="910" width="294" height="144" rx="12" fill="#ffffff" stroke="#bdcbd1" stroke-width="1.5"/>
+  <text x="396" y="941" class="card-title">Apache Spark + Livy</text>
+  <text x="396" y="965" class="card-sub">Spark :7077 | Livy REST :8998</text>
+  <text x="396" y="990" class="small">Spark master + 3 Spark workers</text>
+  <text x="396" y="1015" class="tiny">Preprocessing and standard ML jobs</text>
+
+  <rect x="688" y="910" width="294" height="144" rx="12" fill="#e4f2ed" stroke="#9ec9b8" stroke-width="1.5"/>
+  <text x="710" y="941" class="card-title">Master-side Ray</text>
+  <text x="710" y="965" class="card-sub">Image dataset reader / FedAvg helper</text>
+  <text x="710" y="990" class="small">Reads via storage download to temp file</text>
+  <text x="710" y="1015" class="tiny">No Ray runtime required on provider nodes</text>
+
+  <rect x="1002" y="910" width="294" height="144" rx="12" fill="#ffffff" stroke="#bdcbd1" stroke-width="1.5"/>
+  <text x="1024" y="941" class="card-title">MLflow :5000</text>
+  <text x="1024" y="965" class="card-sub">Experiment tracking / model registry</text>
+  <text x="1024" y="990" class="small">Artifacts on persistent volume</text>
+  <text x="1024" y="1015" class="tiny">Backend store: PostgreSQL</text>
+
+  <rect x="1316" y="910" width="424" height="144" rx="12" fill="#ffffff" stroke="#bdcbd1" stroke-width="1.5"/>
+  <text x="1338" y="941" class="card-title">PostgreSQL :5432</text>
+  <text x="1338" y="965" class="card-sub">Platform service state + MLflow metadata</text>
+  <text x="1338" y="990" class="small">Nodes, runs, jobs, datasets and service records</text>
+  <text x="1338" y="1015" class="tiny">Persistent Docker volume</text>
+
+  <!-- Infra relationships -->
+  <path d="M205 846 V880 H207 V910" class="flow"/>
+  <path d="M474 846 V878 H521 V910" class="flow"/>
+  <path d="M1330 846 V878 H835 V910" class="flow-dash"/>
+  <text x="906" y="872" class="tiny">image mode</text>
+  <path d="M760 846 V882 H835 V910" class="flow"/>
+  <path d="M757 846 V882 H1138 V910" class="flow"/>
+  <path d="M1420 846 V882 H1528 V910" class="flow"/>
+
+  <!-- Cross-cutting bottom band -->
+  <rect x="60" y="1080" width="1680" height="130" rx="14" fill="#173a4b"/>
+  <text x="86" y="1112" class="white" font-size="16" font-weight="700">CROSS-CUTTING</text>
+  <text x="86" y="1140" class="white-sub" font-size="12">Shared Python library: auth / config / logging / metrics</text>
+  <text x="86" y="1164" class="white-sub" font-size="12">JWT HS256 | per-service validation | internal service tokens</text>
+
+  <line x1="520" y1="1100" x2="520" y2="1189" stroke="#547681"/>
+  <text x="550" y="1112" class="white" font-size="15" font-weight="700">OBSERVABILITY</text>
+  <text x="550" y="1140" class="white-sub" font-size="12">Prometheus :9090 scrapes services</text>
+  <text x="550" y="1164" class="white-sub" font-size="12">Grafana :3001 dashboards</text>
+
+  <line x1="900" y1="1100" x2="900" y2="1189" stroke="#547681"/>
+  <text x="930" y="1112" class="white" font-size="15" font-weight="700">MESSAGING</text>
+  <text x="930" y="1140" class="white-sub" font-size="12">Kafka :9092 + Zookeeper :2181</text>
+  <text x="930" y="1164" class="white-sub" font-size="12">Topics provisioned; application event flow largely idle</text>
+
+  <line x1="1302" y1="1100" x2="1302" y2="1189" stroke="#547681"/>
+  <text x="1332" y="1112" class="white" font-size="15" font-weight="700">LEGEND / STATUS</text>
+  <line x1="1334" y1="1140" x2="1385" y2="1140" stroke="#d3e9e4" stroke-width="2" marker-end="url(#arrowLight)"/>
+  <text x="1397" y="1144" class="white-sub" font-size="11">active flow</text>
+  <line x1="1493" y1="1140" x2="1544" y2="1140" stroke="#e2a989" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrowLight)"/>
+  <text x="1557" y="1144" class="white-sub" font-size="11">external / stub / special path</text>
+  <text x="1334" y="1173" class="white-sub" font-size="11">Loki integration: not wired in current Compose topology</text>
+
+  <text x="60" y="1246" class="tiny">Architecture overview derived from docs/architecture.md, docs/connections.md, and docker-compose.yml. Detailed ports and known gaps are documented in docs/connections.md.</text>
+</svg>

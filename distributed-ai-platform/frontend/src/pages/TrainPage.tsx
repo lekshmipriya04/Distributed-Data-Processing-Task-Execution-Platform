@@ -18,14 +18,14 @@ const DEFAULT_SPLIT: QuickSplitConfig = {
   testRatio: 0.15,
 };
 
-// Engine → dataset modality + available models. Spark trains tabular/text
-// (linear/logistic via PySpark MLlib); Ray trains images (baseline CNN).
+// The selected engine runs only on the master. Providers always receive a
+// self-contained Python script and never install Spark or Ray.
 const ENGINES: {
   value: TrainEngine; label: string; blurb: string; icon: JSX.Element;
   models: { value: TrainModelType; label: string; blurb: string }[];
 }[] = [
   {
-    value: 'spark', label: 'Spark — text / tabular', blurb: 'PySpark MLlib on borrowed cores',
+    value: 'spark', label: 'Spark — CSV / tabular / text', blurb: 'Master Spark partitions HDFS data; workers run Python',
     icon: <Zap size={18} />,
     models: [
       { value: 'logistic_regression', label: 'Logistic Regression', blurb: 'Binary 0/1 target · accuracy / F1' },
@@ -33,7 +33,7 @@ const ENGINES: {
     ],
   },
   {
-    value: 'ray', label: 'Ray — images', blurb: 'Ray + baseline CNN on borrowed cores',
+    value: 'ray', label: 'Ray — image ZIP', blurb: 'Master Ray partitions/aggregates; workers run Python',
     icon: <Boxes size={18} />,
     models: [
       { value: 'cnn', label: 'Baseline CNN', blurb: 'Flattened-pixel image dataset · accuracy / F1' },
@@ -65,7 +65,24 @@ export function TrainPage() {
     return () => { if (pollRef.current) window.clearInterval(pollRef.current); };
   }, []);
 
+  useEffect(() => {
+    if (!dataset) return;
+    let image = false;
+    try { image = Boolean(JSON.parse(dataset.schema_json || '{}')?.image); } catch { /* invalid metadata */ }
+    const nextEngine: TrainEngine = image ? 'ray' : 'spark';
+    setEngine(nextEngine);
+    const validModels = ENGINES.find((item) => item.value === nextEngine)!.models;
+    setModelType((current) => validModels.some((model) => model.value === current)
+      ? current
+      : validModels[0].value);
+  }, [dataset?.id]);
+
   const activeEngine = ENGINES.find((e) => e.value === engine)!;
+  const imageDataset = dataset ? (() => {
+    try { return Boolean(JSON.parse(dataset.schema_json || '{}')?.image); } catch { return false; }
+  })() : null;
+  const engineAvailable = (candidate: TrainEngine) =>
+    imageDataset === null || candidate === (imageDataset ? 'ray' : 'spark');
   const onSelectEngine = (e: TrainEngine) => {
     setEngine(e);
     setModelType(ENGINES.find((x) => x.value === e)!.models[0].value);
@@ -154,11 +171,15 @@ export function TrainPage() {
       <Card>
         <SectionTitle>Engine &amp; dataset type</SectionTitle>
         <div className="grid grid-cols-2 gap-3">
-          {ENGINES.map((e) => (
+          {ENGINES.map((e) => {
+            const available = engineAvailable(e.value);
+            return (
             <button
               key={e.value}
               onClick={() => onSelectEngine(e.value)}
-              className={`text-left px-4 py-3 rounded-xl border text-sm transition-all flex items-start gap-3 ${
+              disabled={!available}
+              title={!available ? (imageDataset ? 'Available for tabular datasets' : 'Available for image datasets') : undefined}
+              className={`text-left px-4 py-3 rounded-xl border text-sm transition-all flex items-start gap-3 disabled:cursor-not-allowed disabled:opacity-50 ${
                 engine === e.value ? 'bg-blue-50 border-blue-500 text-blue-800 shadow-xs' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
               }`}
             >
@@ -166,9 +187,13 @@ export function TrainPage() {
               <span>
                 <span className="font-semibold block">{e.label}</span>
                 <span className="text-xs text-slate-500">{e.blurb}</span>
+                {!available && <span className="text-xs text-slate-400 block mt-1">
+                  {imageDataset ? 'Available for tabular datasets' : 'Available for image datasets'}
+                </span>}
               </span>
             </button>
-          ))}
+            );
+          })}
         </div>
       </Card>
 
@@ -289,13 +314,21 @@ function TrainingResult({ run, nodes }: { run: TrainRunResponse; nodes: NodeResp
     return nodes.find((n) => n.id === id)?.name ?? `${id.slice(0, 8)}…`;
   };
   const metricEntries = run.metrics ? Object.entries(run.metrics) : [];
+  const modelLabel: Record<string, string> = {
+    linear_regression: 'Linear Regression',
+    logistic_regression: 'Logistic Regression',
+    cnn: 'Baseline CNN',
+  };
   return (
     <Card>
       <div className="flex items-center gap-2 mb-4">
         {run.status === 'completed' && <CheckCircle2 size={18} className="text-emerald-600" />}
         {run.status === 'failed' && <XCircle size={18} className="text-rose-600" />}
         {run.status !== 'completed' && run.status !== 'failed' && <Loader2 size={18} className="text-blue-600 animate-spin" />}
-        <SectionTitle>Training {run.status}{run.engine ? ` · ${run.engine}` : ''}</SectionTitle>
+        <SectionTitle>
+          Training {run.status}{run.engine ? ` · ${run.engine}` : ''}
+          {run.model_type ? ` · ${modelLabel[run.model_type] ?? run.model_type}` : ''}
+        </SectionTitle>
       </div>
       {run.message && <p className="text-sm text-slate-600 mb-4">{run.message}</p>}
       {metricEntries.length > 0 && (

@@ -1,4 +1,4 @@
-"""Phase 9 smoke test — engine selection, CNN arch pinning, train_data manifest.
+"""Phase 9 smoke test — zero-install scripts, CNN arch pinning, train_data manifest.
 
 The orchestrator pulls in the full service import graph (shared/, sqlalchemy,
 httpx, ...), which may not resolve on a bare host. We add the repo root to the
@@ -24,21 +24,12 @@ except Exception as exc:  # missing shared/sqlalchemy/httpx on a bare host
     sys.exit(0)
 
 
-def test_engine_script_for() -> None:
-    s_spark, kind = T.engine_script_for("spark", "linear_regression", 0.01, 30)
-    assert kind == "spark" and "LinearRegression" in s_spark
-    s_log, kind = T.engine_script_for("spark", "logistic_regression", 0.01, 30)
-    assert kind == "spark" and "LogisticRegression" in s_log
-    s_ray, kind = T.engine_script_for("ray", "cnn", 0.05, 5, num_classes=3)
-    assert kind == "ray" and "ray.init(num_cpus=" in s_ray and "NUM_CLASSES = 3" in s_ray
-    for bad in [("ray", "linear_regression"), ("spark", "cnn"), ("dask", "cnn")]:
-        try:
-            T.engine_script_for(bad[0], bad[1], 0.01, 5)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"expected ValueError for {bad}")
-    print("[ok] engine_script_for (spark->lin/log, ray->cnn, mismatches rejected)")
+def test_zero_install_scripts() -> None:
+    linear = T.generate_remote_script("linear_regression", 0.01, 30)
+    cnn = T.generate_remote_script("cnn", 0.05, 5)
+    assert "spark-submit" not in linear and "ray.init" not in linear
+    assert "_train_cnn" in cnn and "spark-submit" not in cnn and "ray.init" not in cnn
+    print("[ok] self-contained Python scripts (linear/logistic/CNN; no Spark/Ray)")
 
 
 def test_cnn_arch() -> None:
@@ -54,12 +45,12 @@ def test_cnn_arch() -> None:
 def test_build_train_data() -> None:
     class _Run:
         id = "r1"; dataset_id = "d1"; model_type = "logistic_regression"
-        engine = "spark"; mode = "multi"; rounds = 3
+        engine = "python"; mode = "multi"; rounds = 3
     rows = [[1.0, 2.0, 0.0], [3.0, 4.0, 1.0]]
     hyper = {"learning_rate": 0.01, "epochs": 10, "target_column": "label"}
     out = T.build_train_data(_Run(), rows, ["a", "b"], hyper,
                              metrics={"accuracy": 1.0}, history=[{"round": 1}])
-    assert out["engine"] == "spark" and out["num_rows"] == 2
+    assert out["engine"] == "python" and out["num_rows"] == 2
     assert out["columns"] == ["a", "b", "label"]
     assert out["hyperparameters"]["epochs"] == 10
     assert out["rows"] == rows and out["metrics"]["accuracy"] == 1.0
@@ -67,7 +58,7 @@ def test_build_train_data() -> None:
 
 
 if __name__ == "__main__":
-    test_engine_script_for()
+    test_zero_install_scripts()
     test_cnn_arch()
     test_build_train_data()
     print("\nALL PHASE 9 CHECKS PASSED")

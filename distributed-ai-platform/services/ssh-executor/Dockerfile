@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	openjdk-21-jre-headless \
+	procps \
+	&& rm -rf /var/lib/apt/lists/*
 COPY shared/ /app/shared/
 COPY services/ssh-executor/pyproject.toml .
 RUN pip install --timeout 300 --retries 10 .

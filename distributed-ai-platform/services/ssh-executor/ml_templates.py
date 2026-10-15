@@ -388,7 +388,7 @@ def evaluate(model_type: str, weights: Optional[dict], rows: list) -> dict:
 
 
 # --- remote script generation --------------------------------------------
-SUPPORTED_MODELS = ("linear_regression", "logistic_regression")
+SUPPORTED_MODELS = ("linear_regression", "logistic_regression", "cnn")
 
 
 def generate_remote_script(model_type: str, lr: float, epochs: int) -> str:
@@ -402,18 +402,26 @@ def generate_remote_script(model_type: str, lr: float, epochs: int) -> str:
     if model_type not in SUPPORTED_MODELS:
         raise ValueError(f"Unsupported model_type: {model_type}")
     helpers = "\n\n".join(
-        inspect.getsource(fn) for fn in (_predict_linear, _predict_logistic, train_core)
+        inspect.getsource(fn)
+        for fn in (_predict_linear, _predict_logistic, train_core, _train_cnn)
     )
+    if model_type == "cnn":
+        train_call = "    out = _train_cnn(weights, rows, %r, %r)\n" % (float(lr), int(epochs))
+    else:
+        train_call = (
+            "    out = train_core(%r, %r, %r, weights, rows)\n"
+            % (model_type, float(lr), int(epochs))
+        )
     return (
         "import sys, json, math\n\n"
-        f"{helpers}\n\n"
-        "def _main():\n"
-        '    payload = json.loads(sys.stdin.read() or "{}")\n'
-        '    rows = payload.get("rows", [])\n'
-        '    weights = payload.get("weights")\n'
-        f"    out = train_core({model_type!r}, {float(lr)!r}, {int(epochs)!r}, weights, rows)\n"
-        "    sys.stdout.write(json.dumps(out))\n\n"
-        "_main()\n"
+        + f"{helpers}\n\n"
+        + "def _main():\n"
+        + '    payload = json.loads(sys.stdin.read() or "{}")\n'
+        + '    rows = payload.get("rows", [])\n'
+        + '    weights = payload.get("weights")\n'
+        + train_call
+        + "    sys.stdout.write(json.dumps(out))\n\n"
+        + "_main()\n"
     )
 
 

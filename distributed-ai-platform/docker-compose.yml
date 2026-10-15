@@ -443,6 +443,24 @@ services:
     networks:
       - platform-net
 
+  # Second isolated provider for multi-node SSH training tests. Reachable by
+  # ssh-executor as ssh-provider-2:2222; intentionally not published on host.
+  ssh-provider-2:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: ssh-provider-2
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - USER_NAME=provider
+      - USER_PASSWORD=providerpass
+      - PASSWORD_ACCESS=true
+      - SUDO_ACCESS=false
+      - DOCKER_MODS=linuxserver/mods:universal-package-install
+      - INSTALL_PACKAGES=python3|coreutils|util-linux
+    networks:
+      - platform-net
+
 
 volumes:
   postgres_data:

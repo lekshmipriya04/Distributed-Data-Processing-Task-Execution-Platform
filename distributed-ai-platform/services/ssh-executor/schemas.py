@@ -188,11 +188,9 @@ class LeaseResponse(BaseModel):
 class TrainRequest(BaseModel):
     """Train a model distributed over borrowed cores.
 
-    ``engine`` selects the real compute runtime: ``spark`` (tabular/text →
-    linear/logistic via PySpark MLlib) or ``ray`` (image → baseline CNN). Each
-    node bootstraps the runtime over SSH (RuntimeManager) and the master
-    federated-averages the per-node results. ``node_ids`` optionally restricts
-    the run to a chosen subset of online providers.
+    ``engine`` selects the master-side data engine: Spark for tabular/text
+    datasets or Ray for image-derived datasets. Both engines send only a
+    self-contained Python script and data shards to providers.
     """
 
     dataset_id: UUID

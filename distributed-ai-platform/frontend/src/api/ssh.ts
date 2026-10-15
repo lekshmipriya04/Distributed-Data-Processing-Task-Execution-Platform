@@ -117,6 +117,7 @@ export interface BatchTasksResponse {
 
 // --- distributed ML training --------------------------------------------
 export type TrainModelType = 'linear_regression' | 'logistic_regression' | 'cnn';
+// Master-side engine. Workers always execute the generated Python script.
 export type TrainEngine = 'spark' | 'ray';
 export type TrainMode = 'single' | 'multi';
 
