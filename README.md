@@ -1,287 +1,217 @@
 # Distributed Data Processing & Task Execution Platform
 
-> A microservices platform that integrates **distributed storage (HDFS)**,
-> **distributed compute (Spark/Livy)**, **experiment tracking (MLflow)**, and a
-> **bring-your-own-compute (BYO) task-execution plane** into a single
-> self-service system for training, evaluating, registering, and serving machine
-> learning models — plus a **VS Code extension** and a **Go control-plane
-> gateway** for driving it all from the editor.
+This repository contains a Docker Compose platform for dataset processing,
+machine-learning workflows, and remote task execution. It includes a React
+frontend, Python FastAPI services, an HDFS/Spark/Livy stack, an SSH executor,
+a standalone worker-agent implementation, and a VS Code extension with a Go
+gateway.
 
-A user uploads a dataset and drives it through the full ML lifecycle —
-**ingest → preprocess → train → evaluate → register → promote → serve** — while
-the heavy compute runs on an Apache Spark cluster orchestrated through Apache
-Livy, data lives in HDFS, and every run is tracked in MLflow. A second subsystem
-lets external machines contribute CPU/RAM/GPU capacity with owner approval, and
-an agentless SSH executor can run tasks on remote hosts directly.
+There are two distinct ways external compute appears in the codebase:
 
-- 📖 **[docs/architecture.md](distributed-ai-platform/docs/architecture.md)** — full architecture, component by component.
-- 🔌 **[docs/connections.md](distributed-ai-platform/docs/connections.md)** — every inter-component connection, port, and protocol.
+- `ssh-executor` connects directly to registered SSH provider hosts and runs
+temporary Python tasks or federated-training shards.
+- `worker/` is a separate agent/resource-request path using worker-registry,
+resource-manager, scheduler, and the API Gateway WebSocket.
 
----
+These paths are not interchangeable. The Compose SSH providers are manual test
+sandboxes; they are not instances of the worker agent.
 
-## Table of contents
+- [Architecture overview image](distributed-ai-platform/docs/architecture-overview.svg)
+- [Full architecture reference](distributed-ai-platform/docs/architecture.md)
+- [Connections, ports, and protocols](distributed-ai-platform/docs/connections.md)
 
-- [Highlights](#highlights)
-- [Architecture at a glance](#architecture-at-a-glance)
-- [Technology stack](#technology-stack)
-- [The two planes](#the-two-planes)
-- [The ML pipeline](#the-ml-pipeline)
-- [VS Code extension & control-plane gateway](#vs-code-extension--control-plane-gateway)
-- [Repository layout](#repository-layout)
-- [Port map](#port-map)
-- [Quick start](#quick-start)
-- [Configuration](#configuration)
-- [Testing](#testing)
-- [Security notes](#security-notes)
-- [Documentation](#documentation)
-- [License](#license)
+## Architecture Overview
 
----
+![Platform architecture](distributed-ai-platform/docs/architecture-overview.svg)
 
-## Highlights
+The React application and direct REST clients use the Python API Gateway on
+port 8000. The VS Code extension targets a separate Go gateway on port 8090;
+that gateway currently uses an in-memory store and is not connected to the
+Python services. The current Compose file does not define the Go gateway.
 
-- **Self-service ML** — train and deploy models on distributed compute without
-  writing Spark or cluster code.
-- **Independently deployable microservices** — each owns one pipeline stage and
-  its own PostgreSQL schema.
-- **Reproducible runs** — every job stores its full config, data splits, and
-  metrics/artifacts in MLflow.
-- **Elastic volunteer compute** — arbitrary machines register, advertise
-  capacity, heartbeat, and accept scheduled work with a human-in-the-loop
-  approval popup.
-- **Agentless remote execution** — an SSH executor detects a host's OS and
-  capabilities and runs confined tasks over SSH/SFTP, with per-OS adapters
-  (Linux / macOS / Windows).
-- **Editor-native control** — a VS Code extension talks to a Go gateway to browse
-  nodes, submit executions, and monitor jobs.
-- **Production cross-cutting concerns** — structured logging, Prometheus metrics,
-  request tracing, JWT auth, a shared exception model, and webhook callbacks.
+## Components
 
-<!-- APPEND_MARKER -->
+### ML pipeline
 
-## Architecture at a glance
-
-```
-                          ┌─────────────────────────┐
-        Browser  ───────▶ │   React Frontend (:3000) │
-                          └───────────┬──────────────┘
-                                      │  /api/v1/*  (Vite proxy)
-                                      ▼
-   VS Code ──▶ Go gateway (:8090) ─┐  │
-   extension                       ▼  ▼
-                          ┌─────────────────────────┐
-                          │   API Gateway (:8000)    │  reverse proxy + WS + dashboard
-                          └───────────┬──────────────┘
-        ┌───────────────┬─────────────┼───────────────┬───────────────┐
-        ▼               ▼             ▼               ▼               ▼
-   storage(:8001)  preprocessing  training(:8003)  evaluation    registry(:8005)
-        │            (:8002)          │             (:8004)          │
-        ▼               ▼             ▼               ▼              ▼
-   ┌─────────────────────────────────────────────────────────────────────┐
-   │  HDFS (namenode:9000 + 3 datanodes)   Spark (master:7077 + 3 workers) │
-   │  Apache Livy (:8998)   MLflow (:5000)   PostgreSQL (:5432)   Kafka     │
-   └─────────────────────────────────────────────────────────────────────┘
-        ▲               ▲                             ▲
-   serving(:8006)   worker-registry(:8008)      resource-manager(:8009)
-                         ▲                             ▲
-                    scheduler(:8010)  ◀──────────  ssh-executor(:8011)
-                         ▲
-                         │  register / heartbeat / WS / approve
-                   ┌─────┴───────────────────────────────┐
-                   │  Worker Node agents (BYO compute)    │
-                   │  + local human-approval popup UI     │
-                   └──────────────────────────────────────┘
-
-   Observability: Prometheus (:9090) ─ Grafana (:3001) ─ Loki (logs)
-```
-
-The **API Gateway** is the single HTTP ingress: it reverse-proxies each
-`/api/v1/<service>/…` prefix to the matching microservice, hosts a WebSocket for
-worker agents, and serves an aggregate dashboard endpoint. See
-[docs/architecture.md](distributed-ai-platform/docs/architecture.md) for the
-component-by-component breakdown and
-[docs/connections.md](distributed-ai-platform/docs/connections.md) for the full
-wiring.
-
-## Technology stack
-
-| Layer | Technology |
-|---|---|
-| Backend services | Python 3.11, FastAPI, Pydantic v2, Uvicorn |
-| Async / HTTP | `httpx`, `asyncio` |
-| Distributed compute | Apache Spark 3.5.0 (1 master + 3 workers), Apache Livy |
-| Distributed storage | Apache Hadoop 3 HDFS (1 namenode + 3 datanodes, WebHDFS) |
-| Experiment tracking | MLflow 2.14.3 (Postgres backend store) |
-| Relational DB | PostgreSQL 15 (per-service schemas) |
-| Messaging | Apache Kafka 7.4.0 + Zookeeper |
-| ORM | SQLAlchemy (async, asyncpg) |
-| Auth | JWT (HS256, shared secret) via PyJWT |
-| Remote exec | Paramiko (SSH/SFTP) + per-OS adapters |
-| Control gateway | Go (net/http) — the VS Code extension backend |
-| Editor client | VS Code Extension API, TypeScript, esbuild, Vitest |
-| Frontend | React 18 + TypeScript, Vite 5, Tailwind CSS 3 |
-| Observability | Prometheus, Grafana, Loki, structlog |
-| Containerization | Docker + Docker Compose; Kubernetes scaffold |
-
-## The two planes
-
-1. **ML pipeline plane** — `storage`, `preprocessing`, `training`, `evaluation`,
-   `registry`, `serving`.
-2. **Distributed task-execution plane** — `worker-registry`, `resource-manager`,
-   `scheduler`, `ssh-executor`, and external worker agents.
-
-## The ML pipeline
-
-| Stage | Service | What happens |
+| Stage | Components | Current path |
 |---|---|---|
-| 1. Ingest | storage | Upload `.csv`/`.parquet` to HDFS (WebHDFS), write metadata to Postgres. |
-| 2. Preprocess | preprocessing → Livy → Spark | Impute/encode/scale, train/val/test split to Parquet. |
-| 3. Train | training → Livy → Spark → MLflow | Multi-model cross-validation; best model + metrics logged to MLflow. |
-| 4. Register / Promote | registry → MLflow Registry | Register a run as a model version; alias-promote (candidate/staging/production). |
-| 5. Evaluate | evaluation → MLflow + storage | Load model, score dataset, compute real metrics. |
-| 6. Serve | serving → MLflow Registry | Online inference by `model_name` + `alias`, cached loader. |
+| Ingest | storage-service, HDFS, PostgreSQL | Dataset bytes are written to HDFS through WebHDFS; metadata is stored in PostgreSQL. |
+| Preprocess | preprocessing-service, Livy, Spark | FastAPI submits PySpark batches through Livy; results are stored in HDFS. |
+| Standard training | training-service, Livy, Spark, MLflow | PySpark training batches run on the Spark cluster and log runs/models to MLflow. |
+| Evaluate | evaluation-service, storage-service, MLflow | Loads a model, downloads dataset bytes, and stores evaluation results. |
+| Register and serve | registry-service, serving-service, MLflow | Registry aliases select models for online inference. |
 
-## VS Code extension & control-plane gateway
+### SSH task and training path
 
-- **`distributed-ai-platform/distributed-compute-vscode/`** — a VS Code extension
-  (TypeScript) that is a developer-facing control interface: Compute Nodes / Jobs
-  / Executions tree views, Run (Python/Spark/Ray) commands, a status bar, and
-  `distributed.json` project config. The token lives only in SecretStorage; it
-  never contacts compute nodes directly. See its
-  [README](distributed-ai-platform/distributed-compute-vscode/README.md).
-- **`distributed-ai-platform/services/extension-gateway/`** — a small Go
-  (`net/http`) service that exposes a stable JSON contract (`/health`,
-  `/cluster/status`, `/nodes`, `/executions`, …) to the extension and is meant to
-  adapt/aggregate the Python backend behind it. Default port `:8090`; its default
-  `Store` is an empty in-memory store (never fabricates data) pending a
-  platform-backed implementation.
+`services/ssh-executor` is the master-side SSH controller. It probes and
+registers provider hosts, encrypts stored credentials, pins host keys, dispatches
+scripts over SSH/SFTP, streams shard input through stdin, and cleans temporary
+task files after execution.
 
-## Repository layout
+For SSH-based training, `services/ssh-executor/training_orchestrator.py` reads
+tabular datasets with Spark on the master. For image-derived datasets, it
+downloads bytes from storage-service into a temporary local directory and reads
+them with Ray Data, avoiding a direct Ray/libhdfs/JVM connection. It splits
+rows, dispatches self-contained Python scripts generated in
+`services/ssh-executor/ml_templates.py`, and aggregates shard weights on the
+master. The `ssh-executor` dependencies, including compatible Ray Data,
+PyArrow, NumPy, pandas, and setuptools pins, are in
+`services/ssh-executor/pyproject.toml`.
 
-```
-.
-├── README.md
-├── .gitignore
-└── distributed-ai-platform/
-    ├── docker-compose.yml          # full-stack orchestration
-    ├── Makefile                    # dev/ops commands
-    ├── pyproject.toml              # package + dev tooling (ruff/mypy/pytest)
-    ├── config/                     # .env.example (copy to .env)
-    ├── docs/                       # architecture.md, connections.md
-    ├── services/
-    │   ├── api-gateway/            # reverse proxy, WS, dashboard (8000)
-    │   ├── storage-service/        # dataset upload + HDFS (8001)
-    │   ├── preprocessing-service/  # Spark preprocessing via Livy (8002)
-    │   ├── training-service/       # Spark training + MLflow (8003)
-    │   ├── evaluation-service/     # model evaluation (8004)
-    │   ├── registry-service/       # MLflow registry (8005)
-    │   ├── serving-service/        # online inference (8006)
-    │   ├── worker-registry/        # worker tracking (8008)
-    │   ├── resource-manager/       # resource-request lifecycle (8009)
-    │   ├── scheduler/              # worker selection (8010)
-    │   ├── ssh-executor/           # agentless SSH exec + OS adapters (8011)
-    │   └── extension-gateway/      # Go control-plane for the VS Code extension (8090)
-    ├── shared/                     # common lib + pipeline schemas
-    ├── worker/                     # BYO-compute agent + approval popup UI
-    ├── frontend/                   # React + Vite + Tailwind SPA
-    ├── distributed-compute-vscode/ # VS Code extension
-    ├── livy/                       # Livy Dockerfile
-    ├── infrastructure/             # hadoop/postgres docker config + k8s scaffold
-    ├── monitoring/                 # prometheus.yml + grafana datasources
-    ├── scripts/                    # setup_hdfs.sh, create_kafka_topics.sh
-    └── tests/                      # unit / integration / load
-```
+Providers receive Python scripts and shard data; they do not run the master
+Spark cluster or the master Ray Data reader. Linux/macOS/Windows command
+adapters exist, but real Windows task execution has not been verified.
 
-## Port map
+### Worker-agent path
 
-| Component | Port | Notes |
-|---|---|---|
-| Frontend (Vite dev) | 3000 | proxies `/api`, `/health` → gateway |
-| API Gateway | 8000 | single ingress |
-| storage … serving | 8001–8006 | ML plane |
-| worker-registry … ssh-executor | 8008–8011 | task-exec plane |
-| extension-gateway (Go) | 8090 | VS Code extension backend |
-| PostgreSQL | 5432 | per-service schemas |
-| Kafka / Zookeeper | 9092 / 2181 | event backbone |
-| HDFS NameNode | 9870 (UI) / 9000 (RPC) | + 3 datanodes |
-| Spark master | 8080 (UI) / 7077 (RPC) | + 3 workers |
-| Apache Livy | 8998 | Spark batch submission |
-| MLflow | 5000 | Postgres backend store |
-| Prometheus / Grafana | 9090 / 3001 | metrics + dashboards |
-
-## Quick start
-
-```bash
-cd distributed-ai-platform
-
-# 1. Provide real secrets
-cp config/.env.example config/.env    # then edit values (JWT_SECRET, etc.)
-
-# 2. Build and start the full stack
-make build
-make up                               # docker compose up -d
-
-# 3. One-time HDFS + Kafka bootstrap
-make setup-hdfs
-bash scripts/create_kafka_topics.sh
-
-# 4. Frontend (dev)
-cd frontend && npm install && npm run dev   # http://localhost:3000
-```
-
-Key UIs: Frontend `:3000`, Gateway `:8000/docs`, Spark `:8080`, HDFS `:9870`,
-MLflow `:5000`, Livy `:8998`, Prometheus `:9090`, Grafana `:3001`.
-
-The VS Code extension builds separately:
-
-```bash
-cd distributed-ai-platform/distributed-compute-vscode
-npm install && npm run compile && npm test
-```
-
-## Configuration
-
-Secrets and endpoints come from `distributed-ai-platform/config/.env` (template in
-`config/.env.example`). Key variables: `POSTGRES_USER/PASSWORD/DB`, `JWT_SECRET`
-(HS256 signing secret — **override the default**), `MLFLOW_TRACKING_URI`,
-`LIVY_URL`, `INTERNAL_SERVICE_TOKEN`, `SSH_CRED_KEY`, `GRAFANA_PASSWORD`,
-`ENVIRONMENT`. Worker-agent variables are documented in
+The standalone `worker/` package registers an agent with worker-registry,
+heartbeats capacity, and includes an approval UI. The automatic resource-request
+push is incomplete: the configured `streaming-service:8007` is absent from
+Compose, and the API Gateway worker-push helper is not called by the current
+resource-manager flow. See the limitations in
 [docs/architecture.md](distributed-ai-platform/docs/architecture.md).
 
-## Testing
+## Manual SSH Test Sandboxes
+
+The active `docker-compose.yml` defines two isolated test providers:
+
+- `ssh-provider`
+- `ssh-provider-2`
+
+Both use the LinuxServer OpenSSH image and install Python 3 plus core utilities.
+They are attached to the private `platform-net`; SSH port 2222 is not published
+to the host. They are throwaway provider hosts, not the separate `worker/` agent
+or the Spark workers. Their sample credentials are for local testing only.
+
+## Frontend Training Updates
+
+`frontend/src/pages/TrainPage.tsx` selects Spark for tabular/text datasets and
+Ray for image datasets. Selecting a dataset preserves a compatible model
+selection; the incompatible engine stays visible but disabled, and result cards
+identify the model that ran. The SSH training-data download route in
+`services/ssh-executor/routes.py` rebuilds data using the run's saved engine and
+shard count.
+
+## Current Verification
+
+- The frontend production build passed after the Train Job selection fix.
+- The SSH executor smoke test against `ssh-provider-2` passed remote Python
+  execution, stdin transfer, and temporary-file cleanup.
+- The Ray Data reader was exercised against the stored `cnn_image_data_test`
+  dataset and returned 250 rows. A full multi-device Ray CNN run has not yet
+  been verified end to end.
+- A Spark run was manually observed completing across two shards.
+- A real Windows provider is not yet verified. The last executor-container
+  connection test to `10.10.18.73:22` timed out. At that check, the Windows
+  worker's Wi-Fi profile was `Public`, while its OpenSSH firewall rule applied
+  only to the `Private` profile; Docker/VPN reachability also needs validation.
+
+## Technology Stack
+
+| Area | Technology |
+|---|---|
+| Backend | Python 3.11, FastAPI, Pydantic v2, Uvicorn |
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS |
+| Data processing | Apache Spark 3.5.0, Apache Livy, Ray 2.9.3 for SSH image-mode training |
+| Storage | Apache Hadoop 3 HDFS, WebHDFS, PostgreSQL 15 |
+| Model tracking | MLflow 2.14.3 |
+| SSH execution | Paramiko, SFTP, per-OS command adapters |
+| Editor integration | VS Code extension (TypeScript) and Go extension-gateway |
+| Packaging | Docker Compose; Kubernetes manifests are scaffolding |
+
+## Repository Layout
+
+```text
+.
+|-- README.md
+`-- distributed-ai-platform/
+    |-- docker-compose.yml
+    |-- config/
+    |-- docs/
+    |   |-- architecture.md
+    |   |-- architecture-overview.svg
+    |   `-- connections.md
+    |-- frontend/                    React/Vite application
+    |-- services/                    FastAPI services and Go gateway
+    |-- shared/                      Shared Python library and schemas
+    |-- worker/                      Standalone worker agent
+    |-- distributed-compute-vscode/  VS Code extension
+    |-- infrastructure/              HDFS/PostgreSQL and Kubernetes scaffold
+    |-- livy/
+    |-- scripts/
+    `-- tests/
+```
+
+## Ports
+
+| Component | Port | Notes |
+|---|---:|---|
+| React dev server | 3000 | Vite proxy to API Gateway |
+| Python API Gateway | 8000 | Platform HTTP/WebSocket ingress |
+| ML services | 8001-8006 | Storage through serving |
+| Task services | 8008-8011 | Worker registry through SSH executor |
+| PostgreSQL | 5432 | Platform and MLflow databases |
+| HDFS | 9000, 9870 | RPC and WebHDFS/NameNode UI |
+| Spark | 7077, 8080 | Master RPC and UI |
+| Livy | 8998 | Spark batch submission |
+| MLflow | 5000 | Tracking and model registry |
+| SSH test providers | 2222 internal | Private Compose network only; not host-published |
+| Go extension-gateway | 8090 | Run separately; not defined in current Compose |
+
+Kafka/Zookeeper and Prometheus/Grafana/Loki configuration or scripts exist in
+the repository, but those services are not defined in the current Compose file.
+The resource-manager's `streaming-service:8007` target is absent as well.
+
+## Quick Start
 
 ```bash
 cd distributed-ai-platform
-make test-unit            # pytest unit tests
-make test-integration     # end-to-end pipeline tests
-make lint                 # ruff + mypy
-
-# OS-adapter unit tests (stdlib only, no service deps)
-python3 -m unittest tests.unit.services.test_os_adapters -v
-
-# Go control-plane gateway
-cd services/extension-gateway && go test ./...
+cp config/.env.example config/.env
+# Edit config/.env and replace development secrets before non-local use.
+docker compose up -d --build
+make setup-hdfs
+cd frontend
+npm install
+npm run dev
 ```
 
-## Security notes
+The Compose stack includes both manual SSH test providers. A real SSH provider
+must run an SSH server, accept the configured credential, and be reachable from
+the `ssh-executor` container. SSH access alone does not establish that Windows
+task execution works.
 
-- **JWT HS256 with a shared secret** validated independently by each service;
-  there is no `/login` endpoint — tokens are minted externally
-  (`generate_token.py`). Override `JWT_SECRET` before any real use.
-- The **worker approval popup** binds to `127.0.0.1` only.
-- Stored SSH credentials are **encrypted at rest** (`SSH_CRED_KEY`).
-- The **SSH executor runs caller-supplied code on remote hosts** — treat it as a
-  privileged surface and do not expose it untrusted. See the security section of
-  [docs/architecture.md](distributed-ai-platform/docs/architecture.md).
-- Gateway CORS and K8s TLS are not hardened for production yet.
+## Tests
 
-## Documentation
+```bash
+cd distributed-ai-platform
+make test-unit
+make test-integration
+make lint
 
-- [docs/architecture.md](distributed-ai-platform/docs/architecture.md) — full system architecture.
-- [docs/connections.md](distributed-ai-platform/docs/connections.md) — every connection, port, and protocol.
-- [distributed-compute-vscode/README.md](distributed-ai-platform/distributed-compute-vscode/README.md) — the VS Code extension.
+cd frontend
+npm run build
+```
+
+The VS Code extension is built/tested separately in
+`distributed-ai-platform/distributed-compute-vscode/` with `npm run compile`
+and `npm test`. The Go gateway has its own `go test ./...` suite.
+
+## Configuration and Security
+
+Copy `config/.env.example` to `config/.env`. Set strong values for
+`JWT_SECRET`, `SSH_CRED_KEY`, and other credentials before use beyond a local
+test environment. There is no `/login` endpoint; development tokens are minted
+out of band. SSH credentials are encrypted at rest, but `ssh-executor` runs
+caller-supplied code on provider machines and must be treated as a privileged
+remote-code-execution surface. Do not expose it to untrusted callers.
+
+## Further Documentation
+
+- [Architecture image](distributed-ai-platform/docs/architecture-overview.svg)
+- [Detailed architecture](distributed-ai-platform/docs/architecture.md)
+- [Connections and protocols](distributed-ai-platform/docs/connections.md)
+- [VS Code extension](distributed-ai-platform/distributed-compute-vscode/README.md)
 
 ## License
 
-Released under the [MIT License](distributed-ai-platform/distributed-compute-vscode/LICENSE)
-for the VS Code extension; see individual components for their terms.
+The VS Code extension is under the [MIT License](distributed-ai-platform/distributed-compute-vscode/LICENSE); see individual components for their terms.

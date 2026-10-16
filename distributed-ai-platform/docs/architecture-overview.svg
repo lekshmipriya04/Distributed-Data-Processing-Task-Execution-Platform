@@ -205,13 +205,13 @@
 
   <line x1="520" y1="1100" x2="520" y2="1189" stroke="#547681"/>
   <text x="550" y="1112" class="white" font-size="15" font-weight="700">OBSERVABILITY</text>
-  <text x="550" y="1140" class="white-sub" font-size="12">Prometheus :9090 scrapes services</text>
-  <text x="550" y="1164" class="white-sub" font-size="12">Grafana :3001 dashboards</text>
+  <text x="550" y="1140" class="white-sub" font-size="12">Prometheus client middleware / metrics endpoints</text>
+  <text x="550" y="1164" class="white-sub" font-size="12">Monitoring services are not in current Compose</text>
 
   <line x1="900" y1="1100" x2="900" y2="1189" stroke="#547681"/>
-  <text x="930" y="1112" class="white" font-size="15" font-weight="700">MESSAGING</text>
-  <text x="930" y="1140" class="white-sub" font-size="12">Kafka :9092 + Zookeeper :2181</text>
-  <text x="930" y="1164" class="white-sub" font-size="12">Topics provisioned; application event flow largely idle</text>
+  <text x="930" y="1112" class="white" font-size="15" font-weight="700">MESSAGING SCAFFOLD</text>
+  <text x="930" y="1140" class="white-sub" font-size="12">Kafka topic script exists; broker not in current Compose</text>
+  <text x="930" y="1164" class="white-sub" font-size="12">Resource event target :8007 is an absent service</text>
 
   <line x1="1302" y1="1100" x2="1302" y2="1189" stroke="#547681"/>
   <text x="1332" y="1112" class="white" font-size="15" font-weight="700">LEGEND / STATUS</text>
