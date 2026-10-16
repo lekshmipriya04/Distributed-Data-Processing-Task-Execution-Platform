@@ -20,7 +20,7 @@ coverage.xml
 
 # IDEs
 .idea/
-.vscode/
+/.vscode/
 *.swp
 *.swo
 
@@ -37,7 +37,7 @@ build/
 *.sqlite3
 
 # Data/Secrets (CRITICAL: BUG-24 Fix)
-data/
+/data/
 secrets/
 config/.env
 config/.env.local

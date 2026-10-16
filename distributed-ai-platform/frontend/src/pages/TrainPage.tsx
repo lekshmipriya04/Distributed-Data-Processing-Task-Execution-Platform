@@ -1,58 +1,38 @@
 import { useEffect, useRef, useState } from 'react';
-import { Zap, Boxes, Cpu, Server, Loader2, CheckCircle2, XCircle, Download, Plus, Trash2 } from 'lucide-react';
-import { DataUpload, QuickSplitConfig } from '../components/data/DataUpload';
-import { ClusterConfigForm } from '../components/cluster/ClusterConfigForm';
-import { Card, SectionTitle, PrimaryButton, SecondaryButton, NumberField } from '../components/common/Primitives';
-import { useClusterConfig } from '../context/ClusterConfigContext';
+import { Cpu, Server, Loader2, CheckCircle2, XCircle, Download, Plus, Trash2 } from 'lucide-react';
+import { DataUpload, type QuickSplitConfig } from '../components/data/DataUpload';
+import { Card, SectionTitle, PrimaryButton, SecondaryButton, NumberField, StatusBadge } from '../components/common/Primitives';
 import { useToast } from '../context/ToastContext';
+import { errorMessage } from '../api/client';
+import { isImageDataset } from '../api/storage';
 import { sshApi } from '../api/ssh';
-import type { TrainEngine, TrainModelType, TrainRunResponse, NodeResponse } from '../api/ssh';
+import type { TrainMode, TrainModelType, TrainRunResponse, NodeResponse } from '../api/ssh';
 import type { Dataset } from '../types';
 
-const DEFAULT_SPLIT: QuickSplitConfig = {
-  numericFeatures: [],
-  categoricalFeatures: [],
-  targetColumns: [],
-  trainRatio: 0.7,
-  validationRatio: 0.15,
-  testRatio: 0.15,
-};
+const EMPTY_SPLIT: QuickSplitConfig = { targetColumn: '', featureColumns: [] };
 
-// The selected engine runs only on the master. Providers always receive a
-// self-contained Python script and never install Spark or Ray.
-const ENGINES: {
-  value: TrainEngine; label: string; blurb: string; icon: JSX.Element;
-  models: { value: TrainModelType; label: string; blurb: string }[];
-}[] = [
-  {
-    value: 'spark', label: 'Spark — CSV / tabular / text', blurb: 'Master Spark partitions HDFS data; workers run Python',
-    icon: <Zap size={18} />,
-    models: [
-      { value: 'logistic_regression', label: 'Logistic Regression', blurb: 'Binary 0/1 target · accuracy / F1' },
-      { value: 'linear_regression', label: 'Linear Regression', blurb: 'Numeric target · MSE / RMSE / R²' },
-    ],
-  },
-  {
-    value: 'ray', label: 'Ray — image ZIP', blurb: 'Master Ray partitions/aggregates; workers run Python',
-    icon: <Boxes size={18} />,
-    models: [
-      { value: 'cnn', label: 'Baseline CNN', blurb: 'Flattened-pixel image dataset · accuracy / F1' },
-    ],
-  },
+const TERMINAL_TRAIN = ['completed', 'failed'];
+
+const MODEL_TYPES: { value: TrainModelType; label: string; blurb: string }[] = [
+  { value: 'logistic_regression', label: 'Logistic Regression', blurb: 'Binary / multi-class target · accuracy / F1' },
+  { value: 'linear_regression',   label: 'Linear Regression',   blurb: 'Numeric target · MSE / RMSE / R²' },
+  { value: 'cnn',                 label: 'Baseline CNN',         blurb: 'Flattened-pixel image dataset · accuracy / F1' },
 ];
 
 export function TrainPage() {
-  const { config: clusterConfig } = useClusterConfig();
   const { showError, showSuccess } = useToast();
 
-  const [engine, setEngine] = useState<TrainEngine>('spark');
   const [modelType, setModelType] = useState<TrainModelType>('logistic_regression');
   const [dataset, setDataset] = useState<Dataset | null>(null);
-  const [quickSplit, setQuickSplit] = useState<QuickSplitConfig>(DEFAULT_SPLIT);
+  const [split, setSplit] = useState<QuickSplitConfig>(EMPTY_SPLIT);
   const [learningRate, setLearningRate] = useState(0.01);
   const [epochs, setEpochs] = useState(10);
   const [rounds, setRounds] = useState(3);
   const [numClasses, setNumClasses] = useState(0);
+
+  const [mode, setMode] = useState<TrainMode>('multi');
+  const [localCores, setLocalCores] = useState(2);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
 
   const [nodes, setNodes] = useState<NodeResponse[]>([]);
   const [run, setRun] = useState<TrainRunResponse | null>(null);
@@ -60,54 +40,49 @@ export function TrainPage() {
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
 
+  const stopPolling = () => {
+    if (pollRef.current) window.clearInterval(pollRef.current);
+    pollRef.current = null;
+  };
+
   useEffect(() => {
-    sshApi.listNodes().then((r) => setNodes(r.items)).catch(() => {});
-    return () => { if (pollRef.current) window.clearInterval(pollRef.current); };
+    sshApi.listNodes()
+      .then((r) => {
+        setNodes(r.items);
+        setSelectedNodeIds(r.items.filter((n) => n.status === 'online').map((n) => n.id));
+      })
+      .catch(() => {});
+    return stopPolling;
   }, []);
 
   useEffect(() => {
     if (!dataset) return;
-    let image = false;
-    try { image = Boolean(JSON.parse(dataset.schema_json || '{}')?.image); } catch { /* invalid metadata */ }
-    const nextEngine: TrainEngine = image ? 'ray' : 'spark';
-    setEngine(nextEngine);
-    const validModels = ENGINES.find((item) => item.value === nextEngine)!.models;
-    setModelType((current) => validModels.some((model) => model.value === current)
-      ? current
-      : validModels[0].value);
+    // For CNN models on image datasets, switch automatically.
+    if (isImageDataset(dataset)) setModelType('cnn');
   }, [dataset?.id]);
 
-  const activeEngine = ENGINES.find((e) => e.value === engine)!;
-  const imageDataset = dataset ? (() => {
-    try { return Boolean(JSON.parse(dataset.schema_json || '{}')?.image); } catch { return false; }
-  })() : null;
-  const engineAvailable = (candidate: TrainEngine) =>
-    imageDataset === null || candidate === (imageDataset ? 'ray' : 'spark');
-  const onSelectEngine = (e: TrainEngine) => {
-    setEngine(e);
-    setModelType(ENGINES.find((x) => x.value === e)!.models[0].value);
-  };
 
   const onlineNodes = nodes.filter((n) => n.status === 'online');
-  const isMulti = clusterConfig.mode === 'multi';
-  const selectedIds = clusterConfig.nodes.map((n) => n.id);
+  const chosenNodes = onlineNodes.filter((n) => selectedNodeIds.includes(n.id));
+  const isMulti = mode === 'multi';
+  const toggleNode = (id: string) =>
+    setSelectedNodeIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
 
   const canSubmit =
     !!dataset &&
-    quickSplit.numericFeatures.length > 0 &&
-    quickSplit.targetColumns.length > 0 &&
-    (!isMulti || clusterConfig.nodes.length > 0) &&
-    (!run || run.status === 'failed' || run.status === 'completed') &&
+    split.featureColumns.length > 0 &&
+    !!split.targetColumn &&
+    (!isMulti || chosenNodes.length > 0) &&
+    (!run || TERMINAL_TRAIN.includes(run.status)) &&
     !submitting;
 
   const poll = (id: string) => {
+    stopPolling();
     pollRef.current = window.setInterval(async () => {
       try {
         const latest = await sshApi.getTrainingRun(id);
         setRun(latest);
-        if (latest.status === 'completed' || latest.status === 'failed') {
-          if (pollRef.current) window.clearInterval(pollRef.current);
-        }
+        if (TERMINAL_TRAIN.includes(latest.status)) stopPolling();
       } catch { /* transient */ }
     }, 2000);
   };
@@ -120,28 +95,28 @@ export function TrainPage() {
       const created = await sshApi.startTraining({
         dataset_id: dataset.id,
         model_type: modelType,
-        engine,
-        target_column: quickSplit.targetColumns[0],
-        feature_columns: quickSplit.numericFeatures,
-        mode: clusterConfig.mode,
-        local_cores: clusterConfig.localCores,
+        engine: 'python',
+        target_column: split.targetColumn,
+        feature_columns: split.featureColumns,
+        mode,
+        local_cores: localCores,
         learning_rate: learningRate,
         epochs,
         rounds,
-        num_classes: modelType === 'cnn' ? numClasses : undefined,
-        node_ids: isMulti ? selectedIds : undefined,
+        num_classes: modelType === 'cnn' ? numClasses : 0,
+        node_ids: isMulti ? chosenNodes.map((n) => n.id) : [],
       });
       setRun(created);
       poll(created.id);
-    } catch (e: any) {
-      showError(e.message ?? 'Failed to start training');
+    } catch (e) {
+      showError(errorMessage(e, 'Failed to start training'));
     } finally {
       setSubmitting(false);
     }
   };
 
   const newTraining = () => {
-    if (pollRef.current) window.clearInterval(pollRef.current);
+    stopPolling();
     setRun(null);
   };
 
@@ -152,8 +127,8 @@ export function TrainPage() {
       await sshApi.deleteTrainingRun(run.id);
       showSuccess('Previous training removed');
       newTraining();
-    } catch (e: any) {
-      showError(e.message ?? 'Failed to remove training');
+    } catch (e) {
+      showError(errorMessage(e, 'Failed to remove training'));
     } finally {
       setBusy(false);
     }
@@ -161,47 +136,20 @@ export function TrainPage() {
 
   const download = async (fn: () => Promise<void>, what: string) => {
     setBusy(true);
-    try { await fn(); } catch (e: any) { showError(e.message ?? `Failed to download ${what}`); }
+    try { await fn(); } catch (e) { showError(errorMessage(e, `Failed to download ${what}`)); }
     finally { setBusy(false); }
   };
 
   return (
     <div className="w-full max-w-4xl mx-auto space-y-6">
-      {/* 1. Engine (dataset modality) */}
+      {/* 1. Model */}
       <Card>
-        <SectionTitle>Engine &amp; dataset type</SectionTitle>
-        <div className="grid grid-cols-2 gap-3">
-          {ENGINES.map((e) => {
-            const available = engineAvailable(e.value);
-            return (
-            <button
-              key={e.value}
-              onClick={() => onSelectEngine(e.value)}
-              disabled={!available}
-              title={!available ? (imageDataset ? 'Available for tabular datasets' : 'Available for image datasets') : undefined}
-              className={`text-left px-4 py-3 rounded-xl border text-sm transition-all flex items-start gap-3 disabled:cursor-not-allowed disabled:opacity-50 ${
-                engine === e.value ? 'bg-blue-50 border-blue-500 text-blue-800 shadow-xs' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
-              }`}
-            >
-              <span className={engine === e.value ? 'text-blue-600' : 'text-slate-400'}>{e.icon}</span>
-              <span>
-                <span className="font-semibold block">{e.label}</span>
-                <span className="text-xs text-slate-500">{e.blurb}</span>
-                {!available && <span className="text-xs text-slate-400 block mt-1">
-                  {imageDataset ? 'Available for tabular datasets' : 'Available for image datasets'}
-                </span>}
-              </span>
-            </button>
-            );
-          })}
-        </div>
-      </Card>
-
-      {/* 2. Model */}
-      <Card>
-        <SectionTitle>Model</SectionTitle>
-        <div className="grid grid-cols-2 gap-3">
-          {activeEngine.models.map((m) => (
+        <SectionTitle>Model type</SectionTitle>
+        <p className="text-xs text-slate-500 mb-3">
+          Workers receive only a stdlib-only Python script and a data shard — nothing is installed on them.
+        </p>
+        <div className="grid grid-cols-3 gap-3">
+          {MODEL_TYPES.map((m) => (
             <button
               key={m.value}
               onClick={() => setModelType(m.value)}
@@ -216,25 +164,85 @@ export function TrainPage() {
         </div>
       </Card>
 
-      {/* 3. Compute configuration (single local / multi with worker select) */}
-      <ClusterConfigForm />
-
-      {isMulti && (
-        <div className="text-xs rounded-lg px-3.5 py-2.5 bg-blue-50 border border-blue-200 text-blue-800 flex gap-2">
-          <Server size={16} className="shrink-0 mt-0.5" />
-          <span>
-            {clusterConfig.nodes.length} selected · {onlineNodes.length} online provider(s).
-            {clusterConfig.nodes.length === 0 && ' Select at least one device above.'}
-          </span>
+      {/* 3. Compute: master cores or selected workers */}
+      <Card>
+        <SectionTitle>Compute</SectionTitle>
+        <div className="flex gap-3 mb-5">
+          {([
+            { value: 'multi', label: 'Workers (SSH)', icon: <Server size={18} /> },
+            { value: 'single', label: 'Master only', icon: <Cpu size={18} /> },
+          ] as const).map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => setMode(opt.value)}
+              className={`flex-1 flex items-center gap-2 justify-center px-4 py-3 rounded-xl border text-sm font-medium transition-all ${
+                mode === opt.value
+                  ? 'bg-blue-50 border-blue-500 text-blue-700 shadow-xs'
+                  : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              <span className={mode === opt.value ? 'text-blue-600' : 'text-slate-400'}>{opt.icon}</span> {opt.label}
+            </button>
+          ))}
         </div>
-      )}
+
+        {isMulti ? (
+          <div>
+            <p className="text-xs text-slate-500 mb-3">
+              Each selected worker gets one shard per allocated core. Workers only need SSH and Python 3; nothing is installed on them.
+            </p>
+            {nodes.length === 0 ? (
+              <p className="text-sm text-slate-500">No workers registered. Add one on the <span className="font-medium">SSH Connection</span> page.</p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {nodes.map((n) => {
+                  const online = n.status === 'online';
+                  const active = online && selectedNodeIds.includes(n.id);
+                  return (
+                    <button
+                      key={n.id}
+                      type="button"
+                      disabled={!online}
+                      onClick={() => toggleNode(n.id)}
+                      className={`text-left px-3.5 py-2.5 rounded-lg border text-sm transition-all ${
+                        active ? 'bg-blue-50 border-blue-500 text-blue-800'
+                        : online ? 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'
+                        : 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">{n.name}</span>
+                        <StatusBadge status={n.status} />
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5">
+                        {n.host}:{n.port} · {n.allocated_cpu} cores{n.python_version ? ` · Python ${n.python_version}` : ''}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <div className="mt-3 text-xs text-slate-600">
+              {chosenNodes.length} selected · {chosenNodes.reduce((sum, n) => sum + Math.max(1, n.allocated_cpu), 0)} shards
+              {onlineNodes.length === 0 && nodes.length > 0 && <span className="text-rose-600"> · no worker is online</span>}
+            </div>
+          </div>
+        ) : (
+          <label className="text-sm block">
+            <span className="text-xs text-slate-500 font-medium block mb-1">Cores on the master</span>
+            <NumberField value={localCores} min={1} max={64} step={1} onChange={setLocalCores}
+              className="w-40 bg-white rounded-lg px-3 py-2 text-slate-900 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
+          </label>
+        )}
+      </Card>
 
       {/* 4. Dataset upload + column config */}
       <DataUpload
         selectedDataset={dataset}
         onSelectDataset={setDataset}
-        quickSplit={quickSplit}
-        onQuickSplitChange={setQuickSplit}
+        quickSplit={split}
+        onQuickSplitChange={setSplit}
       />
 
       {/* 5. Hyperparameters */}
@@ -292,9 +300,9 @@ export function TrainPage() {
             <div className="text-sm text-slate-600 font-medium flex items-center gap-2">
               <Cpu size={15} className="text-slate-400" />
               {!dataset && 'Select a dataset to continue.'}
-              {dataset && quickSplit.numericFeatures.length === 0 && 'Add at least one feature column.'}
-              {dataset && quickSplit.numericFeatures.length > 0 && quickSplit.targetColumns.length === 0 && 'Set the target column.'}
-              {isMulti && clusterConfig.nodes.length === 0 && dataset && <span className="text-rose-600">Select a worker above.</span>}
+              {dataset && !split.targetColumn && 'Set the target column.'}
+              {dataset && split.targetColumn && split.featureColumns.length === 0 && 'Add at least one feature column.'}
+              {isMulti && chosenNodes.length === 0 && dataset && <span className="text-rose-600">Select an online worker above.</span>}
               {canSubmit && <span className="text-emerald-600 font-semibold">Ready to train on {engine}.</span>}
             </div>
             <PrimaryButton onClick={handleTrain} disabled={!canSubmit}>

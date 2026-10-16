@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { Activity, PlayCircle, Terminal, Code2 } from 'lucide-react';
 import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 
-import { ClusterConfigProvider } from './context/ClusterConfigContext';
 import { ToastProvider } from './context/ToastContext';
 import { SSHExecutorPage } from './pages/SSHExecutorPage';
 import { TrainPage } from './pages/TrainPage';
@@ -85,13 +84,11 @@ function Layout() {
 
 export default function App() {
   return (
-    <ClusterConfigProvider>
-      <ToastProvider>
-        <BrowserRouter>
-          <Layout />
-        </BrowserRouter>
-      </ToastProvider>
-    </ClusterConfigProvider>
+    <ToastProvider>
+      <BrowserRouter>
+        <Layout />
+      </BrowserRouter>
+    </ToastProvider>
   );
 }
 

@@ -1,17 +1,34 @@
-"""Persistence + SSH orchestration for provider nodes.
+"""Provider nodes: password-only onboarding with platform-managed keys.
 
-Blocking paramiko work is pushed onto worker threads via ``asyncio.to_thread``
-so the async event loop is never stalled. Credentials are encrypted before they
-touch the database and decrypted only in-memory when a connection is opened.
+Flow (see docs/API_CONTRACT.md §1):
+
+1. ``connect``   — bare SSH handshake, read the host key only (no credential is
+   sent), return its fingerprint + a signed onboarding token binding it.
+2. ``provision`` — log in once with the password over the *pinned* host key,
+   require python3, generate an Ed25519 key on the master, append
+   ``restrict <pubkey> dp-platform:<provision_id>`` to the node's authorized
+   keys, disconnect, log in again with the key only, detect capabilities and
+   keep the encrypted private key in a ``pending_provisions`` row. The password
+   lives only in this request's memory: it is never stored or logged.
+   ``provision_manual`` + ``verify_provision`` are the fallback for nodes whose
+   sshd refuses passwords: the user pastes the install command themselves.
+3. ``register``  — turn the pending row into an :class:`SSHNode`
+   (``auth_type="managed_key"``, ``id == provision_id``).
+
+Blocking paramiko work runs in worker threads (``asyncio.to_thread``).
 """
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
+import re
+import socket
 import uuid
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
+import paramiko
 import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,21 +36,355 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from capabilities import detect_capabilities
 from config import get_settings
 from crypto import decrypt_secret, encrypt_secret
-from models import SSHNode
-from os_adapters import detect_adapter
-from schemas import NodeConnectRequest, NodeRegisterRequest
-from ssh_client import SSHExecutor
-from ssh_transport import SSHTransport
+from database import get_db_manager
+from key_install import install_authorized_key, manual_install_commands, remove_authorized_key
+from key_manager import (
+    HostKeyFetchError,
+    InvalidOnboardingToken,
+    ManagedKey,
+    OnboardingClaims,
+    authorized_key_line,
+    fetch_host_key,
+    generate_keypair,
+    issue_onboarding_token,
+    key_comment,
+    verify_onboarding_token,
+)
+from models import PendingProvision, SSHNode
+from schemas import (
+    NodeConnectRequest,
+    NodeManualProvisionRequest,
+    NodeProvisionRequest,
+    NodeRegisterRequest,
+    NodeResecureRequest,
+    NodeUpdateRequest,
+)
+from ssh_transport import HostKeyMismatch, SSHTransport, fingerprint
 from task_executor import detect_os, select_adapter
 
 logger = structlog.get_logger(__name__)
 
-# Capability fields carried from a detect result into persistence.
-_CAP_KEYS = (
-    "os_type", "gpu_vendor", "gpu_backend", "gpu_model", "gpu_count",
-    "gpu_memory_gb", "python_version", "java_version", "spark_version",
-    "ray_version", "execution_backend", "resource_enforcement",
-)
+MANAGED_KEY = "managed_key"
+LEGACY_AUTH_TYPES = ("password", "private_key")
+_CAPS_TIMEOUT = 20
+_KEY_OP_TIMEOUT = 30
+
+
+# --- errors (mapped to HTTP in routes_nodes) ---------------------------------
+class NodeServiceError(Exception):
+    status_code = 400
+
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
+
+
+class NodeNotFound(NodeServiceError):
+    status_code = 404
+
+
+class OnboardingAuthFailed(NodeServiceError):
+    status_code = 401
+
+    def __init__(self, detail: str = "Authentication failed"):
+        super().__init__(detail)
+
+
+class PasswordAuthDisabled(NodeServiceError):
+    status_code = 409
+
+
+class HostKeyChanged(NodeServiceError):
+    status_code = 409
+
+
+class KeyRejected(NodeServiceError):
+    status_code = 409
+
+
+class NodeStateConflict(NodeServiceError):
+    status_code = 409
+
+
+class HostNotAllowed(NodeServiceError):
+    status_code = 403
+
+
+class NodeUnreachable(NodeServiceError):
+    status_code = 502
+
+
+class PrerequisiteMissing(NodeServiceError):
+    status_code = 400
+
+
+class InvalidOnboarding(NodeServiceError):
+    status_code = 400
+
+
+def _connect(transport: SSHTransport, *, key_auth: bool = False) -> dict:
+    """Open ``transport``; translate paramiko failures into service errors.
+
+    Never includes a credential in the error text.
+    """
+    try:
+        return transport.connect()
+    except (HostKeyMismatch, paramiko.BadHostKeyException) as exc:
+        raise HostKeyChanged(
+            "host_key_mismatch: the node presented a different host key than the pinned one. "
+            "If the machine was reinstalled, remove it and add it again."
+        ) from exc
+    except paramiko.BadAuthenticationType as exc:
+        allowed = set(getattr(exc, "allowed_types", None) or [])
+        if not key_auth and not allowed & {"password", "keyboard-interactive"}:
+            raise PasswordAuthDisabled(
+                "password_auth_disabled: the node's SSH server does not accept passwords "
+                f"(allowed: {', '.join(sorted(allowed)) or 'none'}). Use the manual key install instead."
+            ) from exc
+        if key_auth:
+            raise KeyRejected("key_rejected: the node no longer accepts the platform key") from exc
+        raise OnboardingAuthFailed() from exc
+    except paramiko.AuthenticationException as exc:
+        if key_auth:
+            raise KeyRejected("key_rejected: the node no longer accepts the platform key") from exc
+        raise OnboardingAuthFailed() from exc
+    except (OSError, EOFError, paramiko.SSHException) as exc:
+        raise NodeUnreachable(
+            f"node_unreachable: could not open an SSH session to {transport.host}:{transport.port} ({exc})"
+        ) from exc
+
+
+# --- host guard (SSRF) ---------------------------------------------------------
+def _resolve_addresses(host: str) -> list[str]:
+    infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    seen: list[str] = []
+    for info in infos:
+        addr = str(info[4][0]).split("%", 1)[0]
+        if addr not in seen:
+            seen.append(addr)
+    return seen
+
+
+async def check_host_allowed(host: str) -> str:
+    """Apply allowed_hosts / allowed_cidrs / loopback+link-local blocking to
+    every address ``host`` resolves to. Returns the address to connect to (the
+    checked one, so a DNS change between check and connect cannot bypass it)."""
+    settings = get_settings()
+    host = (host or "").strip()
+    if not host:
+        raise InvalidOnboarding("Host is required")
+    if settings.allowed_hosts and host.lower() not in {h.lower() for h in settings.allowed_hosts}:
+        raise HostNotAllowed(f"Host {host} is not in the provider allowlist")
+    try:
+        addresses = await asyncio.to_thread(_resolve_addresses, host)
+    except (socket.gaierror, UnicodeError) as exc:
+        raise InvalidOnboarding(f"Could not resolve host {host}") from exc
+    if not addresses:
+        raise InvalidOnboarding(f"Could not resolve host {host}")
+    networks = [ipaddress.ip_network(c, strict=False) for c in settings.allowed_cidrs]
+    for raw in addresses:
+        ip = ipaddress.ip_address(raw)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        if settings.block_loopback_and_link_local and (
+            ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast
+        ):
+            raise HostNotAllowed(f"Host {host} resolves to a blocked address ({ip})")
+        if networks and not any(ip.version == n.version and ip in n for n in networks):
+            raise HostNotAllowed(f"Host {host} ({ip}) is outside the allowed networks")
+    return addresses[0]
+
+
+# --- capabilities ----------------------------------------------------------------
+def _caps_to_dict(caps: Any) -> dict:
+    """Normalise a NodeCapabilities (old or new shape) into a JSON-able dict."""
+    g = lambda name, default=None: getattr(caps, name, default)  # noqa: E731
+    runtimes = dict(g("runtimes") or {})
+    python_version = g("python_version")
+    if python_version and "python" not in runtimes:
+        runtimes["python"] = python_version
+    return {
+        "os_type": g("os_type"),
+        "os_version": g("os_version"),
+        "cpu_total": int(g("cpu_total", 0) or 0),
+        "memory_total_gb": float(g("memory_total_gb", 0.0) or 0.0),
+        "gpu_vendor": g("gpu_vendor"),
+        "gpu_backend": g("gpu_backend"),
+        "gpu_model": g("gpu_model"),
+        "gpu_count": int(g("gpu_count", 0) or 0),
+        "gpu_memory_gb": g("gpu_memory_gb"),
+        "python_version": python_version,
+        "runtimes": {str(k): str(v) for k, v in runtimes.items()},
+        "env_path": g("env_path"),
+        "execution_backend": g("execution_backend") or "ssh",
+        "resource_enforcement": g("resource_enforcement") or "best_effort",
+    }
+
+
+def capability_fields(caps: dict) -> dict:
+    """Map a capabilities dict onto the API's ``_CapabilityFields`` names."""
+    return {
+        "os_type": caps.get("os_type"),
+        "os_info": caps.get("os_version"),
+        "detected_cpu": int(caps.get("cpu_total") or 0),
+        "detected_memory_gb": float(caps.get("memory_total_gb") or 0.0),
+        "detected_gpu": int(caps.get("gpu_count") or 0),
+        "gpu_vendor": caps.get("gpu_vendor"),
+        "gpu_backend": caps.get("gpu_backend"),
+        "gpu_model": caps.get("gpu_model"),
+        "gpu_count": int(caps.get("gpu_count") or 0),
+        "gpu_memory_gb": caps.get("gpu_memory_gb"),
+        "python_version": caps.get("python_version"),
+        "runtimes": dict(caps.get("runtimes") or {}),
+        "execution_backend": caps.get("execution_backend") or "ssh",
+        "resource_enforcement": caps.get("resource_enforcement") or "best_effort",
+    }
+
+
+def _apply_caps(node: SSHNode, caps: dict) -> None:
+    node.os_type = caps.get("os_type")
+    node.os_info = caps.get("os_version")
+    node.detected_cpu = int(caps.get("cpu_total") or 0)
+    node.detected_memory_gb = float(caps.get("memory_total_gb") or 0.0)
+    node.detected_gpu = int(caps.get("gpu_count") or 0)
+    node.gpu_vendor = caps.get("gpu_vendor")
+    node.gpu_backend = caps.get("gpu_backend")
+    node.gpu_model = caps.get("gpu_model")
+    node.gpu_count = int(caps.get("gpu_count") or 0)
+    node.gpu_memory_gb = caps.get("gpu_memory_gb")
+    node.python_version = caps.get("python_version")
+    node.runtimes_json = json.dumps(caps.get("runtimes") or {})
+    node.env_path = caps.get("env_path")
+    node.execution_backend = caps.get("execution_backend") or "ssh"
+    node.resource_enforcement = caps.get("resource_enforcement") or "best_effort"
+    node.capabilities_json = json.dumps(caps)
+
+
+def _clamp_allocation(cpu: int, memory_gb: float, detected_cpu: int, detected_mem: float) -> tuple[int, float]:
+    if detected_cpu:
+        cpu = min(cpu, detected_cpu)
+    if detected_mem:
+        memory_gb = min(memory_gb, detected_mem)
+    return max(1, int(cpu)), max(0.0, float(memory_gb))
+
+
+def _require_python(transport: SSHTransport, adapter, timeout: int) -> str:
+    """Fail with a clear message unless a Python 3 interpreter is on PATH."""
+    py = adapter.python_command()
+    res = transport.exec(f"{py} --version", timeout=timeout)
+    text = f"{res.get('stdout') or ''}\n{res.get('stderr') or ''}"
+    m = re.search(r"Python\s+(\d+)\.(\d+)(?:\.(\d+))?", text)
+    if not m or int(m.group(1)) < 3:
+        raise PrerequisiteMissing(
+            f"python3 is required on the node but `{py}` was not found (or is not Python 3). "
+            "Install Python 3 on the worker and try again."
+        )
+    return ".".join(g for g in m.groups() if g)
+
+
+def _detect(transport: SSHTransport, adapter) -> dict:
+    return _caps_to_dict(detect_capabilities(transport, adapter, timeout=_CAPS_TIMEOUT))
+
+
+# --- transports ------------------------------------------------------------------
+def transport_for_node(node: SSHNode, *, host: Optional[str] = None) -> SSHTransport:
+    """Build an *unconnected* transport for a stored node.
+
+    Managed nodes authenticate with the platform key; legacy rows with their
+    stored password / private key. The host key is pinned when known.
+    """
+    settings = get_settings()
+    secret = decrypt_secret(node.secret_encrypted)
+    use_key = node.auth_type in (MANAGED_KEY, "private_key")
+    return SSHTransport(
+        host=host or node.host,
+        port=node.port,
+        username=node.username,
+        password=None if use_key else secret,
+        private_key=secret if use_key else None,
+        host_key_type=node.host_key_type,
+        host_key_b64=node.host_key_b64,
+        connect_timeout=settings.connect_timeout,
+    )
+
+
+def _key_transport(host: str, port: int, username: str, private_key: str,
+                   host_key_type: Optional[str], host_key_b64: Optional[str]) -> SSHTransport:
+    return SSHTransport(
+        host=host, port=port, username=username, password=None, private_key=private_key,
+        host_key_type=host_key_type, host_key_b64=host_key_b64,
+        connect_timeout=get_settings().connect_timeout,
+    )
+
+
+def _best_effort_remove(transport: SSHTransport, os_type: str, comment: str,
+                        key_blob: Optional[str], *, key_auth: bool) -> bool:
+    try:
+        if not transport.is_connected:
+            _connect(transport, key_auth=key_auth)
+        remove_authorized_key(transport, os_type, comment, key_blob, timeout=_KEY_OP_TIMEOUT)
+        return True
+    except Exception as exc:
+        logger.warning("ssh_key_rollback_failed", host=transport.host, comment=comment, error=str(exc))
+        return False
+    finally:
+        transport.close()
+
+
+def _install_and_verify(
+    cred_transport: SSHTransport, *, comment: str, key_blob_to_replace: Optional[str] = None,
+    require_python: bool = True, cred_is_key: bool = False,
+) -> tuple[ManagedKey, dict, dict]:
+    """Shared core of provision / resecure (blocking).
+
+    Logs in with ``cred_transport`` (password or legacy credential), installs a
+    freshly generated managed key, disconnects, logs in with the new key only,
+    and detects capabilities over that key session. On any failure after the
+    install, the new line is removed again with the original credential.
+
+    Returns ``(key, capabilities, host_key_info)``.
+    """
+    settings = get_settings()
+    timeout = settings.connect_timeout
+    host_key = _connect(cred_transport, key_auth=cred_is_key)
+    try:
+        os_type = detect_os(cred_transport, timeout=timeout)
+        adapter = select_adapter(os_type)
+        if require_python:
+            _require_python(cred_transport, adapter, timeout)
+        key = generate_keypair()
+        line = authorized_key_line(key.public_key, comment)
+        try:
+            install_authorized_key(cred_transport, os_type, line, comment, timeout=_KEY_OP_TIMEOUT)
+        except Exception as exc:
+            raise NodeServiceError(f"Could not install the platform key on the node: {exc}") from exc
+    finally:
+        cred_transport.close()
+
+    key_t = _key_transport(cred_transport.host, cred_transport.port, cred_transport.username,
+                           key.private_key_pem, host_key["host_key_type"], host_key["host_key_b64"])
+    try:
+        try:
+            _connect(key_t, key_auth=True)
+        except KeyRejected as exc:
+            raise NodeServiceError(
+                "The key was installed but the node did not accept it. The SSH server may use a "
+                "non-default AuthorizedKeysFile or have public-key login disabled."
+            ) from exc
+        caps = _detect(key_t, adapter)
+        if require_python and not caps.get("python_version"):
+            raise PrerequisiteMissing("python3 was not found on the node over the key login")
+        if key_blob_to_replace:
+            remove_authorized_key(key_t, os_type, comment, key_blob_to_replace, timeout=_KEY_OP_TIMEOUT)
+    except Exception:
+        _best_effort_remove(cred_transport, os_type, comment, key.key_blob, key_auth=cred_is_key)
+        raise
+    finally:
+        key_t.close()
+    caps.setdefault("os_type", os_type)
+    if not caps.get("os_type"):
+        caps["os_type"] = os_type
+    return key, caps, host_key
 
 
 class NodeService:
@@ -41,144 +392,217 @@ class NodeService:
         self._db = db_session
         self._settings = get_settings()
 
-    def _check_host_allowed(self, host: str) -> None:
-        allowed = self._settings.allowed_hosts
-        if allowed and host not in allowed:
-            raise ValueError(f"Host {host} is not in the provider allowlist")
-
-    def _transport_from_request(self, request: NodeConnectRequest) -> SSHTransport:
-        return SSHTransport(
-            host=request.host,
-            port=request.port,
-            username=request.username,
-            password=request.password if request.auth_type == "password" else None,
-            private_key=request.private_key if request.auth_type == "private_key" else None,
-            connect_timeout=self._settings.connect_timeout,
-        )
-
-    def _transport_for(self, node: SSHNode) -> SSHTransport:
-        secret = decrypt_secret(node.secret_encrypted)
-        return SSHTransport(
-            host=node.host,
-            port=node.port,
-            username=node.username,
-            password=secret if node.auth_type == "password" else None,
-            private_key=secret if node.auth_type == "private_key" else None,
-            host_key_type=node.host_key_type,
-            host_key_b64=node.host_key_b64,
-            connect_timeout=self._settings.connect_timeout,
-        )
-
-    def _detect_sync(self, request: NodeConnectRequest) -> dict:
-        """Blocking: SSH in, detect OS + full capabilities, capture host key."""
-        transport = self._transport_from_request(request)
+    # -- helpers ---------------------------------------------------------------------
+    def _claims(self, token: str, owner_id: str) -> OnboardingClaims:
         try:
-            transport.connect()
-            os_type = detect_os(transport, timeout=self._settings.connect_timeout)
-            caps = detect_capabilities(transport, select_adapter(os_type))
-            result = {
-                "status": "success",
-                # legacy field names kept so the existing UI keeps working
-                "detected_cpu": caps.cpu_total,
-                "detected_memory_gb": caps.memory_total_gb,
-                "detected_gpu": caps.gpu_count,
-                "os_info": caps.os_version,
-            }
-            result.update({k: getattr(caps, k) for k in _CAP_KEYS})
-            result.update(transport.capture_host_key())
-            return result
-        except Exception as exc:
-            logger.error("ssh_detect_failed", host=request.host, error=str(exc))
-            return {"status": "error", "message": str(exc)}
-        finally:
-            transport.close()
+            return verify_onboarding_token(token, owner_id)
+        except InvalidOnboardingToken as exc:
+            raise InvalidOnboarding(str(exc)) from exc
 
-    # -- connect + detect (no persistence) --------------------------------
-    async def connect_and_detect(self, request: NodeConnectRequest) -> dict:
-        self._check_host_allowed(request.host)
-        return await asyncio.to_thread(self._detect_sync, request)
-
-    # -- register ---------------------------------------------------------
-    async def register_node(self, request: NodeRegisterRequest, owner_id: str) -> SSHNode:
-        self._check_host_allowed(request.host)
-        secret = request.password if request.auth_type == "password" else request.private_key
-        if not secret:
-            raise ValueError("A password or private_key is required to register a node")
-
-        hk_type = request.host_key_type
-        hk_b64 = request.host_key_b64
-        detected_cpu = request.detected_cpu
-        detected_memory_gb = request.detected_memory_gb
-        detected_gpu = request.detected_gpu
-        os_info = request.os_info
-        caps = {k: getattr(request, k) for k in _CAP_KEYS}
-
-        # If the caller didn't carry the detected capabilities (e.g. a scripted
-        # register), discover them now so every stored node has a full record.
-        if request.os_type is None:
-            connect_req = NodeConnectRequest(
-                host=request.host, port=request.port, username=request.username,
-                auth_type=request.auth_type, password=request.password,
-                private_key=request.private_key,
+    async def _get_pending(self, provision_id: uuid.UUID, owner_id: str) -> PendingProvision:
+        res = await self._db.execute(
+            select(PendingProvision).where(
+                PendingProvision.id == provision_id, PendingProvision.owner_id == owner_id
             )
-            detected = await asyncio.to_thread(self._detect_sync, connect_req)
-            if detected.get("status") == "success":
-                detected_cpu = detected.get("detected_cpu", detected_cpu)
-                detected_memory_gb = detected.get("detected_memory_gb", detected_memory_gb)
-                detected_gpu = detected.get("detected_gpu", detected_gpu)
-                os_info = detected.get("os_info", os_info)
-                caps = {k: detected.get(k, caps.get(k)) for k in _CAP_KEYS}
-                hk_type = hk_type or detected.get("host_key_type")
-                hk_b64 = hk_b64 or detected.get("host_key_b64")
+        )
+        pending = res.scalar_one_or_none()
+        if pending is None:
+            raise NodeNotFound("Provision not found")
+        expires_at = pending.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            raise InvalidOnboarding("Provision expired; connect to the node again")
+        return pending
 
-        # Never persist an allocation larger than what the node actually has.
-        allocated_cpu = request.allocated_cpu
-        if detected_cpu:
-            allocated_cpu = min(allocated_cpu, detected_cpu)
-        allocated_memory_gb = request.allocated_memory_gb
-        if detected_memory_gb:
-            allocated_memory_gb = min(allocated_memory_gb, detected_memory_gb)
+    def _new_expiry(self) -> datetime:
+        return datetime.now(timezone.utc) + timedelta(seconds=self._settings.pending_provision_ttl_seconds)
 
+    @staticmethod
+    def _provision_response(pending: PendingProvision, caps: dict) -> dict:
+        return {
+            "provision_id": pending.id,
+            "host": pending.host,
+            "port": pending.port,
+            "username": pending.username,
+            "fingerprint": fingerprint(pending.host_key_type, pending.host_key_b64),
+            "expires_at": pending.expires_at,
+            **capability_fields(caps),
+        }
+
+    # -- 1. connect: host key only, no credential -----------------------------------
+    async def connect(self, request: NodeConnectRequest, owner_id: str) -> dict:
+        address = await check_host_allowed(request.host)
+        try:
+            info = await asyncio.to_thread(
+                fetch_host_key, address, request.port, self._settings.connect_timeout
+            )
+        except HostKeyFetchError as exc:
+            raise NodeUnreachable(f"node_unreachable: {exc}") from exc
+        token = issue_onboarding_token(
+            owner_id=owner_id, host=request.host.strip(), port=request.port,
+            username=request.username, host_key_type=info["host_key_type"],
+            host_key_b64=info["host_key_b64"],
+        )
+        count = await self._db.scalar(
+            select(func.count()).select_from(SSHNode).where(
+                SSHNode.owner_id == owner_id, SSHNode.host_key_b64 == info["host_key_b64"]
+            )
+        )
+        logger.info("ssh_node_connect", host=request.host, port=request.port, fingerprint=info["fingerprint"])
+        return {
+            "host": request.host.strip(),
+            "port": request.port,
+            "username": request.username,
+            "host_key_type": info["host_key_type"],
+            "fingerprint": info["fingerprint"],
+            "onboarding_token": token,
+            "already_registered": bool(count),
+        }
+
+    # -- 2. provision: one password login -> managed key ------------------------------
+    async def provision(self, request: NodeProvisionRequest, owner_id: str) -> dict:
+        claims = self._claims(request.onboarding_token, owner_id)
+        address = await check_host_allowed(claims.host)
+        provision_id = uuid.uuid4()
+        comment = key_comment(provision_id)
+        cred = SSHTransport(
+            host=address, port=claims.port, username=claims.username,
+            password=request.password,
+            host_key_type=claims.host_key_type, host_key_b64=claims.host_key_b64,
+            connect_timeout=self._settings.connect_timeout,
+        )
+        key, caps, _ = await asyncio.to_thread(_install_and_verify, cred, comment=comment)
+        del cred  # drop the only object holding the password
+
+        pending = PendingProvision(
+            id=provision_id, owner_id=owner_id, host=claims.host, port=claims.port,
+            username=claims.username, host_key_type=claims.host_key_type,
+            host_key_b64=claims.host_key_b64,
+            private_key_encrypted=encrypt_secret(key.private_key_pem),
+            public_key=key.public_key, key_comment=comment, status="installed",
+            capabilities_json=json.dumps(caps), expires_at=self._new_expiry(),
+        )
+        try:
+            self._db.add(pending)
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            await asyncio.to_thread(
+                _best_effort_remove,
+                _key_transport(address, claims.port, claims.username, key.private_key_pem,
+                               claims.host_key_type, claims.host_key_b64),
+                caps.get("os_type") or "linux", comment, None, key_auth=True,
+            )
+            raise
+        logger.info("ssh_node_provisioned", provision_id=str(provision_id), host=claims.host,
+                    os=caps.get("os_type"), key_fingerprint=key.fingerprint)
+        return self._provision_response(pending, caps)
+
+    # -- 2b/2c. manual fallback -------------------------------------------------------
+    async def provision_manual(self, request: NodeManualProvisionRequest, owner_id: str) -> dict:
+        claims = self._claims(request.onboarding_token, owner_id)
+        await check_host_allowed(claims.host)
+        provision_id = uuid.uuid4()
+        comment = key_comment(provision_id)
+        key = generate_keypair()
+        line = authorized_key_line(key.public_key, comment)
+        posix_cmd, windows_cmd = manual_install_commands(line, comment)
+        pending = PendingProvision(
+            id=provision_id, owner_id=owner_id, host=claims.host, port=claims.port,
+            username=claims.username, host_key_type=claims.host_key_type,
+            host_key_b64=claims.host_key_b64,
+            private_key_encrypted=encrypt_secret(key.private_key_pem),
+            public_key=key.public_key, key_comment=comment,
+            status="awaiting_manual_install", capabilities_json=None,
+            expires_at=self._new_expiry(),
+        )
+        self._db.add(pending)
+        await self._db.commit()
+        logger.info("ssh_node_manual_provision", provision_id=str(provision_id), host=claims.host)
+        return {
+            "provision_id": provision_id,
+            "public_key": line,
+            "install_command_posix": posix_cmd,
+            "install_command_windows": windows_cmd,
+            "expires_at": pending.expires_at,
+        }
+
+    async def verify_provision(self, provision_id: uuid.UUID, owner_id: str) -> dict:
+        pending = await self._get_pending(provision_id, owner_id)
+        address = await check_host_allowed(pending.host)
+        pem = decrypt_secret(pending.private_key_encrypted)
+
+        def _verify() -> dict:
+            t = _key_transport(address, pending.port, pending.username, pem,
+                               pending.host_key_type, pending.host_key_b64)
+            try:
+                try:
+                    _connect(t, key_auth=True)
+                except KeyRejected as exc:
+                    raise NodeServiceError(
+                        "The node does not accept the key yet. Run the install command on the "
+                        "worker as the same user, then verify again."
+                    ) from exc
+                timeout = self._settings.connect_timeout
+                os_type = detect_os(t, timeout=timeout)
+                adapter = select_adapter(os_type)
+                _require_python(t, adapter, timeout)
+                caps = _detect(t, adapter)
+                if not caps.get("os_type"):
+                    caps["os_type"] = os_type
+                return caps
+            finally:
+                t.close()
+
+        caps = await asyncio.to_thread(_verify)
+        pending.status = "installed"
+        pending.capabilities_json = json.dumps(caps)
+        pending.expires_at = self._new_expiry()
+        await self._db.commit()
+        logger.info("ssh_node_manual_verified", provision_id=str(provision_id), host=pending.host)
+        return self._provision_response(pending, caps)
+
+    # -- 3. register --------------------------------------------------------------
+    async def register(self, request: NodeRegisterRequest, owner_id: str) -> SSHNode:
+        pending = await self._get_pending(request.provision_id, owner_id)
+        if pending.status != "installed" or not pending.capabilities_json:
+            raise InvalidOnboarding("The key has not been verified on the node yet")
+        if await self._db.get(SSHNode, pending.id) is not None:
+            raise NodeStateConflict("This provision was already registered")
+        caps = json.loads(pending.capabilities_json)
+        now = datetime.now(timezone.utc)
         node = SSHNode(
+            id=pending.id,
             owner_id=owner_id,
-            name=request.name,
-            host=request.host,
-            port=request.port,
-            username=request.username,
-            auth_type=request.auth_type,
-            secret_encrypted=encrypt_secret(secret),
-            host_key_type=hk_type,
-            host_key_b64=hk_b64,
-            detected_cpu=detected_cpu,
-            detected_memory_gb=detected_memory_gb,
-            detected_gpu=detected_gpu,
-            os_info=os_info,
-            os_type=caps.get("os_type"),
-            gpu_vendor=caps.get("gpu_vendor"),
-            gpu_backend=caps.get("gpu_backend"),
-            gpu_model=caps.get("gpu_model"),
-            gpu_count=int(caps.get("gpu_count") or 0),
-            gpu_memory_gb=caps.get("gpu_memory_gb"),
-            python_version=caps.get("python_version"),
-            java_version=caps.get("java_version"),
-            spark_version=caps.get("spark_version"),
-            ray_version=caps.get("ray_version"),
-            execution_backend=caps.get("execution_backend") or "ssh",
-            resource_enforcement=caps.get("resource_enforcement") or "best_effort",
-            capabilities_json=json.dumps(caps),
-            allocated_cpu=max(1, allocated_cpu),
-            allocated_memory_gb=max(0.0, allocated_memory_gb),
+            name=(request.name or "").strip() or pending.host,
+            host=pending.host,
+            port=pending.port,
+            username=pending.username,
+            auth_type=MANAGED_KEY,
+            secret_encrypted=pending.private_key_encrypted,
+            host_key_type=pending.host_key_type,
+            host_key_b64=pending.host_key_b64,
+            public_key=pending.public_key,
+            key_comment=pending.key_comment,
+            key_created_at=pending.created_at or now,
             health_status="online",
-            last_health_check=datetime.now(timezone.utc),
+            last_health_check=now,
             status="online",
         )
+        _apply_caps(node, caps)
+        node.allocated_cpu, node.allocated_memory_gb = _clamp_allocation(
+            request.allocated_cpu, request.allocated_memory_gb,
+            node.detected_cpu, node.detected_memory_gb,
+        )
         self._db.add(node)
+        await self._db.delete(pending)
         await self._db.commit()
         await self._db.refresh(node)
         logger.info("ssh_node_registered", node_id=str(node.id), host=node.host, os=node.os_type)
         return node
 
-    # -- queries (owner-scoped) -------------------------------------------
+    # -- queries (owner-scoped) --------------------------------------------------------
     async def list_nodes(self, owner_id: str, skip: int = 0, limit: int = 100):
         total = await self._db.scalar(
             select(func.count()).select_from(SSHNode).where(SSHNode.owner_id == owner_id)
@@ -198,61 +622,69 @@ class NodeService:
         )
         return result.scalar_one_or_none()
 
-    async def delete_node(self, node_id: uuid.UUID, owner_id: str) -> bool:
+    async def _require_node(self, node_id: uuid.UUID, owner_id: str) -> SSHNode:
         node = await self.get_node(node_id, owner_id)
-        if not node:
-            return False
+        if node is None:
+            raise NodeNotFound("Node not found")
+        return node
+
+    async def update_node(self, node_id: uuid.UUID, owner_id: str, request: NodeUpdateRequest) -> SSHNode:
+        node = await self._require_node(node_id, owner_id)
+        if request.name is not None and request.name.strip():
+            node.name = request.name.strip()
+        cpu = request.allocated_cpu if request.allocated_cpu is not None else node.allocated_cpu
+        mem = request.allocated_memory_gb if request.allocated_memory_gb is not None else node.allocated_memory_gb
+        node.allocated_cpu, node.allocated_memory_gb = _clamp_allocation(
+            cpu, mem, node.detected_cpu, node.detected_memory_gb
+        )
+        await self._db.commit()
+        await self._db.refresh(node)
+        return node
+
+    # -- delete: remove our key line first -------------------------------------------
+    async def delete_node(self, node_id: uuid.UUID, owner_id: str) -> dict:
+        node = await self._require_node(node_id, owner_id)
+        key_removed = True
+        message = "Node removed."
+        if node.key_comment:
+            def _remove() -> int:
+                t = transport_for_node(node)
+                try:
+                    _connect(t, key_auth=node.auth_type != "password")
+                    os_type = node.os_type or detect_os(t, timeout=self._settings.connect_timeout)
+                    return remove_authorized_key(t, os_type, node.key_comment, timeout=_KEY_OP_TIMEOUT)
+                finally:
+                    t.close()
+
+            try:
+                removed = await asyncio.to_thread(_remove)
+                message = f"Node removed; {removed} platform key line(s) deleted from the worker."
+            except Exception as exc:
+                key_removed = False
+                message = (
+                    "Node removed, but the worker could not be reached to delete the platform key. "
+                    f"Remove the line ending in '{node.key_comment}' from its authorized_keys."
+                )
+                logger.warning("ssh_node_key_removal_failed", node_id=str(node_id), error=str(exc))
         await self._db.delete(node)
         await self._db.commit()
-        logger.info("ssh_node_deleted", node_id=str(node_id))
-        return True
+        logger.info("ssh_node_deleted", node_id=str(node_id), key_removed=key_removed)
+        return {"deleted": True, "key_removed": key_removed, "message": message}
 
-    # -- runtime + health (master-driven, no agent) ----------------------
-    def _runtime_sync(self, node: SSHNode) -> dict:
-        transport = self._transport_for(node)
-        try:
-            transport.connect()
-            os_type = node.os_type or detect_os(transport, timeout=self._settings.connect_timeout)
-            caps = detect_capabilities(transport, select_adapter(os_type))
-            ready = lambda v: "ready" if v else "missing"
-            return {
-                "os_type": os_type,
-                "python": ready(caps.python_version),
-                "java": ready(caps.java_version),
-                "spark": ready(caps.spark_version),
-                "ray": ready(caps.ray_version),
-                "versions": {
-                    "python": caps.python_version,
-                    "java": caps.java_version,
-                    "spark": caps.spark_version,
-                    "ray": caps.ray_version,
-                },
-            }
-        except Exception as exc:
-            return {"status": "error", "message": str(exc)}
-        finally:
-            transport.close()
+    # -- health / refresh ----------------------------------------------------------------
+    async def health_check(self, node_id: uuid.UUID, owner_id: str) -> SSHNode:
+        node = await self._require_node(node_id, owner_id)
 
-    async def detect_runtime(self, node_id: uuid.UUID, owner_id: str) -> Optional[dict]:
-        node = await self.get_node(node_id, owner_id)
-        if not node:
-            return None
-        return await asyncio.to_thread(self._runtime_sync, node)
+        def _probe() -> bool:
+            t = transport_for_node(node)
+            try:
+                return t.test_connection().get("status") == "success"
+            except Exception:
+                return False
+            finally:
+                t.close()
 
-    def _health_sync(self, node: SSHNode) -> bool:
-        transport = self._transport_for(node)
-        try:
-            return transport.test_connection().get("status") == "success"
-        except Exception:
-            return False
-        finally:
-            transport.close()
-
-    async def health_check(self, node_id: uuid.UUID, owner_id: str) -> Optional[SSHNode]:
-        node = await self.get_node(node_id, owner_id)
-        if not node:
-            return None
-        ok = await asyncio.to_thread(self._health_sync, node)
+        ok = await asyncio.to_thread(_probe)
         node.health_status = "online" if ok else "unreachable"
         node.last_health_check = datetime.now(timezone.utc)
         await self._db.commit()
@@ -260,19 +692,187 @@ class NodeService:
         logger.info("ssh_node_health", node_id=str(node_id), health=node.health_status)
         return node
 
+    async def refresh(self, node_id: uuid.UUID, owner_id: str) -> SSHNode:
+        node = await self._require_node(node_id, owner_id)
 
-def build_executor(node: SSHNode) -> SSHExecutor:
-    """Construct an :class:`SSHExecutor` for a stored node (decrypts in-memory)."""
-    settings = get_settings()
-    secret = decrypt_secret(node.secret_encrypted)
-    return SSHExecutor(
-        host=node.host,
-        port=node.port,
-        username=node.username,
-        password=secret if node.auth_type == "password" else None,
-        private_key=secret if node.auth_type == "private_key" else None,
-        host_key_type=node.host_key_type,
-        host_key_b64=node.host_key_b64,
-        connect_timeout=settings.connect_timeout,
-        os_type=detect_adapter(node.os_info).os_type,
-    )
+        def _redetect() -> dict:
+            t = transport_for_node(node)
+            try:
+                _connect(t, key_auth=node.auth_type != "password")
+                os_type = detect_os(t, timeout=self._settings.connect_timeout)
+                caps = _detect(t, select_adapter(os_type))
+                if not caps.get("os_type"):
+                    caps["os_type"] = os_type
+                return caps
+            finally:
+                t.close()
+
+        try:
+            caps = await asyncio.to_thread(_redetect)
+        except NodeUnreachable:
+            node.health_status = "unreachable"
+            node.last_health_check = datetime.now(timezone.utc)
+            await self._db.commit()
+            raise
+        _apply_caps(node, caps)
+        node.allocated_cpu, node.allocated_memory_gb = _clamp_allocation(
+            node.allocated_cpu, node.allocated_memory_gb, node.detected_cpu, node.detected_memory_gb
+        )
+        node.health_status = "online"
+        node.last_health_check = datetime.now(timezone.utc)
+        await self._db.commit()
+        await self._db.refresh(node)
+        logger.info("ssh_node_refreshed", node_id=str(node_id), runtimes=sorted(caps.get("runtimes") or {}))
+        return node
+
+    # -- rotate-key: install new, verify, then remove old ----------------------------
+    async def rotate_key(self, node_id: uuid.UUID, owner_id: str) -> SSHNode:
+        node = await self._require_node(node_id, owner_id)
+        if node.auth_type != MANAGED_KEY:
+            raise NodeStateConflict("This node uses a legacy credential; re-secure it first")
+        comment = node.key_comment or key_comment(node.id)
+        old_blob = node.public_key.split()[1] if node.public_key and len(node.public_key.split()) > 1 else None
+        os_hint = node.os_type
+
+        def _install_new() -> tuple[ManagedKey, str]:
+            old_t = transport_for_node(node)
+            _connect(old_t, key_auth=True)
+            try:
+                os_type = os_hint or detect_os(old_t, timeout=self._settings.connect_timeout)
+                new = generate_keypair()
+                install_authorized_key(old_t, os_type, authorized_key_line(new.public_key, comment),
+                                       comment, timeout=_KEY_OP_TIMEOUT)
+                new_t = _key_transport(node.host, node.port, node.username, new.private_key_pem,
+                                       node.host_key_type, node.host_key_b64)
+                try:
+                    _connect(new_t, key_auth=True)
+                    if new_t.exec("echo dp-ok", timeout=self._settings.connect_timeout).get("exit_code") != 0:
+                        raise NodeServiceError("The new key logged in but could not run a command")
+                except Exception:
+                    try:
+                        remove_authorized_key(old_t, os_type, comment, new.key_blob, timeout=_KEY_OP_TIMEOUT)
+                    except Exception as exc:
+                        logger.warning("ssh_key_rollback_failed", node_id=str(node_id), error=str(exc))
+                    raise
+                finally:
+                    new_t.close()
+                return new, os_type
+            finally:
+                old_t.close()
+
+        new, os_type = await asyncio.to_thread(_install_new)
+        old_transport = transport_for_node(node)  # built before the secret is replaced
+        try:
+            node.secret_encrypted = encrypt_secret(new.private_key_pem)
+            node.public_key = new.public_key
+            node.key_comment = comment
+            node.key_created_at = datetime.now(timezone.utc)
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            await asyncio.to_thread(_best_effort_remove, old_transport, os_type, comment, new.key_blob, key_auth=True)
+            raise
+        if old_blob:
+            new_t = _key_transport(node.host, node.port, node.username, new.private_key_pem,
+                                   node.host_key_type, node.host_key_b64)
+            if not await asyncio.to_thread(_best_effort_remove, new_t, os_type, comment, old_blob, key_auth=True):
+                logger.warning("ssh_old_key_line_left", node_id=str(node_id))
+        await self._db.refresh(node)
+        logger.info("ssh_node_key_rotated", node_id=str(node_id), key_fingerprint=new.fingerprint)
+        return node
+
+    # -- resecure: legacy password/private_key node -> managed key --------------------
+    async def resecure(self, node_id: uuid.UUID, owner_id: str, request: NodeResecureRequest) -> SSHNode:
+        node = await self._require_node(node_id, owner_id)
+        if node.auth_type not in LEGACY_AUTH_TYPES:
+            raise NodeStateConflict("This node already uses a platform-managed key")
+        address = await check_host_allowed(node.host)
+        if request.password:
+            password, private_key = request.password, None
+        else:
+            stored = decrypt_secret(node.secret_encrypted)
+            password = stored if node.auth_type == "password" else None
+            private_key = stored if node.auth_type == "private_key" else None
+        cred = SSHTransport(
+            host=address, port=node.port, username=node.username,
+            password=password, private_key=private_key,
+            host_key_type=node.host_key_type, host_key_b64=node.host_key_b64,
+            connect_timeout=self._settings.connect_timeout,
+        )
+        comment = key_comment(node.id)
+        key, caps, host_key = await asyncio.to_thread(
+            _install_and_verify, cred, comment=comment, require_python=False,
+            cred_is_key=private_key is not None,
+        )
+        try:
+            node.auth_type = MANAGED_KEY
+            # Overwrites (wipes) the legacy password / private key ciphertext.
+            node.secret_encrypted = encrypt_secret(key.private_key_pem)
+            node.public_key = key.public_key
+            node.key_comment = comment
+            node.key_created_at = datetime.now(timezone.utc)
+            if not node.host_key_b64:
+                node.host_key_type = host_key["host_key_type"]
+                node.host_key_b64 = host_key["host_key_b64"]
+            _apply_caps(node, caps)
+            node.allocated_cpu, node.allocated_memory_gb = _clamp_allocation(
+                node.allocated_cpu, node.allocated_memory_gb, node.detected_cpu, node.detected_memory_gb
+            )
+            node.health_status = "online"
+            node.last_health_check = datetime.now(timezone.utc)
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            await asyncio.to_thread(
+                _best_effort_remove,
+                _key_transport(address, node.port, node.username, key.private_key_pem,
+                               host_key["host_key_type"], host_key["host_key_b64"]),
+                caps.get("os_type") or "linux", comment, None, key_auth=True,
+            )
+            raise
+        del cred, password, private_key
+        await self._db.refresh(node)
+        logger.info("ssh_node_resecured", node_id=str(node_id), key_fingerprint=key.fingerprint)
+        return node
+
+
+# --- recovery sweep ------------------------------------------------------------------
+def _remove_pending_key(pending: PendingProvision) -> int:
+    caps = json.loads(pending.capabilities_json) if pending.capabilities_json else {}
+    t = _key_transport(pending.host, pending.port, pending.username,
+                       decrypt_secret(pending.private_key_encrypted),
+                       pending.host_key_type, pending.host_key_b64)
+    try:
+        _connect(t, key_auth=True)
+        os_type = caps.get("os_type") or detect_os(t, timeout=get_settings().connect_timeout)
+        return remove_authorized_key(t, os_type, pending.key_comment, timeout=_KEY_OP_TIMEOUT)
+    finally:
+        t.close()
+
+
+async def cleanup_expired_provisions() -> int:
+    """Delete expired ``pending_provisions`` rows, first removing their key
+    line from the node when it is reachable. Returns the number of rows deleted.
+
+    An unreachable node keeps the line, but the private key is gone with the
+    row, so the leftover public key grants nobody access.
+    """
+    now = datetime.now(timezone.utc)
+    async with get_db_manager().session() as session:
+        rows = list(
+            (await session.execute(
+                select(PendingProvision).where(PendingProvision.expires_at < now)
+            )).scalars().all()
+        )
+        for pending in rows:
+            try:
+                removed = await asyncio.to_thread(_remove_pending_key, pending)
+                logger.info("ssh_pending_key_removed", provision_id=str(pending.id), removed=removed)
+            except KeyRejected:
+                pass  # never installed (manual flow not completed) -> nothing to remove
+            except Exception as exc:
+                logger.warning("ssh_pending_key_cleanup_failed", provision_id=str(pending.id), error=str(exc))
+            await session.delete(pending)
+    if rows:
+        logger.info("ssh_pending_provisions_expired", count=len(rows))
+    return len(rows)

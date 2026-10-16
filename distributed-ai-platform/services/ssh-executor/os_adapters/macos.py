@@ -1,10 +1,13 @@
 """macOS compute-node adapter.
 
-macOS offers no first-class per-process memory cap comparable to Linux cgroups or
-Windows Job Objects, so enforcement is honestly ``best_effort``: the task is run
-at low priority (``nice``) under a ``timeout`` wall-clock bound, and the caller is
-expected to monitor RAM and terminate on breach. We do NOT claim a hard memory
-limit here.
+macOS has no per-process memory cap comparable to Linux cgroups or Windows Job
+Objects, so enforcement is honestly ``best_effort``: the task runs at low
+priority with a wall-clock bound. We do **not** claim a hard memory limit.
+
+macOS also lacks GNU ``timeout``/``setsid``, which is exactly why execution goes
+through the Python sandbox runner (see ``base.SANDBOX_RUNNER_SOURCE``): the
+runner puts the task in its own session and enforces the timeout without any
+GNU tooling.
 """
 from __future__ import annotations
 
@@ -12,12 +15,16 @@ import shlex
 
 from resource_spec import ResourceSpec
 
-from .base import NodeProbe, OSAdapter
+from .base import NodeProbe, OSAdapter, PosixSandboxMixin
 
 _DEFAULT_NICE = 19
 
+#: Homebrew and MacPorts locations, appended when the node's login-shell PATH
+#: is unknown. Harmless when the directories do not exist.
+_MACOS_EXTRA_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin"
 
-class MacOSAdapter(OSAdapter):
+
+class MacOSAdapter(PosixSandboxMixin, OSAdapter):
     os_type = "macos"
     resource_enforcement = "best_effort"
 
@@ -25,7 +32,9 @@ class MacOSAdapter(OSAdapter):
         return "python3"
 
     def temp_directory(self) -> str:
-        return "/tmp/dp-platform"
+        # A per-user temp root: /tmp is fine to create in and is what the
+        # sandbox sweep looks under. (macOS resolves /tmp to /private/tmp.)
+        return "/tmp"
 
     def probe_commands(self) -> dict[str, str]:
         return {
@@ -49,37 +58,29 @@ class MacOSAdapter(OSAdapter):
         )
 
     def build_execute_command(
-        self, remote_path: str, spec: ResourceSpec, *, nice: int = _DEFAULT_NICE, strict: bool = False
+        self,
+        remote_path: str,
+        spec: ResourceSpec,
+        *,
+        nice: int = _DEFAULT_NICE,
+        strict: bool = False,
     ) -> str:
-        # macOS has no hard memory cgroup. Honest enforcement:
-        #  * best-effort (default): nice + wall-clock timeout only.
-        #  * strict (opt-in): add a lightweight RSS watchdog that samples the
-        #    process memory every second and kills it on breach (exit 137),
-        #    with the same wall-clock bound (exit 124). Still best-effort — the
-        #    task can briefly spike above the cap between samples.
+        """Legacy path: priority nudge only (no portable ``timeout`` on macOS).
+
+        Prefer :meth:`build_sandbox_command`, which enforces the wall-clock
+        bound through the runner. This exists for callers that manage their own
+        files and want the historical behaviour.
+        """
         quoted = shlex.quote(remote_path)
-        py = self.python_command()
-        t = spec.timeout_seconds
-
-        if strict and spec.memory_mb > 0:
-            mem_kb = spec.memory_mb * 1024
-            return (
-                f"nice -n {nice} {py} {quoted} & p=$!; "
-                f"lim={mem_kb}; end=$(( $(date +%s) + {t} )); "
-                "while kill -0 $p 2>/dev/null; do "
-                "rss=$(ps -o rss= -p $p 2>/dev/null | tr -d ' '); "
-                'if [ -n "$rss" ] && [ "$rss" -gt "$lim" ]; then '
-                f'kill -9 $p 2>/dev/null; wait $p 2>/dev/null; echo "[killed: memory exceeded {spec.memory_mb}MB]" >&2; exit 137; fi; '
-                'if [ "$(date +%s)" -ge "$end" ]; then '
-                'kill -9 $p 2>/dev/null; wait $p 2>/dev/null; echo "[task timed out]" >&2; exit 124; fi; '
-                "sleep 1; done; wait $p; exit $?"
-            )
-
-        run = f"nice -n {nice} {py} {quoted}"
+        run = f"nice -n {nice} {self.python_command()} {quoted}"
         return (
-            f"if command -v timeout >/dev/null 2>&1; then "
-            f"nice -n {nice} timeout {t}s {py} {quoted}; "
-            f"elif command -v gtimeout >/dev/null 2>&1; then "
-            f"nice -n {nice} gtimeout {t}s {py} {quoted}; "
+            "if command -v timeout >/dev/null 2>&1; then "
+            f"nice -n {nice} timeout {spec.timeout_seconds}s {self.python_command()} {quoted}; "
+            "elif command -v gtimeout >/dev/null 2>&1; then "
+            f"nice -n {nice} gtimeout {spec.timeout_seconds}s {self.python_command()} {quoted}; "
             f"else {run}; fi"
         )
+
+    def default_path(self) -> str:
+        """Filesystem PATH used when the node's login shell could not be probed."""
+        return f"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:{_MACOS_EXTRA_PATH}"

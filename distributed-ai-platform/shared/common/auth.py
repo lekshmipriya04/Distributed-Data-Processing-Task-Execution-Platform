@@ -27,11 +27,11 @@ _DEV_USER = {"sub": "dev-user", "anonymous": True}
 def create_internal_token(subject: str = "internal-service", ttl_seconds: int = 300) -> str:
     """Mint a short-lived JWT for internal service-to-service calls.
 
-    Service clients (scheduler, workers, …) previously sent a static shared
-    secret as a Bearer token, which every service then tried to *decode as a
-    JWT* and rejected with 401. This signs a real token with the same
-    ``jwt_secret`` all services validate against, so internal calls are
-    accepted in every environment (including production).
+    Used by ssh-executor when it calls storage-service on behalf of a run
+    owner (together with the ``X-On-Behalf-Of`` header). The token is signed
+    with the same ``jwt_secret`` all services validate against and carries the
+    claim ``internal: true``, so internal calls are accepted in every
+    environment (including production).
     """
     settings = get_base_settings()
     now = int(time.time())
@@ -59,7 +59,7 @@ def decode_access_token(token: str) -> dict:
             detail="Token has expired",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except jwt.PyJWTError as exc:
+    except jwt.PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",

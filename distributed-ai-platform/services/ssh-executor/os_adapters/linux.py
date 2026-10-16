@@ -1,11 +1,16 @@
 """Linux compute-node adapter.
 
-Default execution reproduces the platform's long-standing confinement
-(``taskset`` affinity + ``nice`` priority + ``timeout``) so existing behaviour is
-preserved exactly. Passing ``strict=True`` emits a cgroups-v2 form via
-``systemd-run`` (CPU quota, memory cap, task cap) which is the plan's strict
-enforcement path; it is opt-in until validated on real nodes, and it degrades to
-the legacy command when ``systemd-run`` is unavailable.
+Probing mirrors the platform's long-standing behaviour (``nproc``, ``/proc``)
+so existing detections are unchanged. Execution runs through the sandbox
+runner (:data:`os_adapters.base.SANDBOX_RUNNER_SOURCE`), which gives each task a
+clean environment rooted in its throwaway sandbox, its own process group and a
+portable wall-clock timeout — no GNU ``timeout``/``setsid`` needed.
+
+Resource enforcement stays honest: ``resource_enforcement`` is ``best_effort``
+because CPU affinity plus priority do not cap memory or disk. The strict path
+(cgroups v2 via ``systemd --user``) is only used when it is genuinely usable by
+the SSH user; otherwise the command degrades to the legacy form rather than
+failing the task.
 """
 from __future__ import annotations
 
@@ -13,23 +18,22 @@ import shlex
 
 from resource_spec import ResourceSpec
 
-from .base import NodeProbe, OSAdapter
+from .base import OSAdapter, PosixSandboxMixin
+from .base import NodeProbe
 
 # Legacy default priority: a low priority nudge, not a resource cap.
 _DEFAULT_NICE = 19
 
 
-class LinuxAdapter(OSAdapter):
+class LinuxAdapter(PosixSandboxMixin, OSAdapter):
     os_type = "linux"
-    # Honest default: affinity + priority do NOT cap memory. Strict enforcement
-    # (cgroups v2) is available via build_execute_command(strict=True).
     resource_enforcement = "best_effort"
 
     def python_command(self) -> str:
         return "python3"
 
     def temp_directory(self) -> str:
-        return "/tmp/dp-platform"
+        return "/tmp"
 
     def probe_commands(self) -> dict[str, str]:
         return {
@@ -51,31 +55,37 @@ class LinuxAdapter(OSAdapter):
             os_info=os_info,
         )
 
+    # -- strict (cgroups v2) path ----------------------------------------
+    def strict_wrap(self, command: str, spec: ResourceSpec) -> str:
+        """Wrap ``command`` in a cgroups-v2 scope when the node can support it.
+
+        ``systemd-run --user`` requires a user session bus, which many borrowed
+        machines do not have, so the wrapper probes for it and falls back to the
+        plain command instead of failing the task.
+        """
+        cpu_quota = spec.cpu_cores * 100  # systemd CPUQuota is % of one core
+        strict = (
+            "systemd-run --user --scope --quiet --collect "
+            f"-p CPUQuota={cpu_quota}% "
+            f"-p MemoryMax={spec.memory_mb}M -p MemorySwapMax=0 "
+            f"-p TasksMax={spec.max_processes} {command}"
+        )
+        return (
+            "if systemd-run --user --version >/dev/null 2>&1 "
+            "&& [ -n \"${DBUS_SESSION_BUS_ADDRESS:-}\" ]; then "
+            f"{strict}; else {command}; fi"
+        )
+
     def build_execute_command(
-        self, remote_path: str, spec: ResourceSpec, *, nice: int = _DEFAULT_NICE, strict: bool = False
+        self,
+        remote_path: str,
+        spec: ResourceSpec,
+        *,
+        nice: int = _DEFAULT_NICE,
+        strict: bool = False,
     ) -> str:
         quoted = shlex.quote(remote_path)
-        confine = (
-            f"nice -n {nice} timeout {spec.timeout_seconds}s "
-            f"{self.python_command()} {quoted}"
-        )
-        legacy = (
-            f"if command -v taskset >/dev/null 2>&1; then "
-            f"taskset -c {spec.core_list} {confine}; else {confine}; fi"
-        )
-        if not strict:
-            return legacy
-
-        cpu_quota = spec.cpu_cores * 100  # systemd CPUQuota is % of one core
-        strict_cmd = (
-            "systemd-run --scope --quiet --collect "
-            f"-p CPUQuota={cpu_quota}% -p AllowedCPUs={spec.core_list} "
-            f"-p MemoryMax={spec.memory_mb}M -p MemorySwapMax=0 "
-            f"-p TasksMax={spec.max_processes} {confine}"
-        )
-        # Prefer cgroups-v2 enforcement; fall back to affinity+priority when
-        # systemd-run is missing or unusable on the node.
-        return (
-            f"if command -v systemd-run >/dev/null 2>&1; then {strict_cmd}; "
-            f"else {legacy}; fi"
-        )
+        base = f"nice -n {nice} {self.python_command()} {quoted}"
+        if strict:
+            base = self.strict_wrap(base, spec)
+        return self._pin_cores(base, spec)

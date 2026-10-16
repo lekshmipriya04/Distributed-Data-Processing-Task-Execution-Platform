@@ -4,53 +4,69 @@ from pydantic import Field
 
 from shared.common.config import BaseServiceSettings
 
+# Known placeholder values that must never be used outside development.
+INSECURE_DEFAULT_SECRETS = frozenset({"change_me_ssh_cred_key", "change_me_in_production"})
+
 
 class SSHExecutorSettings(BaseServiceSettings):
     service_name: str = "ssh-executor"
     port: int = Field(default=8011)
 
-    # Symmetric key material used to encrypt stored SSH credentials at rest.
+    # Symmetric key material used to encrypt stored SSH private keys at rest.
     # Any string works — it is hashed to a 32-byte Fernet key (see crypto.py).
-    # MUST be overridden in production via the SSH_CRED_KEY env var.
+    # The service refuses to start outside development while this is a default
+    # (see security.py).
     ssh_cred_key: str = Field(default="change_me_ssh_cred_key")
 
-    # Per-task guardrails so a borrowed provider is never overloaded or hung.
+    # --- onboarding (password -> managed key) ----------------------------
+    # Lifetime of the signed token returned by /nodes/connect that binds
+    # host+port+username+host key between the connect and provision steps.
+    onboarding_token_ttl_seconds: int = Field(default=600, ge=30)
+    # How long a provisioned-but-not-yet-registered key is kept (pending row).
+    pending_provision_ttl_seconds: int = Field(default=900, ge=60)
+    # Comment prefix written on every authorized_keys line we install, so the
+    # line can be found and removed again. Final comment: "<prefix>:<id>".
+    managed_key_comment_prefix: str = Field(default="dp-platform")
+    # Options prepended to the installed public key. "restrict" disables
+    # forwarding/pty/agent while still allowing exec + sftp.
+    managed_key_options: str = Field(default="restrict")
+
+    # --- network guardrails ----------------------------------------------
+    # Optional allowlist of hostnames/IPs that may be registered as providers.
+    # Empty = allow any (subject to the CIDR rules below).
+    allowed_hosts: list[str] = Field(default_factory=list)
+    # Optional allowlist of CIDRs. Empty = allow any non-blocked address.
+    allowed_cidrs: list[str] = Field(default_factory=list)
+    # Block loopback / link-local / unspecified targets (SSRF guard). The dev
+    # compose providers are reached by docker DNS names on a private bridge,
+    # which are not loopback, so this stays on by default.
+    block_loopback_and_link_local: bool = Field(default=True)
+
+    # --- per-task guardrails ---------------------------------------------
     connect_timeout: int = Field(default=10, ge=1)
     task_timeout_seconds: int = Field(default=120, ge=1)
+    max_task_timeout_seconds: int = Field(default=3600, ge=1)
     max_output_bytes: int = Field(default=1_000_000, ge=1024)
     # Priority (nice) applied to remote tasks so the provider is not disturbed.
     task_nice: int = Field(default=19, ge=0, le=19)
 
-    # --- generic user-code execution (Phase 6) ---------------------------
-    # Guardrails on the authorized remote-code-execution surface.
+    # --- generic user-code execution -------------------------------------
     max_code_bytes: int = Field(default=1_000_000, ge=1024)
     max_inputs_per_batch: int = Field(default=10_000, ge=1)
-    allowed_runtimes: list[str] = Field(default_factory=lambda: ["python"])
+    # Runtime ids (see runtimes.py) users may select. ["*"] = every registered
+    # runtime, including "custom".
+    allowed_runtimes: list[str] = Field(default_factory=lambda: ["*"])
     lease_ttl_seconds: int = Field(default=3600, ge=1)
+    # How often the lease/stale-job recovery loop runs.
+    recovery_interval_seconds: int = Field(default=60, ge=5)
+    # Remote sandboxes older than this are swept on connect (crash leftovers).
+    stale_sandbox_minutes: int = Field(default=180, ge=1)
 
-    # --- distributed ML training (federated averaging over the fan-out) ---
-    # Storage metadata endpoint used to resolve the master-side HDFS path.
+    # --- distributed ML training -----------------------------------------
     storage_service_url: str = Field(default="http://storage-service:8001")
     hdfs_url: str = Field(default="hdfs://namenode:9000")
-    # A training shard runs many SGD epochs, so it may need longer than a
-    # generic task; this timeout is used for the per-shard remote runs.
     training_timeout_seconds: int = Field(default=600, ge=1)
-    # Guardrail: cap how many dataset rows we load into memory / split.
     max_train_rows: int = Field(default=200_000, ge=1)
-
-    # Optional allowlist of hostnames/IPs that may be registered as providers.
-    # Empty = allow any (dev). Set for public-network exposure.
-    allowed_hosts: list[str] = Field(default_factory=list)
-
-    # Browser origins permitted by CORS. ssh-executor is normally reached
-    # server-side via the api-gateway, so this stays tight by default.
-    cors_origins: list[str] = Field(
-        default_factory=lambda: [
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://localhost:8000",
-        ]
-    )
 
     model_config = {"frozen": True}
 

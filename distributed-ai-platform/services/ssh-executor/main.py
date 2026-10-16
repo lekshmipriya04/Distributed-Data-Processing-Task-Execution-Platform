@@ -5,9 +5,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app
 
-from routes import router as ssh_router
+from routes_batches import router as batches_router
+from routes_nodes import router as nodes_router
+from routes_train import router as train_router
 from config import get_settings
 from database import get_db_manager
+from lease_recovery import start_recovery_loop, stop_recovery_loop
+from security import enforce_secrets
 from shared.common.error_handlers import generic_exception_handler, platform_exception_handler
 from shared.common.exceptions import PlatformException
 from shared.common.logging_config import configure_logging
@@ -24,11 +28,16 @@ async def lifespan(app: FastAPI):
         service_name=settings.service_name,
         environment=settings.environment.value,
     )
+    # Refuse to run with placeholder secrets outside development.
+    enforce_secrets(settings)
     db_manager = get_db_manager()
     await db_manager.initialize()
     await db_manager.create_tables()
+    # Lease expiry + stale batch/run recovery (frees capacity after crashes).
+    recovery = start_recovery_loop()
     logger.info("ssh_executor_started")
     yield
+    await stop_recovery_loop(recovery)
     await db_manager.dispose()
     logger.info("ssh_executor_stopped")
 
@@ -52,7 +61,9 @@ def create_app() -> FastAPI:
     app.add_middleware(MetricsMiddleware, service_name=settings.service_name)
     app.add_exception_handler(PlatformException, platform_exception_handler)
     app.add_exception_handler(Exception, generic_exception_handler)
-    app.include_router(ssh_router, prefix="/api/v1/ssh", tags=["ssh"])
+    app.include_router(nodes_router, prefix="/api/v1/ssh", tags=["nodes"])
+    app.include_router(batches_router, prefix="/api/v1/ssh", tags=["batches"])
+    app.include_router(train_router, prefix="/api/v1/ssh", tags=["training"])
     metrics_app = make_asgi_app()
     app.mount("/metrics", metrics_app)
 

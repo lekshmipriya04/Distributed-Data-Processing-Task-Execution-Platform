@@ -1,11 +1,11 @@
-"""Cross-platform node capability discovery (Phase 2).
+"""Cross-platform node capability discovery.
 
 ``detect_capabilities(transport, adapter)`` composes the **existing** OS adapters
 (`probe_commands`/`parse_probe`/`python_command`/`os_type`) with a few extra
 runtime-version probes to produce one normalized :class:`NodeCapabilities` record
-— OS, CPU, RAM, GPU (vendor/backend/model/count/memory), Python/Java/Spark/Ray
-versions, and the honest resource-enforcement mode. It adds no methods to the
-adapters; it only calls their existing public API and runs small extra commands.
+— OS, CPU, RAM, GPU (vendor/backend/model/count/memory), Python version, and the
+honest resource-enforcement mode. It adds no methods to the adapters; it only
+calls their existing public API and runs small extra commands.
 
 Parsing is tolerant: any probe that fails or is absent leaves its field ``None``
 / 0 rather than raising, so a bare `sshd`+`python3` box still registers cleanly.
@@ -75,14 +75,12 @@ def detect_capabilities(
     py = adapter.python_command()
     os_type = adapter.os_type
 
-    # 2. Runtime versions (OS-independent enough; python name comes from adapter).
+    # 2. Python version (only required runtime on the worker).
     python_version = _search(r"Python\s+([\d.]+)", _run(transport, f"{py} --version 2>&1", timeout))
-    java_version = _search(r'version "?([\d._]+)', _run(transport, "java -version 2>&1", timeout))
-    spark_version = _search(r"version\s+([\d.]+)", _run(transport, "spark-submit --version 2>&1", timeout))
-    ray_version = _search(
-        r"([\d]+\.[\d]+\.[\d]+)",
-        _run(transport, f'{py} -c "import ray,sys; sys.stdout.write(ray.__version__)" 2>/dev/null', timeout),
-    )
+    # Legacy fields kept for DB schema compatibility but not probed.
+    java_version: Optional[str] = None
+    spark_version: Optional[str] = None
+    ray_version: Optional[str] = None
 
     # 3. GPU detail + enforcement mode, per OS (best-effort).
     gpu_vendor = gpu_backend = gpu_model = None

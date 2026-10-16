@@ -6,13 +6,9 @@ from __future__ import annotations
 
 from enum import Enum
 from functools import lru_cache
-from typing import Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-from shared.schemas.pipeline import ProblemType
 
 
 class Environment(str, Enum):
@@ -85,12 +81,6 @@ class BaseServiceSettings(BaseSettings):
     hdfs_webhdfs_url: str = Field(default="http://namenode:9870")
     hdfs_user: str = Field(default="hadoop")
     hdfs_base_path: str = Field(default="/platform")
-
-    # ── MLflow ───────────────────────────────
-    mlflow_tracking_uri: str = Field(default="http://mlflow:5000")
-    
-    # ── Livy ─────────────────────────────────
-    livy_url: str = Field(default="http://livy:8998")
 
     @field_validator("log_level")
     @classmethod

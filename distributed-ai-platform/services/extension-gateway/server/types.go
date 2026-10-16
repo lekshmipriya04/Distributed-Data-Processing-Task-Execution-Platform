@@ -1,60 +1,89 @@
 // Package server implements the extension-facing control-plane HTTP service.
 //
 // This is the Go backend the Distributed Compute VS Code extension talks to. It
-// adapts/aggregates the existing platform (Python ssh-executor, scheduler,
-// resource-manager, Postgres) behind the stable JSON contract the extension
-// expects. Data is served through the Store interface; no values are fabricated
-// in the default wiring.
+// adapts the platform's ssh-executor REST API (/api/v1/ssh/...) behind the
+// stable camelCase JSON contract the extension expects; see UpstreamStore.
+// Data is served through the Store interface; no values are fabricated in any
+// wiring (MemStore, used for tests and local dev, starts empty).
 package server
 
 import "time"
 
-// ComputeNode is the extension-facing view of an SSH compute node. Pointer
-// fields are nil when the backend has not reported a value (shown as "Unknown"
-// in the UI) rather than a misleading zero.
+// ComputeNode is the extension-facing view of an ssh-executor worker node.
+// Pointer fields are nil when the backend has not reported a value (shown as
+// "Unknown" in the UI) rather than a misleading zero.
+//
+// Capacity concepts are kept distinct: CPUTotal/MemoryTotalGB are what was
+// detected on the machine, CPUAllocatable/MemoryAllocatableGB are what the
+// owner lent to the platform, and CPUReserved/MemoryReservedGB are currently
+// held by active leases.
 type ComputeNode struct {
-	ID                  string    `json:"id"`
-	Name                string    `json:"name"`
-	OSType              string    `json:"osType,omitempty"`
-	OSVersion           string    `json:"osVersion,omitempty"`
-	Status              string    `json:"status"` // online|busy|degraded|offline|unreachable|draining|unknown
-	CPUTotal            *int      `json:"cpuTotal,omitempty"`
-	CPUAllocatable      *int      `json:"cpuAllocatable,omitempty"`
-	CPUReserved         *int      `json:"cpuReserved,omitempty"`
-	MemoryTotalGB       *float64  `json:"memoryTotalGb,omitempty"`
-	MemoryAllocatableGB *float64  `json:"memoryAllocatableGb,omitempty"`
-	MemoryReservedGB    *float64  `json:"memoryReservedGb,omitempty"`
-	GPUCount            *int      `json:"gpuCount,omitempty"`
-	ResourceEnforcement string    `json:"resourceEnforcement,omitempty"` // strict|best_effort
-	ActiveTasks         int       `json:"activeTasks"`
-	LastHealthCheck     *time.Time `json:"lastHealthCheck,omitempty"`
+	ID                  string            `json:"id"`
+	Name                string            `json:"name"`
+	Host                string            `json:"host,omitempty"`
+	OSType              string            `json:"osType,omitempty"`
+	OSVersion           string            `json:"osVersion,omitempty"`
+	Status              string            `json:"status"` // online|busy|degraded|offline|unreachable|draining|unknown
+	CPUTotal            *int              `json:"cpuTotal,omitempty"`
+	CPUAllocatable      *int              `json:"cpuAllocatable,omitempty"`
+	CPUReserved         *int              `json:"cpuReserved,omitempty"`
+	MemoryTotalGB       *float64          `json:"memoryTotalGb,omitempty"`
+	MemoryAllocatableGB *float64          `json:"memoryAllocatableGb,omitempty"`
+	MemoryReservedGB    *float64          `json:"memoryReservedGb,omitempty"`
+	GPUCount            *int              `json:"gpuCount,omitempty"`
+	ResourceEnforcement string            `json:"resourceEnforcement,omitempty"` // strict|best_effort
+	Runtimes            map[string]string `json:"runtimes,omitempty"`            // runtime id -> detected version
+	ActiveTasks         int               `json:"activeTasks"`
+	LastHealthCheck     *time.Time        `json:"lastHealthCheck,omitempty"`
 }
 
-// Execution is a submitted job/execution record.
+// Execution is a submitted execution; it maps 1:1 to an ssh-executor batch
+// (one task per input).
 type Execution struct {
-	ID        string     `json:"id"`
-	Runtime   string     `json:"runtime"` // python|spark|ray
-	Status    string     `json:"status"`  // created|queued|scheduling|running|completed|failed|cancelled|timed_out|node_lost
-	Total     int        `json:"total"`
-	Completed int        `json:"completed"`
-	Failed    int        `json:"failed"`
-	CreatedAt time.Time  `json:"createdAt"`
-	EndedAt   *time.Time `json:"endedAt,omitempty"`
+	ID        string `json:"id"`
+	Runtime   string `json:"runtime"` // any runtime id from GET /runtimes (python, bash, node, go, ..., custom)
+	Status    string `json:"status"`  // pending|running|cancelling|cancelled|completed|completed_with_errors|failed
+	Message   string `json:"message,omitempty"`
+	Total     int    `json:"total"`
+	Completed int    `json:"completed"`
+	Failed    int    `json:"failed"`
+	Cancelled int    `json:"cancelled"`
+	// CPUPerTask and TimeoutSeconds echo the accepted request; 0 = not reported.
+	CPUPerTask     int        `json:"cpuPerTask,omitempty"`
+	TimeoutSeconds int        `json:"timeoutSeconds,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	EndedAt        *time.Time `json:"endedAt,omitempty"`
 }
 
-// ExecutionRequest is the body for POST /executions.
+// ExecutionRequest is the body for POST /executions. It maps onto the
+// ssh-executor BatchCreateRequest. Runtime is any id listed by GET /runtimes;
+// membership and per-node availability are validated by ssh-executor.
 type ExecutionRequest struct {
-	Runtime        string `json:"runtime"`
-	Code           string `json:"code,omitempty"`
-	DatasetID      string `json:"datasetId,omitempty"`
-	CPUPerTask     int    `json:"cpuPerTask,omitempty"`
-	MemoryPerTask  float64 `json:"memoryPerTaskGb,omitempty"`
-	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
+	Runtime        string   `json:"runtime"`
+	Code           string   `json:"code"`
+	Inputs         []string `json:"inputs,omitempty"`         // one task per input (stdin); empty = one task
+	NodeIDs        []string `json:"nodeIds,omitempty"`        // empty = any of the caller's online nodes
+	CustomCommand  string   `json:"customCommand,omitempty"`  // runtime "custom" only; must contain {file}
+	CustomFilename string   `json:"customFilename,omitempty"` // runtime "custom" only, e.g. main.zig
+	CPUPerTask     int      `json:"cpuPerTask,omitempty"`
+	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
 }
 
-// ClusterStatus is the aggregate shown in the cluster dashboard. The four
-// capacity concepts are kept distinct (capacity vs allocatable vs reserved vs
-// measured) rather than conflated.
+// Runtime is a language runtime the backend knows how to run. A runtime is
+// usable only on nodes where it was detected (AvailableNodeIDs).
+type Runtime struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Filename         string   `json:"filename"`
+	Kind             string   `json:"kind"` // interpreted|compiled|custom
+	ExampleCode      string   `json:"exampleCode,omitempty"`
+	WindowsSupported bool     `json:"windowsSupported"`
+	AvailableNodeIDs []string `json:"availableNodeIds"`
+}
+
+// ClusterStatus is the aggregate shown in the cluster dashboard. The capacity
+// concepts are kept distinct (detected total vs allocatable vs reserved)
+// rather than conflated.
 type ClusterStatus struct {
 	NodesTotal          int     `json:"nodesTotal"`
 	NodesOnline         int     `json:"nodesOnline"`

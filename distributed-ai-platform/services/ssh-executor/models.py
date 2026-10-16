@@ -31,10 +31,21 @@ class SSHNode(Base):
     host: Mapped[str] = mapped_column(String(256), nullable=False)
     port: Mapped[int] = mapped_column(Integer, nullable=False, default=22)
     username: Mapped[str] = mapped_column(String(128), nullable=False)
-    auth_type: Mapped[str] = mapped_column(String(16), nullable=False)  # password | private_key
+    # managed_key (platform-generated key installed during onboarding) is the
+    # only value new nodes get. password | private_key are legacy rows that the
+    # "re-secure" flow converts to managed_key.
+    auth_type: Mapped[str] = mapped_column(String(16), nullable=False, default="managed_key")
+    # Fernet ciphertext: the managed private key (OpenSSH PEM) for managed_key,
+    # or the legacy password/private key for legacy rows.
     secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     host_key_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     host_key_b64: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Managed key metadata (public half is not secret).
+    public_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Comment on the authorized_keys line, "<prefix>:<id>", used to remove it.
+    key_comment: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    key_created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Auto-detected hardware
     detected_cpu: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -54,9 +65,12 @@ class SSHNode(Base):
     gpu_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     gpu_memory_gb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     python_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    java_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    spark_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    ray_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Languages/toolchains already present on the node, detected over SSH
+    # (nothing is installed): JSON {runtime_id: version_string}. See runtimes.py.
+    runtimes_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The SSH user's login-shell PATH, captured at detection time and used as
+    # PATH inside the sandbox's clean environment (POSIX only).
+    env_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     execution_backend: Mapped[str] = mapped_column(String(32), nullable=False, default="ssh")
     resource_enforcement: Mapped[str] = mapped_column(String(16), nullable=False, default="best_effort")
     capabilities_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -71,6 +85,37 @@ class SSHNode(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class PendingProvision(Base):
+    """A key that was generated + installed on a node during onboarding but not
+    yet registered as an :class:`SSHNode`. Expires after
+    ``pending_provision_ttl_seconds``; an expired row's key line should be
+    removed from the node by the recovery sweep when reachable.
+    """
+
+    __tablename__ = "pending_provisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    host: Mapped[str] = mapped_column(String(256), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False, default=22)
+    username: Mapped[str] = mapped_column(String(128), nullable=False)
+    host_key_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    host_key_b64: Mapped[str] = mapped_column(Text, nullable=False)
+    private_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    public_key: Mapped[str] = mapped_column(Text, nullable=False)
+    key_comment: Mapped[str] = mapped_column(String(128), nullable=False)
+    # installed | awaiting_manual_install
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="installed")
+    # Detection result (NodeCapabilities as JSON) captured over the key login.
+    capabilities_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 
@@ -125,15 +170,30 @@ class TaskBatch(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     code: Mapped[str] = mapped_column(Text, nullable=False)
+    # Runtime id from runtimes.py (python, bash, node, go, c, ..., custom).
+    runtime: Mapped[str] = mapped_column(String(32), nullable=False, default="python")
+    # Only for runtime == "custom": command template containing "{file}" and
+    # the source file name written into the sandbox (e.g. "main.zig").
+    custom_command: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    custom_filename: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    cpu_per_task: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
+    # JSON list of node ids the user restricted the run to (empty = all online).
+    node_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # pending | running | cancelling | cancelled | completed |
+    # completed_with_errors | failed
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cancelled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tasks: Mapped[list["Task"]] = relationship(
         back_populates="batch", cascade="all, delete-orphan", lazy="selectin"
@@ -141,7 +201,10 @@ class TaskBatch(Base):
 
 
 class Task(Base):
-    """A single unit of work: input data streamed over stdin, ephemeral remote run."""
+    """A single unit of work run once in its own remote sandbox.
+
+    status: pending | running | completed | failed | cancelled
+    """
 
     __tablename__ = "tasks"
 
@@ -159,6 +222,9 @@ class Task(Base):
     stdout: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     stderr: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     batch: Mapped["TaskBatch"] = relationship(back_populates="tasks")
 
@@ -177,14 +243,15 @@ class TrainingRun(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     dataset_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     model_type: Mapped[str] = mapped_column(String(64), nullable=False)
     mode: Mapped[str] = mapped_column(String(16), nullable=False)  # single | multi
-    engine: Mapped[str] = mapped_column(String(16), nullable=False, default="spark")
+    engine: Mapped[str] = mapped_column(String(16), nullable=False, default="python")
     rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     hyperparams_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    # pending | running | completed | failed
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

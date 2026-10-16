@@ -6,7 +6,6 @@ Fixes applied:
   BUG-01: Use StreamingResponse (not Response) so async byte streams are handled correctly.
   BUG-02: Always close the httpx.AsyncClient via BackgroundTask to prevent FD/memory leaks.
 """
-import asyncio
 import httpx
 import structlog
 from fastapi import Request, HTTPException
@@ -31,9 +30,10 @@ async def proxy_request(request: Request, target_url: str) -> StreamingResponse:
     body = await request.body()
 
     # Generous timeout: this is a reverse proxy in front of services that do
-    # real work (HDFS writes on dataset upload, Spark/Ray submits, training
-    # reads). httpx's 5s default made cold-HDFS uploads (~5-6s) surface as a
-    # spurious 502 even though storage-service had already persisted the row.
+    # real work (HDFS writes on dataset upload, SSH connects and key setup when
+    # onboarding a node on ssh-executor). httpx's 5s default made cold-HDFS
+    # uploads (~5-6s) surface as a spurious 502 even though storage-service
+    # had already persisted the row.
     # Allow a fast connect but a long read/write for slow upstream operations.
     client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
     try:

@@ -35,11 +35,6 @@ _SERVICE_LOCAL_NAMES = {
     "error_handlers",
     "dataset_service",
     "hdfs_service",
-    "preprocessing_service",
-    "training_service",
-    "evaluation_service",
-    "worker_service",
-    "resource_service",
 }
 
 

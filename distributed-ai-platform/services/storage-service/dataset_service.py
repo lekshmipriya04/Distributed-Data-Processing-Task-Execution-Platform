@@ -171,30 +171,39 @@ class DatasetService:
         logger.info("image_dataset_created", dataset_id=str(dataset_id))
         return dataset
 
-    async def get_dataset(self, dataset_id: uuid.UUID) -> Optional[Dataset]:
-        result = await self._db.execute(select(Dataset).where(Dataset.id == dataset_id))
+    async def get_dataset(self, dataset_id: uuid.UUID, owner_id: str) -> Optional[Dataset]:
+        """Return the dataset if it exists **and** belongs to ``owner_id``.
+
+        A dataset owned by someone else is indistinguishable from a missing one
+        (both return None), so callers cannot probe for other users' IDs.
+        """
+        result = await self._db.execute(
+            select(Dataset).where(Dataset.id == dataset_id, Dataset.created_by == owner_id)
+        )
         return result.scalar_one_or_none()
 
-    async def download_dataset(self, dataset_id: uuid.UUID) -> tuple[bytes, str]:
-        """Fetch the raw file bytes for a dataset from HDFS.
+    async def download_dataset(self, dataset_id: uuid.UUID, owner_id: str) -> tuple[bytes, str]:
+        """Fetch the raw file bytes for one of ``owner_id``'s datasets from HDFS.
 
         Returns (content, file_format). Raises ValidationError if the dataset
-        does not exist so the route can translate it into a 404.
+        does not exist or is not owned by ``owner_id`` so the route can
+        translate it into a 404.
         """
-        dataset = await self.get_dataset(dataset_id)
+        dataset = await self.get_dataset(dataset_id, owner_id)
         if dataset is None:
             raise ValidationError("Dataset not found")
         content = await self._hdfs.download_file(dataset.hdfs_path)
         return content, dataset.file_format
 
-    async def delete_dataset(self, dataset_id: uuid.UUID) -> bool:
-        """Remove a dataset: drop its HDFS file (best-effort) and DB row.
+    async def delete_dataset(self, dataset_id: uuid.UUID, owner_id: str) -> bool:
+        """Remove one of ``owner_id``'s datasets: HDFS file (best-effort) and DB row.
 
-        Returns False if the dataset does not exist. HDFS removal failures are
-        logged but do not block deleting the record, so a dataset whose bytes
-        are already gone can still be cleared from the list.
+        Returns False if the dataset does not exist or belongs to another
+        owner. HDFS removal failures are logged but do not block deleting the
+        record, so a dataset whose bytes are already gone can still be cleared
+        from the list.
         """
-        dataset = await self.get_dataset(dataset_id)
+        dataset = await self.get_dataset(dataset_id, owner_id)
         if dataset is None:
             return False
         try:
@@ -206,12 +215,18 @@ class DatasetService:
         logger.info("dataset_deleted", dataset_id=str(dataset_id))
         return True
 
-    async def list_datasets(self, skip: int = 0, limit: int = 100) -> tuple[list[Dataset], int]:
-        total = await self._db.scalar(select(func.count()).select_from(Dataset))
+    async def list_datasets(
+        self, owner_id: str, skip: int = 0, limit: int = 100
+    ) -> tuple[list[Dataset], int]:
+        """List ``owner_id``'s datasets, newest first, with their total count."""
+        owned = Dataset.created_by == owner_id
+        total = await self._db.scalar(
+            select(func.count()).select_from(Dataset).where(owned)
+        )
         if total is None:
             total = 0
-            
+
         result = await self._db.execute(
-            select(Dataset).order_by(Dataset.created_at.desc()).offset(skip).limit(limit)
+            select(Dataset).where(owned).order_by(Dataset.created_at.desc()).offset(skip).limit(limit)
         )
         return list(result.scalars().all()), total

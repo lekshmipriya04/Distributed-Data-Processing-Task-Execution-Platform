@@ -11,6 +11,7 @@ from shared.common.error_handlers import generic_exception_handler, platform_exc
 from shared.common.exceptions import PlatformException
 from shared.common.logging_config import configure_logging
 from shared.common.middleware import LoggingMiddleware, MetricsMiddleware, RequestIDMiddleware
+from shared.common.security import assert_secure_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_gateway_settings()
     configure_logging(level=settings.log_level, service_name=settings.service_name, environment=settings.environment.value)
+    assert_secure_secrets(settings.environment, JWT_SECRET=settings.jwt_secret)
     logger.info("api_gateway_started")
     yield
     logger.info("api_gateway_stopped")
@@ -48,12 +50,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(PlatformException, platform_exception_handler)
     app.add_exception_handler(Exception, generic_exception_handler)
 
-    from dashboard import router as dashboard_router
-    from websocket import router as ws_router
-    
-    app.include_router(dashboard_router, prefix="/api/v1/dashboard", tags=["dashboard"])
     app.include_router(gateway_router, prefix="/api/v1", tags=["gateway"])
-    app.include_router(ws_router, tags=["websocket"])
 
     metrics_app = make_asgi_app()
     app.mount("/metrics", metrics_app)

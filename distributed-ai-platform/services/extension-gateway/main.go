@@ -1,35 +1,119 @@
-// Command extension-gateway serves the Go control-plane HTTP API consumed by the
-// Distributed Compute VS Code extension.
+// Command extension-gateway serves the HTTP API consumed by the Distributed
+// Compute VS Code extension. It is a thin adapter over ssh-executor: every
+// request is authenticated with the user's platform JWT and forwarded with
+// that same token, so ssh-executor's owner scoping applies unchanged.
 //
-// The default Store is an empty in-memory store (it never fabricates nodes or
-// executions). Wire a platform-backed Store before production use. Set
-// EXTENSION_GATEWAY_ADDR to change the listen address (default :8090).
+// Configuration is read from the environment; see loadConfig in config.go.
+// Without UPSTREAM_URL it serves an empty in-memory store (local dev only);
+// without JWT_SECRET it accepts any non-empty bearer token (local dev only).
+// Both are refused when ENVIRONMENT=production.
+//
+// `extension-gateway -healthcheck` probes GET /health on the local listener
+// and exits 0/1 (used by the container HEALTHCHECK; the image has no shell).
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/distributed-ai-platform/extension-gateway/server"
 )
 
 func main() {
+	healthcheck := flag.Bool("healthcheck", false, "probe the local /health endpoint and exit")
+	flag.Parse()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	addr := os.Getenv("EXTENSION_GATEWAY_ADDR")
-	if addr == "" {
-		addr = ":8090"
+	cfg, err := loadConfig(os.Getenv)
+	if err != nil {
+		logger.Error("invalid_config", "err", err.Error())
+		os.Exit(1)
+	}
+	if *healthcheck {
+		os.Exit(probeHealth(cfg.ListenAddr))
 	}
 
 	srv := server.New(server.Config{
-		Store:  server.NewMemStore(), // TODO: replace with platform-backed Store.
-		Logger: logger,
+		Store:    buildStore(cfg, logger),
+		Validate: buildValidator(cfg, logger),
+		Logger:   logger,
 	})
 
-	httpSrv := server.NewHTTPServer(addr, srv.Handler())
-	logger.Info("extension_gateway_listening", "addr", addr)
-	if err := httpSrv.ListenAndServe(); err != nil {
+	httpSrv := server.NewHTTPServer(cfg.ListenAddr, srv.Handler())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+	}()
+
+	logger.Info("extension_gateway_listening", "addr", cfg.ListenAddr, "environment", cfg.Environment)
+	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server_exited", "err", err.Error())
 		os.Exit(1)
 	}
+}
+
+func buildStore(cfg appConfig, logger *slog.Logger) server.Store {
+	if cfg.UpstreamURL == "" {
+		logger.Warn("store_in_memory",
+			"detail", "UPSTREAM_URL is not set: serving an EMPTY in-memory store (local dev only); "+
+				"set UPSTREAM_URL=http://ssh-executor:8011 to serve real nodes and executions")
+		return server.NewMemStore()
+	}
+	st, err := server.NewUpstreamStore(server.UpstreamConfig{
+		BaseURL: cfg.UpstreamURL,
+		Timeout: cfg.UpstreamTimeout,
+		Logger:  logger,
+	})
+	if err != nil {
+		logger.Error("invalid_config", "err", err.Error())
+		os.Exit(1)
+	}
+	logger.Info("store_upstream", "upstream_url", cfg.UpstreamURL, "timeout", cfg.UpstreamTimeout.String())
+	return st
+}
+
+func buildValidator(cfg appConfig, logger *slog.Logger) server.TokenValidator {
+	if cfg.JWTSecret == "" {
+		logger.Warn("auth_dev_mode",
+			"detail", "JWT_SECRET is not set: bearer tokens are NOT verified by the gateway (local dev only); "+
+				"ssh-executor still verifies forwarded tokens")
+		return server.DevValidator
+	}
+	if cfg.JWTSecret == placeholderJWTSecret {
+		logger.Warn("auth_placeholder_secret", "detail", "JWT_SECRET is the development placeholder")
+	}
+	return server.NewHS256Validator([]byte(cfg.JWTSecret), nil)
+}
+
+func probeHealth(listenAddr string) int {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return 1
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/health")
+	if err != nil {
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
 }

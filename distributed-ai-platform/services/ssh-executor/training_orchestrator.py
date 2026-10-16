@@ -10,14 +10,16 @@ Data handling: in ``single`` mode the dataset never leaves the master. In
 ``multi`` mode each shard's rows are streamed to its provider over stdin for the
 duration of one task and wiped afterwards (same guarantee as Parallel Tasks) —
 remote CPU can only train on data it can see.
+
+The master uses only pure-Python + numpy. Workers receive only a stdlib-only
+script and a data shard — nothing is installed on the provider node.
 """
 from __future__ import annotations
 
 import asyncio
 import csv
+import io
 import json
-import os
-import tempfile
 import uuid
 from concurrent.futures import ProcessPoolExecutor
 from typing import Optional
@@ -57,20 +59,20 @@ async def _update_run(run_id: uuid.UUID, **fields) -> None:
         session.add(run)
 
 
-# --- dataset loading -----------------------------------------------------
+# --- dataset loading (pure-Python, no Spark/Ray on master) ---------------
 async def _load_dataset_rows(
     dataset_id: uuid.UUID,
     target_column: str,
     feature_columns: list[str],
     settings,
     num_shards: int,
-    master_engine: str,
+    master_engine: str = "python",
 ) -> tuple[list[list[float]], list[str]]:
-    """Read and partition the dataset with Spark running on the master.
+    """Fetch the dataset from the storage service and parse it in-process.
 
-    Spark reads the provider-owned HDFS path; workers never receive Spark or
-    Ray. ``toLocalIterator`` keeps transfer from Spark incremental, while the
-    existing max_train_rows guard bounds the master-side model/evaluation data.
+    Uses only httpx + the Python standard library (csv / json). No Spark, Ray,
+    or JVM is required on the master container. The ``master_engine`` parameter
+    is kept for backwards-compatibility but is always ``"python"``.
     """
     metadata_url = f"{settings.storage_service_url}/api/v1/storage/datasets/{dataset_id}"
     token = create_internal_token("ssh-executor")
@@ -78,180 +80,111 @@ async def _load_dataset_rows(
         resp = await client.get(metadata_url, headers={"Authorization": f"Bearer {token}"})
         resp.raise_for_status()
         metadata = resp.json()
-    schema = json.loads(metadata.get("schema_json") or "{}")
-    expected_engine = "ray" if schema.get("image") else "spark"
-    if master_engine != expected_engine:
-        kind = "image" if schema.get("image") else "tabular/text"
-        raise ValueError(f"{kind} datasets must use the master {expected_engine} engine")
-    reader = _read_ray_rows if master_engine == "ray" else _read_spark_rows
+
     return await asyncio.to_thread(
-        reader, metadata, target_column, feature_columns, settings, num_shards
+        _read_rows, metadata, target_column, feature_columns, settings
     )
 
 
-def _read_spark_rows(
+def _read_rows(
     metadata: dict,
     target_column: str,
     feature_columns: list[str],
     settings,
-    num_shards: int,
 ) -> tuple[list[list[float]], list[str]]:
-    """Master-only Spark reader used by the SSH training orchestrator."""
-    from pyspark.sql import SparkSession, functions as F
+    """Pure-Python dataset reader — downloads via storage-service HTTP API.
 
-    hdfs_path = metadata.get("hdfs_path")
-    if not hdfs_path:
-        raise ValueError("Dataset metadata does not contain an HDFS path")
-    if not hdfs_path.startswith(("hdfs://", "file://")):
-        hdfs_path = f"{settings.hdfs_url.rstrip('/')}/{hdfs_path.lstrip('/')}"
-
-    spark = (
-        SparkSession.builder
-        .appName("MasterZeroInstallPartitioner")
-        .master("local[*]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", str(max(1, num_shards)))
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-    try:
-        file_format = metadata.get("file_format", "csv")
-        if file_format == "parquet":
-            frame = spark.read.parquet(hdfs_path)
-        elif file_format == "json":
-            frame = spark.read.json(hdfs_path)
-        else:
-            frame = spark.read.option("header", "true").option("inferSchema", "true").csv(hdfs_path)
-
-        columns = frame.columns
-        if target_column not in columns:
-            raise ValueError(f"Target column '{target_column}' not found in dataset")
-        if feature_columns:
-            missing = [name for name in feature_columns if name not in columns]
-            if missing:
-                raise ValueError(f"Feature columns not found: {', '.join(missing)}")
-            selected_features = feature_columns
-        else:
-            sample = frame.limit(1).collect()
-            if not sample:
-                raise ValueError("Dataset is empty")
-            first = sample[0].asDict()
-            selected_features = []
-            for name in columns:
-                if name == target_column:
-                    continue
-                try:
-                    float(first.get(name))
-                    selected_features.append(name)
-                except (TypeError, ValueError):
-                    continue
-        if not selected_features:
-            raise ValueError("No numeric feature columns available")
-
-        names = [*selected_features, target_column]
-        numeric = frame.select(
-            *[F.col(name).cast("double").alias(name) for name in names]
-        ).limit(settings.max_train_rows).repartition(max(1, num_shards))
-        rows: list[list[float]] = []
-        for record in numeric.toLocalIterator():
-            values = [record[name] for name in names]
-            if any(value is None for value in values):
-                continue
-            rows.append([float(value) for value in values])
-        if not rows:
-            raise ValueError("No valid numeric rows found in dataset")
-        return rows, selected_features
-    finally:
-        spark.stop()
-
-
-def _read_ray_rows(
-    metadata: dict,
-    target_column: str,
-    feature_columns: list[str],
-    settings,
-    num_shards: int,
-) -> tuple[list[list[float]], list[str]]:
-    """Master-only Ray Data reader for image-derived datasets.
-
-    Stage the file through storage-service rather than Ray's native HDFS
-    filesystem, which requires a separately configured libhdfs/JVM path.
+    Supports CSV and JSON line-delimited formats. The entire dataset is read
+    into memory; ``max_train_rows`` prevents unbounded growth.
     """
-    import ray
-
-    if not ray.is_initialized():
-        ray.init(
-            num_cpus=max(1, min(num_shards, 8)),
-            include_dashboard=False,
-            ignore_reinit_error=True,
-            logging_level="ERROR",
-        )
-    file_format = metadata.get("file_format", "csv")
     dataset_id = metadata.get("id")
     if not dataset_id:
         raise ValueError("Dataset metadata does not contain an ID")
+    file_format = (metadata.get("file_format") or "csv").lower()
     download_url = (
-        f"{settings.storage_service_url}/api/v1/storage/datasets/"
-        f"{dataset_id}/download"
+        f"{settings.storage_service_url}/api/v1/storage/datasets/{dataset_id}/download"
     )
     token = create_internal_token("ssh-executor")
 
-    with tempfile.TemporaryDirectory(prefix="ray-training-") as temp_dir:
-        local_path = os.path.join(temp_dir, f"dataset.{file_format}")
-        with httpx.Client(timeout=120.0) as client:
-            with client.stream(
-                "GET",
-                download_url,
-                headers={"Authorization": f"Bearer {token}"},
-            ) as response:
-                response.raise_for_status()
-                with open(local_path, "wb") as dataset_file:
-                    for chunk in response.iter_bytes():
-                        dataset_file.write(chunk)
+    with httpx.Client(timeout=300.0) as client:
+        resp = client.get(download_url, headers={"Authorization": f"Bearer {token}"})
+        resp.raise_for_status()
+        raw_bytes = resp.content
 
-        dataset = (
-            ray.data.read_parquet(local_path)
-            if file_format == "parquet"
-            else ray.data.read_csv(local_path)
-        )
-        sample = dataset.take(1)
-        if not sample:
-            raise ValueError("Dataset is empty")
-        columns = list(sample[0].keys())
-        if target_column not in columns:
-            raise ValueError(f"Target column '{target_column}' not found in dataset")
-        if feature_columns:
-            missing = [name for name in feature_columns if name not in columns]
-            if missing:
-                raise ValueError(f"Feature columns not found: {', '.join(missing)}")
-            selected_features = feature_columns
-        else:
-            selected_features = []
-            first = sample[0]
-            for name in columns:
-                if name == target_column:
-                    continue
-                try:
-                    float(first.get(name))
-                    selected_features.append(name)
-                except (TypeError, ValueError):
-                    continue
-        if not selected_features:
-            raise ValueError("No numeric feature columns available")
+    text = raw_bytes.decode("utf-8", errors="replace")
 
-        names = [*selected_features, target_column]
-        rows: list[list[float]] = []
-        for record in dataset.select_columns(names).limit(settings.max_train_rows).iter_rows():
-            values = [record.get(name) for name in names]
-            if any(value is None for value in values):
+    if file_format in ("json", "jsonl"):
+        records: list[dict] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
                 continue
             try:
-                rows.append([float(value) for value in values])
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        if not records:
+            # Try parsing as a JSON array
+            try:
+                records = json.loads(text)
+            except json.JSONDecodeError:
+                pass
+        if not records:
+            raise ValueError("JSON dataset is empty or unparseable")
+        columns = list(records[0].keys())
+    else:
+        # CSV (default)
+        reader = csv.DictReader(io.StringIO(text))
+        records = []
+        columns_seen: list[str] | None = None
+        for row in reader:
+            if columns_seen is None:
+                columns_seen = list(row.keys())
+            records.append(dict(row))
+            if len(records) >= settings.max_train_rows:
+                break
+        columns = columns_seen or []
+
+    if not records:
+        raise ValueError("Dataset is empty")
+
+    if target_column not in columns:
+        raise ValueError(f"Target column '{target_column}' not found in dataset")
+
+    if feature_columns:
+        missing = [c for c in feature_columns if c not in columns]
+        if missing:
+            raise ValueError(f"Feature columns not found: {', '.join(missing)}")
+        selected_features = feature_columns
+    else:
+        first = records[0]
+        selected_features = []
+        for name in columns:
+            if name == target_column:
+                continue
+            try:
+                float(first.get(name))  # type: ignore[arg-type]
+                selected_features.append(name)
             except (TypeError, ValueError):
                 continue
-        if not rows:
-            raise ValueError("No valid numeric rows found in dataset")
-        return rows, selected_features
+
+    if not selected_features:
+        raise ValueError("No numeric feature columns available")
+
+    names = [*selected_features, target_column]
+    rows: list[list[float]] = []
+    for record in records[: settings.max_train_rows]:
+        values = [record.get(name) for name in names]  # type: ignore[union-attr]
+        if any(v is None for v in values):
+            continue
+        try:
+            rows.append([float(v) for v in values])  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+
+    if not rows:
+        raise ValueError("No valid numeric rows found in dataset")
+    return rows, selected_features
 
 
 # --- single-node local training (ProcessPoolExecutor) --------------------
@@ -276,39 +209,23 @@ def _run_local(model_type, lr, epochs, weights, shards, local_cores):
 
 
 def _aggregate_with_ray(results: list[dict]) -> Optional[dict]:
-    """Run weighted FedAvg on the master through a local Ray runtime."""
-    valid = [result for result in results if result and result.get("n", 0) > 0 and result.get("w")]
+    """Weighted FedAvg — pure Python, no Ray required on the master.
+
+    Each shard result ``{"w": [...], "b": float, "n": int}`` is weighted by
+    its row count and summed to produce the global parameter vector.
+    """
+    valid = [r for r in results if r and r.get("n", 0) > 0 and r.get("w")]
     if not valid:
         return None
 
-    import ray
-
-    if not ray.is_initialized():
-        ray.init(
-            num_cpus=max(1, min(len(valid), 8)),
-            include_dashboard=False,
-            ignore_reinit_error=True,
-            logging_level="ERROR",
-        )
-
-    total = sum(result["n"] for result in valid)
-
-    @ray.remote
-    def weighted_update(result: dict, fraction: float) -> tuple[list[float], float]:
-        return (
-            [fraction * value for value in result["w"]],
-            fraction * float(result.get("b", 0.0)),
-        )
-
-    partials = ray.get(
-        [weighted_update.remote(result, result["n"] / total) for result in valid]
-    )
-    weights = [0.0] * len(partials[0][0])
+    total = sum(r["n"] for r in valid)
+    weights = [0.0] * len(valid[0]["w"])
     bias = 0.0
-    for partial_weights, partial_bias in partials:
-        for index, value in enumerate(partial_weights):
-            weights[index] += value
-        bias += partial_bias
+    for result in valid:
+        fraction = result["n"] / total
+        for idx, value in enumerate(result["w"]):
+            weights[idx] += fraction * value
+        bias += fraction * float(result.get("b", 0.0))
     return {"w": weights, "b": bias}
 
 
@@ -379,7 +296,7 @@ async def run_training(run_id: uuid.UUID) -> None:
         mode = run.mode
         rounds = run.rounds
         hyper = json.loads(run.hyperparams_json or "{}")
-        engine = hyper.get("engine", "spark")
+        engine = hyper.get("engine", "python")
 
     lr = float(hyper.get("learning_rate", 0.01))
     epochs = int(hyper.get("epochs", 10))

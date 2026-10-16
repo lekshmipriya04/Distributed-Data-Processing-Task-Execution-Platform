@@ -1,113 +1,216 @@
 // ---------------------------------------------------------------------------
-// SSH resource-sharing + parallel task-execution API client.
+// ssh-executor API client. Mirrors services/ssh-executor/schemas.py and
+// docs/API_CONTRACT.md exactly -- keep the three in sync.
 //
-// Goes through apiRequest so the Bearer token is attached; every ssh-executor
-// endpoint requires auth. Credentials are only ever sent on connect/register
-// requests and are never returned by the API.
+// Every call goes through apiRequest so the Bearer token is attached. The
+// only secret ever sent is the one-time onboarding password (provision /
+// resecure); no response contains a password or a private key.
 // ---------------------------------------------------------------------------
-import { apiRequest, getAuthHeaders } from './client';
+import { apiRequest, downloadFile } from './client';
 
-export type AuthType = 'password' | 'private_key';
+const BASE = '/api/v1/ssh';
 
+// --- capabilities ----------------------------------------------------------
+/** Capability fields shared by provision + node responses (_CapabilityFields). */
+export interface NodeCapabilities {
+  os_type?: string | null; // linux | macos | windows
+  os_info?: string | null;
+  detected_cpu: number;
+  detected_memory_gb: number;
+  detected_gpu: number;
+  gpu_vendor?: string | null;
+  gpu_backend?: string | null;
+  gpu_model?: string | null;
+  gpu_count: number;
+  gpu_memory_gb?: number | null;
+  python_version?: string | null;
+  /** Languages already present on the node: {runtime_id: version}. */
+  runtimes: Record<string, string>;
+  execution_backend: string;
+  resource_enforcement: string;
+}
+
+// --- onboarding (password -> managed key) ----------------------------------
 export interface NodeConnectRequest {
   host: string;
   port: number;
   username: string;
-  auth_type: AuthType;
-  password?: string;
-  private_key?: string;
 }
 
-export interface NodeDetectResponse {
-  status: string;
-  detected_cpu: number;
-  detected_memory_gb: number;
-  detected_gpu: number;
-  os_info?: string | null;
-  os_type?: string | null;
-  gpu_vendor?: string | null;
-  gpu_backend?: string | null;
-  gpu_model?: string | null;
-  python_version?: string | null;
-  java_version?: string | null;
-  spark_version?: string | null;
-  ray_version?: string | null;
-  resource_enforcement?: string | null;
-  host_key_type?: string | null;
-  host_key_b64?: string | null;
-  fingerprint?: string | null;
-  message?: string | null;
+export interface NodeConnectResponse {
+  host: string;
+  port: number;
+  username: string;
+  host_key_type: string;
+  fingerprint: string; // "SHA256:..."
+  onboarding_token: string;
+  already_registered: boolean;
 }
 
-export interface NodeRegisterRequest extends NodeConnectRequest {
-  name: string;
-  host_key_type?: string | null;
-  host_key_b64?: string | null;
-  detected_cpu: number;
-  detected_memory_gb: number;
-  detected_gpu: number;
-  os_info?: string | null;
-  os_type?: string | null;
-  gpu_vendor?: string | null;
-  gpu_backend?: string | null;
-  gpu_model?: string | null;
-  python_version?: string | null;
-  java_version?: string | null;
-  spark_version?: string | null;
-  ray_version?: string | null;
-  resource_enforcement?: string | null;
+export interface NodeProvisionRequest {
+  onboarding_token: string;
+  password: string;
+}
+
+export interface NodeManualProvisionRequest {
+  onboarding_token: string;
+}
+
+export interface NodeManualProvisionResponse {
+  provision_id: string;
+  public_key: string;
+  install_command_posix: string;
+  install_command_windows: string;
+  expires_at: string;
+}
+
+export interface NodeProvisionResponse extends NodeCapabilities {
+  provision_id: string;
+  host: string;
+  port: number;
+  username: string;
+  fingerprint: string;
+  expires_at: string;
+}
+
+export interface NodeRegisterRequest {
+  provision_id: string;
+  name: string; // empty -> host
   allocated_cpu: number;
   allocated_memory_gb: number;
 }
 
-export interface NodeResponse {
+export interface NodeResecureRequest {
+  password?: string | null;
+}
+
+export interface NodeUpdateRequest {
+  name?: string | null;
+  allocated_cpu?: number | null;
+  allocated_memory_gb?: number | null;
+}
+
+export type NodeAuthType = 'managed_key' | 'password' | 'private_key' | string;
+
+export interface NodeResponse extends NodeCapabilities {
   id: string;
   owner_id: string;
   name: string;
   host: string;
   port: number;
   username: string;
-  auth_type: string;
-  detected_cpu: number;
-  detected_memory_gb: number;
-  detected_gpu: number;
-  os_info?: string | null;
-  os_type?: string | null;
-  gpu_vendor?: string | null;
-  gpu_model?: string | null;
-  python_version?: string | null;
-  java_version?: string | null;
-  spark_version?: string | null;
-  ray_version?: string | null;
-  resource_enforcement?: string | null;
-  health_status?: string | null;
+  /** managed_key | password (legacy) | private_key (legacy) */
+  auth_type: NodeAuthType;
+  fingerprint?: string | null;
+  key_created_at?: string | null;
   allocated_cpu: number;
   allocated_memory_gb: number;
   status: string;
+  health_status: string;
+  last_health_check?: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface BatchResponse {
-  id: string;
-  owner_id: string;
-  status: string;
+export interface NodeListResponse {
+  items: NodeResponse[];
   total: number;
-  completed: number;
-  failed: number;
-  created_at: string;
+}
+
+export interface NodeDeleteResponse {
+  deleted: boolean;
+  /** False when the node was unreachable and the authorized_keys line remains. */
+  key_removed: boolean;
+  message: string;
+}
+
+export interface NodeCapacityResponse {
+  node_id: string;
+  name: string;
+  status: string;
+  cpu_total: number;
+  cpu_reserved: number;
+  cpu_available: number;
+  memory_total_gb: number;
+  memory_reserved_gb: number;
+  memory_available_gb: number;
+  [extra: string]: unknown;
+}
+
+// --- languages / runtimes --------------------------------------------------
+export interface RuntimeInfo {
+  id: string; // e.g. "python", "node", "go", "c", "custom"
+  name: string;
+  filename: string;
+  kind: 'interpreted' | 'compiled' | 'custom' | string;
+  example_code: string;
+  windows_supported: boolean;
+  /** Online nodes of the caller that have this runtime right now. */
+  available_node_ids: string[];
+}
+
+export interface RuntimeListResponse {
+  items: RuntimeInfo[];
+}
+
+// --- task batches ------------------------------------------------------------
+export type BatchStatus =
+  | 'pending'
+  | 'running'
+  | 'cancelling'
+  | 'cancelled'
+  | 'completed'
+  | 'completed_with_errors'
+  | 'failed';
+
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export const TERMINAL_BATCH_STATUSES: readonly string[] = ['completed', 'completed_with_errors', 'failed', 'cancelled'];
+
+export interface BatchCreateRequest {
+  code: string;
+  inputs: string[];
+  node_ids: string[];
+  runtime: string;
+  custom_command?: string | null;
+  custom_filename?: string | null;
+  cpu_per_task: number;
+  timeout_seconds?: number | null;
 }
 
 export interface TaskResponse {
   id: string;
   batch_id: string;
   seq: number;
-  node_id?: string | null;
-  status: string;
-  exit_code?: number | null;
-  stdout?: string | null;
-  stderr?: string | null;
+  node_id: string | null;
+  status: TaskStatus | string;
+  exit_code: number | null;
+  stdout: string | null;
+  stderr: string | null;
   attempts: number;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+}
+
+export interface BatchResponse {
+  id: string;
+  owner_id: string;
+  runtime: string;
+  status: BatchStatus | string;
+  message?: string | null;
+  total: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  cpu_per_task: number;
+  timeout_seconds: number;
+  created_at: string;
+  finished_at?: string | null;
+}
+
+export interface BatchListResponse {
+  items: BatchResponse[];
 }
 
 export interface BatchTasksResponse {
@@ -115,10 +218,10 @@ export interface BatchTasksResponse {
   tasks: TaskResponse[];
 }
 
-// --- distributed ML training --------------------------------------------
+// --- distributed ML training -------------------------------------------------
 export type TrainModelType = 'linear_regression' | 'logistic_regression' | 'cnn';
-// Master-side engine. Workers always execute the generated Python script.
-export type TrainEngine = 'spark' | 'ray';
+/** Master-side engine. Workers always execute a stdlib-only Python script. */
+export type TrainEngine = 'python';
 export type TrainMode = 'single' | 'multi';
 
 export interface TrainRequest {
@@ -132,8 +235,8 @@ export interface TrainRequest {
   learning_rate: number;
   epochs: number;
   rounds: number;
-  num_classes?: number;
-  node_ids?: string[];
+  num_classes: number;
+  node_ids: string[];
 }
 
 export interface TrainShardInfo {
@@ -161,71 +264,74 @@ export interface TrainRunResponse {
 }
 
 export const sshApi = {
-  connectNode: (body: NodeConnectRequest) =>
-    apiRequest<NodeDetectResponse>('/api/v1/ssh/nodes/connect', { method: 'POST', body }),
+  // --- onboarding ----------------------------------------------------------
+  connect: (body: NodeConnectRequest) =>
+    apiRequest<NodeConnectResponse>(`${BASE}/nodes/connect`, { method: 'POST', body }),
 
-  registerNode: (body: NodeRegisterRequest) =>
-    apiRequest<NodeResponse>('/api/v1/ssh/nodes', { method: 'POST', body }),
+  provision: (body: NodeProvisionRequest) =>
+    apiRequest<NodeProvisionResponse>(`${BASE}/nodes/provision`, { method: 'POST', body }),
 
-  listNodes: () =>
-    apiRequest<{ items: NodeResponse[]; total: number }>('/api/v1/ssh/nodes'),
+  provisionManual: (body: NodeManualProvisionRequest) =>
+    apiRequest<NodeManualProvisionResponse>(`${BASE}/nodes/provision/manual`, { method: 'POST', body }),
+
+  verifyProvision: (provisionId: string) =>
+    apiRequest<NodeProvisionResponse>(`${BASE}/nodes/provision/${provisionId}/verify`, { method: 'POST' }),
+
+  register: (body: NodeRegisterRequest) =>
+    apiRequest<NodeResponse>(`${BASE}/nodes`, { method: 'POST', body }),
+
+  // --- lifecycle -------------------------------------------------------------
+  listNodes: () => apiRequest<NodeListResponse>(`${BASE}/nodes`),
+
+  getNode: (id: string) => apiRequest<NodeResponse>(`${BASE}/nodes/${id}`),
+
+  updateNode: (id: string, body: NodeUpdateRequest) =>
+    apiRequest<NodeResponse>(`${BASE}/nodes/${id}`, { method: 'PATCH', body }),
 
   deleteNode: (id: string) =>
-    apiRequest<null>(`/api/v1/ssh/nodes/${id}`, { method: 'DELETE' }),
+    apiRequest<NodeDeleteResponse>(`${BASE}/nodes/${id}`, { method: 'DELETE' }),
 
-  createBatch: (body: { code: string; inputs: string[]; node_ids?: string[]; runtime?: string }) =>
-    apiRequest<BatchResponse>('/api/v1/ssh/batches', { method: 'POST', body }),
+  healthCheck: (id: string) =>
+    apiRequest<NodeResponse>(`${BASE}/nodes/${id}/health-check`, { method: 'POST' }),
 
-  getBatchTasks: (id: string) =>
-    apiRequest<BatchTasksResponse>(`/api/v1/ssh/batches/${id}/tasks`),
+  refresh: (id: string) =>
+    apiRequest<NodeResponse>(`${BASE}/nodes/${id}/refresh`, { method: 'POST' }),
 
+  rotateKey: (id: string) =>
+    apiRequest<NodeResponse>(`${BASE}/nodes/${id}/rotate-key`, { method: 'POST' }),
+
+  resecure: (id: string, body: NodeResecureRequest) =>
+    apiRequest<NodeResponse>(`${BASE}/nodes/${id}/resecure`, { method: 'POST', body }),
+
+  capacity: (id: string) => apiRequest<NodeCapacityResponse>(`${BASE}/nodes/${id}/capacity`),
+
+  // --- runtimes + batches ----------------------------------------------------
+  listRuntimes: () => apiRequest<RuntimeListResponse>(`${BASE}/runtimes`),
+
+  createBatch: (body: BatchCreateRequest) =>
+    apiRequest<BatchResponse>(`${BASE}/batches`, { method: 'POST', body }),
+
+  listBatches: () => apiRequest<BatchListResponse>(`${BASE}/batches`),
+
+  getBatch: (id: string) => apiRequest<BatchResponse>(`${BASE}/batches/${id}`),
+
+  getBatchTasks: (id: string) => apiRequest<BatchTasksResponse>(`${BASE}/batches/${id}/tasks`),
+
+  cancelBatch: (id: string) =>
+    apiRequest<BatchResponse>(`${BASE}/batches/${id}/cancel`, { method: 'POST' }),
+
+  // --- training ----------------------------------------------------------------
   startTraining: (body: TrainRequest) =>
-    apiRequest<TrainRunResponse>('/api/v1/ssh/train', { method: 'POST', body }),
+    apiRequest<TrainRunResponse>(`${BASE}/train`, { method: 'POST', body }),
 
-  getTrainingRun: (id: string) =>
-    apiRequest<TrainRunResponse>(`/api/v1/ssh/train/${id}`),
+  listTrainingRuns: () => apiRequest<TrainRunResponse[]>(`${BASE}/train`),
 
-  listTrainingRuns: () =>
-    apiRequest<TrainRunResponse[]>('/api/v1/ssh/train'),
+  getTrainingRun: (id: string) => apiRequest<TrainRunResponse>(`${BASE}/train/${id}`),
 
-  downloadTrainingModel: async (id: string) => {
-    const response = await fetch(`/api/v1/ssh/train/${id}/model`, {
-      headers: getAuthHeaders(),
-    });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(detail || 'Failed to download model');
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `model-${id}.onnx`;
-    link.style.display = 'none';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  },
+  downloadTrainingModel: (id: string) => downloadFile(`${BASE}/train/${id}/model`, `model-${id}.onnx`),
 
-  downloadTrainingData: async (id: string) => {
-    const response = await fetch(`/api/v1/ssh/train/${id}/data`, { headers: getAuthHeaders() });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(detail || 'Failed to download training data');
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `train_data-${id}.json`;
-    link.style.display = 'none';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  },
+  downloadTrainingData: (id: string) => downloadFile(`${BASE}/train/${id}/data`, `train_data-${id}.json`),
 
   deleteTrainingRun: (id: string) =>
-    apiRequest<null>(`/api/v1/ssh/train/${id}`, { method: 'DELETE' }),
+    apiRequest<null>(`${BASE}/train/${id}`, { method: 'DELETE' }),
 };

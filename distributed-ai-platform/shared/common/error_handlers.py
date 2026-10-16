@@ -6,14 +6,25 @@ avoid leaking internals (stack details, file paths, DB/driver messages) to
 clients, only echoes the exception string as ``detail`` outside production.
 """
 import logging
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from shared.common.config import get_base_settings
 from shared.common.exceptions import PlatformException
-from shared.schemas.pipeline import ErrorResponse
 
 logger = logging.getLogger(__name__)
+
+
+class ErrorResponse(BaseModel):
+    """JSON body returned by the shared exception handlers."""
+
+    error_code: str
+    message: str
+    detail: Optional[Any] = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 async def platform_exception_handler(request: Request, exc: PlatformException) -> JSONResponse:

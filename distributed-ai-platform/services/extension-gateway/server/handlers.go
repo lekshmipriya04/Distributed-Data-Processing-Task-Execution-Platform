@@ -3,6 +3,15 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
+	"strings"
+)
+
+var (
+	// runtimeIDPattern is a syntactic check only; whether the runtime exists
+	// (GET /runtimes) and is detected on a selected node is ssh-executor's call.
+	runtimeIDPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9_.+-]{0,31}$`)
+	customFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -62,9 +71,8 @@ func (s *Server) handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "invalid_body", "Request body is not valid JSON")
 		return
 	}
-	if req.Runtime != "python" && req.Runtime != "spark" && req.Runtime != "ray" {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_runtime",
-			"runtime must be one of python, spark, ray")
+	if code, msg := validateExecutionRequest(&req); code != "" {
+		s.writeError(w, r, http.StatusBadRequest, code, msg)
 		return
 	}
 	exec, err := s.cfg.Store.CreateExecution(r.Context(), req)
@@ -73,4 +81,56 @@ func (s *Server) handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusCreated, exec)
+}
+
+func (s *Server) handleCancelExecution(w http.ResponseWriter, r *http.Request) {
+	exec, err := s.cfg.Store.CancelExecution(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeStoreError(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, exec)
+}
+
+func (s *Server) handleListRuntimes(w http.ResponseWriter, r *http.Request) {
+	rts, err := s.cfg.Store.ListRuntimes(r.Context())
+	if err != nil {
+		s.writeStoreError(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"items": rts, "total": len(rts)})
+}
+
+// validateExecutionRequest does cheap structural checks so obviously bad
+// requests fail fast with a clear message. It returns ("", "") when valid.
+// Any runtime id is accepted here; ssh-executor rejects unknown runtimes and
+// runtimes not detected on any selected node (surfaced as 400 with its detail).
+func validateExecutionRequest(req *ExecutionRequest) (code, msg string) {
+	req.Runtime = strings.TrimSpace(req.Runtime)
+	switch {
+	case !runtimeIDPattern.MatchString(req.Runtime):
+		return "invalid_runtime", "runtime must be a runtime id from GET /runtimes (e.g. python, bash, node, go, custom)"
+	case strings.TrimSpace(req.Code) == "":
+		return "invalid_code", "code must not be empty"
+	case req.CPUPerTask < 0:
+		return "invalid_cpu", "cpuPerTask must be >= 1 (or omitted)"
+	case req.TimeoutSeconds < 0:
+		return "invalid_timeout", "timeoutSeconds must be >= 1 (or omitted)"
+	}
+	for _, id := range req.NodeIDs {
+		if strings.TrimSpace(id) == "" {
+			return "invalid_node_ids", "nodeIds must not contain empty ids"
+		}
+	}
+	if req.Runtime == "custom" {
+		if !strings.Contains(req.CustomCommand, "{file}") {
+			return "invalid_custom_command", "customCommand must contain {file} for the custom runtime"
+		}
+		if req.CustomFilename != "" && !customFilenamePattern.MatchString(req.CustomFilename) {
+			return "invalid_custom_filename", "customFilename must match ^[A-Za-z0-9._-]{1,128}$"
+		}
+	} else if req.CustomCommand != "" || req.CustomFilename != "" {
+		return "invalid_custom_command", "customCommand/customFilename are only allowed with runtime custom"
+	}
+	return "", ""
 }

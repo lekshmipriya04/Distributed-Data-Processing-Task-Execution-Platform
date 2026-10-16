@@ -1,142 +1,40 @@
 // ---------------------------------------------------------------------------
-// Shared types. Mirrors shared/schemas/pipeline.py and each service's own
-// schemas/*.py as closely as possible so payloads sent from the UI match
-// exactly what the backend Pydantic models expect.
+// Shared UI types. ssh-executor shapes live in api/ssh.ts (mirrors
+// services/ssh-executor/schemas.py); storage-service shapes live here
+// (mirrors services/storage-service/schemas.py).
 // ---------------------------------------------------------------------------
 
 export type JobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
-
-export type ProblemType = 'classification' | 'regression' | 'clustering';
-
-export type AlgorithmValue =
-  | 'logistic_regression'
-  | 'random_forest_classifier'
-  | 'gbt_classifier'
-  | 'linear_regression'
-  | 'random_forest_regressor'
-  | 'gbt_regressor'
-  | 'kmeans';
-
-export type ModelAlias = 'candidate-best' | 'staging' | 'production' | 'archived';
 
 // --- Storage Service -------------------------------------------------------
 export interface Dataset {
   id: string;
   name: string;
-  description?: string;
+  description?: string | null;
   hdfs_path: string;
   file_format: string;
-  validation_status: string;
-  schema_json?: string | null;
   row_count?: number | null;
   column_count?: number | null;
+  size_bytes?: number | null;
+  /**
+   * JSON string. Image datasets record
+   * `{columns, feature_columns, target_column, num_classes, class_names, image: {side, channels}}`.
+   * Tabular uploads may leave it empty.
+   */
+  schema_json?: string | null;
+  validation_status: string;
+  validation_message?: string | null;
   created_at: string;
+  updated_at?: string;
+  created_by?: string | null;
 }
 
-// --- Cluster / compute configuration ---------------------------------------
-// NOTE: There is no backend field for any of this today. TrainingConfig /
-// PreprocessingConfig (shared/schemas/pipeline.py) do not declare executor
-// cores, node counts, or IPs. This is captured here, persisted locally, and
-// attached to outgoing requests as `cluster_config` so the *shape* is ready
-// -- but until the backend schemas + job-submission services are extended to
-// read it and turn it into Spark `conf` (spark.executor.cores,
-// spark.cores.max, spark.master targeting a specific host, etc.), the
-// backend will silently ignore this field (Pydantic's default `extra`
-// behavior drops unknown top-level keys rather than erroring).
-export interface ClusterNode {
-  id: string;
-  ip: string;
-  cores: number;
-}
-
-export interface ClusterConfig {
-  mode: 'single' | 'multi';
-  // single-machine mode
-  localCores: number;
-  // multi-machine mode
-  nodes: ClusterNode[];
-}
-
-// --- Preprocessing Service ---------------------------------------------------
-export interface PreprocessingConfig {
-  numeric_features: string[];
-  categorical_features: string[];
-  target_column: string | null;
-  drop_columns: string[];
-  null_strategy: 'drop' | 'mean' | 'median' | 'mode';
-  scaler_type: 'standard' | 'minmax';
-  train_ratio: number;
-  validation_ratio: number;
-  test_ratio: number;
-  random_seed: number;
-}
-
-export interface PreprocessingJobRecord {
-  job_id: string;
-  status: JobStatus;
-  output_path?: string;
-  error_message?: string;
-}
-
-// --- Training Service -------------------------------------------------------
-export interface HyperparameterGrid {
-  algorithm: AlgorithmValue;
-  params: Record<string, number[]>;
-}
-
-export interface TrainingConfig {
-  problem_type: ProblemType;
-  algorithms: HyperparameterGrid[];
-  cv_folds: number;
-  primary_metric: string;
-  higher_is_better: boolean;
-  parallelism: number;
-}
-
-export interface TrainingJobRecord {
-  job_id: string;
-  status: JobStatus;
-  mlflow_run_id?: string;
-  error_message?: string;
-}
-
-// --- Evaluation Service -------------------------------------------------------
-export interface EvaluationResult {
-  id: string;
-  dataset_id: string;
-  model_uri: string;
-  status: JobStatus;
-  metrics?: Record<string, number>;
-  error_message?: string;
-  created_at: string;
-}
-
-export interface MetricPoint {
-  step: number;
-  value: number;
-  timestamp?: number;
-}
-
-export interface ModelMetricHistory {
-  run_id: string;
-  metric_name: string;
-  history: MetricPoint[];
-}
-
-export interface ModelEvaluationSummary {
-  run_id: string;
-  model_name?: string;
-  problem_type?: ProblemType;
-  metrics: Record<string, number>;
-  params?: Record<string, string>;
-  tags?: Record<string, string>;
-  status: string;
-  created_at?: string;
-}
-
-// --- Registry Service -------------------------------------------------------
-export interface RegisterModelResponse {
-  model_name: string;
-  version: number;
-  status: string;
+/** Parsed form of Dataset.schema_json (all fields optional). */
+export interface DatasetSchema {
+  columns?: string[];
+  feature_columns?: string[];
+  target_column?: string;
+  num_classes?: number;
+  class_names?: string[];
+  image?: { side: number; channels: number };
 }

@@ -12,14 +12,16 @@ import (
 	"time"
 )
 
-// TokenValidator verifies a bearer token. The production validator checks the
-// platform JWT signature/expiry; the default dev validator only requires a
-// non-empty token (documented, not for production).
+// TokenValidator verifies a bearer token. Production uses NewHS256Validator
+// (same secret and rules as the Python services); DevValidator only requires a
+// non-empty token and is for local development without JWT_SECRET.
 type TokenValidator func(token string) error
 
 // Config configures the server.
 type Config struct {
-	Store     Store
+	Store Store
+	// Validate checks bearer tokens. nil means DevValidator (tests/local dev
+	// only); main.go always sets it explicitly.
 	Validate  TokenValidator
 	Logger    *slog.Logger
 	RequestID func() string
@@ -37,7 +39,7 @@ func New(cfg Config) *Server {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.Validate == nil {
-		cfg.Validate = devValidator
+		cfg.Validate = DevValidator
 	}
 	if cfg.RequestID == nil {
 		cfg.RequestID = randomRequestID
@@ -57,21 +59,33 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /cluster/status", s.handleClusterStatus)
 	s.mux.HandleFunc("GET /nodes", s.handleListNodes)
 	s.mux.HandleFunc("GET /nodes/{id}", s.handleGetNode)
+	s.mux.HandleFunc("GET /runtimes", s.handleListRuntimes)
 	s.mux.HandleFunc("GET /executions", s.handleListExecutions)
 	s.mux.HandleFunc("POST /executions", s.handleCreateExecution)
 	s.mux.HandleFunc("GET /executions/{id}", s.handleGetExecution)
+	s.mux.HandleFunc("POST /executions/{id}/cancel", s.handleCancelExecution)
 }
 
 // -- middleware ----------------------------------------------------------
 
 type ctxKey string
 
-const requestIDKey ctxKey = "requestID"
+const (
+	requestIDKey ctxKey = "requestID"
+	tokenKey     ctxKey = "bearerToken"
+)
+
+// TokenFromContext returns the caller's validated bearer token, which
+// UpstreamStore forwards so ssh-executor scopes data to the token's subject.
+func TokenFromContext(ctx context.Context) string {
+	tok, _ := ctx.Value(tokenKey).(string)
+	return tok
+}
 
 func (s *Server) withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-Id")
-		if id == "" {
+		if id == "" || len(id) > 128 {
 			id = s.cfg.RequestID()
 		}
 		w.Header().Set("X-Request-Id", id)
@@ -80,7 +94,9 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 	})
 }
 
-// withAuth enforces a bearer token on everything except /health.
+// withAuth enforces a valid bearer token on everything except /health; a
+// missing or invalid token is always 401. The validated token is stored in the
+// request context for forwarding upstream.
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
@@ -95,11 +111,18 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			return
 		}
 		token := strings.TrimSpace(strings.TrimPrefix(auth, prefix))
+		if token == "" {
+			s.writeError(w, r, http.StatusUnauthorized, "missing_bearer_token",
+				"Authorization: Bearer <token> is required")
+			return
+		}
 		if err := s.cfg.Validate(token); err != nil {
+			s.cfg.Logger.Info("auth_rejected", "reason", err.Error(), "path", r.URL.Path)
 			s.writeError(w, r, http.StatusUnauthorized, "invalid_token", "Authentication failed")
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), tokenKey, token)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -118,7 +141,15 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, 
 
 // writeStoreError maps store errors to HTTP without leaking internals.
 func (s *Server) writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	var se *StatusError
 	switch {
+	case errors.As(err, &se):
+		if se.Status >= 500 {
+			s.cfg.Logger.Error("store_error", "status", se.Status, "code", se.Code, "err", err.Error())
+		}
+		s.writeError(w, r, se.Status, se.Code, se.Message)
+	case errors.Is(err, context.DeadlineExceeded):
+		s.writeError(w, r, http.StatusGatewayTimeout, "upstream_timeout", "The backend did not respond in time")
 	case errors.Is(err, ErrNotFound):
 		s.writeError(w, r, http.StatusNotFound, "not_found", "Resource not found")
 	case errors.Is(err, ErrNotImplemented):
@@ -130,11 +161,13 @@ func (s *Server) writeStoreError(w http.ResponseWriter, r *http.Request, err err
 	}
 }
 
-func devValidator(token string) error {
+// DevValidator accepts any non-empty token without verifying it. Local
+// development only (no JWT_SECRET, ENVIRONMENT != production); ssh-executor
+// still verifies the forwarded token itself.
+func DevValidator(token string) error {
 	if strings.TrimSpace(token) == "" {
 		return errors.New("empty token")
 	}
-	// TODO: verify platform JWT signature + expiry with the configured key.
 	return nil
 }
 
