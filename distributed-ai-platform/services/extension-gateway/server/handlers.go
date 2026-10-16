@@ -12,6 +12,8 @@ var (
 	// (GET /runtimes) and is detected on a selected node is ssh-executor's call.
 	runtimeIDPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9_.+-]{0,31}$`)
 	customFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+	executionPolicies = map[string]bool{"safe_background": true, "balanced": true, "max_available": true}
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -83,6 +85,45 @@ func (s *Server) handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusCreated, exec)
 }
 
+func (s *Server) handleUpdateNodeSlice(w http.ResponseWriter, r *http.Request) {
+	var req NodeSliceRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_body", "Request body is not valid JSON")
+		return
+	}
+	if code, msg := validateNodeSliceRequest(req); code != "" {
+		s.writeError(w, r, http.StatusBadRequest, code, msg)
+		return
+	}
+	node, err := s.cfg.Store.UpdateNodeSlice(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		s.writeStoreError(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, node)
+}
+
+// validateNodeSliceRequest rejects empty or negative slices; upper bounds
+// (<= detected) are enforced by ssh-executor.
+func validateNodeSliceRequest(req NodeSliceRequest) (code, msg string) {
+	switch {
+	case req.CPUAllocatable == nil && req.MemoryAllocatableGB == nil &&
+		req.GPUAllocatableCount == nil && req.GPUMemoryAllocatableGB == nil:
+		return "invalid_slice", "at least one slice field is required"
+	case req.CPUAllocatable != nil && *req.CPUAllocatable < 1:
+		return "invalid_cpu", "cpuAllocatable must be >= 1"
+	case req.MemoryAllocatableGB != nil && *req.MemoryAllocatableGB <= 0:
+		return "invalid_memory", "memoryAllocatableGb must be > 0"
+	case req.GPUAllocatableCount != nil && *req.GPUAllocatableCount < 0:
+		return "invalid_gpu", "gpuAllocatableCount must be >= 0"
+	case req.GPUMemoryAllocatableGB != nil && *req.GPUMemoryAllocatableGB < 0:
+		return "invalid_gpu", "gpuMemoryAllocatableGb must be >= 0"
+	}
+	return "", ""
+}
+
 func (s *Server) handleCancelExecution(w http.ResponseWriter, r *http.Request) {
 	exec, err := s.cfg.Store.CancelExecution(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -116,6 +157,8 @@ func validateExecutionRequest(req *ExecutionRequest) (code, msg string) {
 		return "invalid_cpu", "cpuPerTask must be >= 1 (or omitted)"
 	case req.TimeoutSeconds < 0:
 		return "invalid_timeout", "timeoutSeconds must be >= 1 (or omitted)"
+	case req.ExecutionPolicy != "" && !executionPolicies[req.ExecutionPolicy]:
+		return "invalid_execution_policy", "executionPolicy must be safe_background, balanced or max_available"
 	}
 	for _, id := range req.NodeIDs {
 		if strings.TrimSpace(id) == "" {

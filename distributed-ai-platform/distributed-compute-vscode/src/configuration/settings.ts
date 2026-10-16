@@ -3,7 +3,7 @@
 // coercion live in one place. No secrets are ever read from settings.
 
 import * as vscode from 'vscode';
-import { isRuntime, type Runtime } from '../models/execution';
+import { isExecutionPolicy, isRuntime, type ExecutionPolicy, type Runtime } from '../models/execution';
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 
@@ -21,6 +21,7 @@ export interface Settings {
   enableCodeLens: boolean;
   defaultRuntime: Runtime;
   defaultTimeoutSeconds: number;
+  executionPolicy: ExecutionPolicy;
   showNotifications: boolean;
   logLevel: LogLevel;
 }
@@ -40,6 +41,9 @@ export function readSettings(): Settings {
   const rawRuntime = c.get<string>('defaultRuntime', 'python');
   const defaultRuntime: Runtime = isRuntime(rawRuntime) ? rawRuntime : 'python';
 
+  const rawPolicy = c.get<string>('executionPolicy', 'safe_background');
+  const executionPolicy: ExecutionPolicy = isExecutionPolicy(rawPolicy) ? rawPolicy : 'safe_background';
+
   const rawLog = c.get<string>('logLevel', 'info');
   const logLevel = (LOG_LEVELS.has(rawLog) ? rawLog : 'info') as LogLevel;
 
@@ -50,6 +54,7 @@ export function readSettings(): Settings {
     enableCodeLens: c.get<boolean>('enableCodeLens', true),
     defaultRuntime,
     defaultTimeoutSeconds,
+    executionPolicy,
     showNotifications: c.get<boolean>('showNotifications', true),
     logLevel,
   };

@@ -1,11 +1,82 @@
 # Implementation Plan — Agentless SSH Compute Platform
 
-Status: plan only, nothing below is implemented yet.
-Verified against the repository at commit `dc0dc05` (branch `development`) on 2026-10-16.
-Every "current state" claim cites a file you can open to check it.
+Originally written as a plan against commit `dc0dc05` on 2026-10-16. The
+**Status** section below records what was built. Sections 0–10 are the
+original plan, kept for traceability. Where the code took a different
+decision (any-language executor, no Spark/Ray), the Status section says so.
 
-Supersedes `docs/SSH_PLATFORM_IMPLEMENTATION_PLAN.md`, which still assumes the
-removed services (worker-registry, scheduler, resource-manager) exist.
+`docs/SSH_PLATFORM_IMPLEMENTATION_PLAN.md` was superseded by this plan and
+has been deleted.
+
+---
+
+## Status (2026-10-17, branch `development`, uncommitted working tree on top of `52b210f`)
+
+### Decisions that changed the plan
+- **Spark and Ray are gone everywhere**: master, workers, the ssh-executor
+  image (no JVM), the frontend, the VS Code extension and the docs (`52b210f`
+  plus follow-ups). Training is pure Python on the master, and workers run a
+  stdlib-only script. `TrainRequest.engine` accepts only `python`.
+- The **Task Executor runs any language already present on the worker** (29
+  registry runtimes plus `custom`), not just Python as Phase 4 proposed.
+  Nothing is installed. A runtime is offered only where it was detected.
+- **GPU slicing** was added: per-node `allocated_gpu_count` and
+  `allocated_gpu_memory_gb`. It is enforced only for Python tasks on workers
+  where PyTorch is already installed (torch's per-process memory fraction).
+  Everywhere else `CUDA_VISIBLE_DEVICES=""`.
+- **Execution policies** were added: `safe_background` (default, nice 19),
+  `balanced` (10) and `max_available` (0). They change priority only.
+- **Compute-weighted shards** for multi-node training: cores, plus GPU memory
+  only for GPU jobs. The built-in trainer is CPU-only, so today the score is
+  cores only.
+
+### Phase status
+| Phase | State | Notes |
+|---|---|---|
+| 1 Remove retired architecture | Done | Compose holds api-gateway, storage-service, ssh-executor, extension-gateway, Postgres, HDFS, plus dev-profile SSH providers. Removed services, Livy, MLflow, Spark, `runtime_manager.py`, `resource_controller.py` and the old plan doc are deleted. |
+| 2 Password-only onboarding | Done, except Alembic | connect → provision → register, manual-key fallback, rotate, re-secure, delete-removes-key, SSRF guard, secret enforcement, password redaction in logs. Migrations are a list of additive `ADD COLUMN IF NOT EXISTS` statements, not Alembic. |
+| 3 Sandboxed execution | Done (POSIX), Windows unverified | `TaskExecutor` is the only execution path. Sandboxes are named `dp-exec.<execution_id>.*`, so cancel finds them. The runner kills the process group and then, best effort, escaped processes still in the sandbox. A stale sweep runs too. `ssh_client.py` is still in the tree but unused (D5 partly open). |
+| 4 Task Executor end to end | Done | Any-language runtimes, `GET /runtimes`, list/cancel batches, per-task timing, 400 naming the runtime when no selected online node has it, and the execution policy is stored per batch and shown in the UI. |
+| 5 One allocation path | Done | `SELECT … FOR UPDATE` leases, slots from leases, distinct core slices, training leases, heartbeat, recovery loop. No public lease endpoints. |
+| 6 Training validated | Partly | Unit tests cover sharding, FedAvg, leases and the on-behalf-of dataset read. **No end-to-end run on the dev providers or physical machines is recorded for the pure-Python pipeline.** |
+| 7 Ownership, extension, CI | Done, except CI placement | Datasets are owner-scoped (training reads with `X-On-Behalf-Of`). The Go extension-gateway forwards to ssh-executor and is in Compose. The extension has no Spark/Ray and submits any runtime id. `ci.yml` must move to the git root's `.github/workflows/` to run. |
+
+### Fixed in the final review pass
+- Cancel did not find running tasks. The sandbox name now embeds the execution
+  id, and the cancel/remove globs are no longer quoted.
+- `execution_policy` was not saved on batches.
+- `POST /batches` now returns 400 when no selected online node has the
+  runtime, instead of failing later.
+- Runtimes detected under alternative tool names (`nodejs`, `lua5.4`, …) now
+  run with the name the worker has. Version probes substitute `{tool}`.
+- The `[task timed out]` marker no longer appears twice.
+- Processes that escape the process group with setsid or a double fork are
+  killed when they still live in the sandbox.
+- Training's dataset download now sends `X-On-Behalf-Of`. Without it, storage
+  scoped the read to the service and found no dataset.
+- The ssh-executor image no longer installs a JRE. The leftover Spark/Ray
+  comments, the `SparkJobError` exception and the
+  `java/spark/ray_version` columns are removed.
+- The VS Code extension drops `runSpark`/`runRay` and adds "Run File with
+  Runtime…".
+- Additive columns were added for the GPU slice and the batch execution policy.
+
+### Verification (this pass)
+- `pytest tests -q`: 97 passed, including
+  `test_task_executor_local.py`, which runs the real POSIX sandbox runner on
+  the macOS development host: cancel, setsid escape, timeout and
+  alternative tool names.
+- `make lint` (ruff E9,F + mypy shared/) passes. `frontend`: `npm run build`
+  passes. `distributed-compute-vscode`: `npm test` (31 passed), typecheck, lint
+  and bundle pass.
+- **Not run**: `go test ./...` (no Go toolchain on the review machine), Docker
+  Compose end to end, Postgres-backed tests, Windows, physical remote machines.
+
+### Honest limits
+The sandbox isolates files and processes, **not the kernel**. There is no
+namespace, seccomp or network isolation, and no kernel memory cap. A task that
+leaves its process group *and* the sandbox directory can outlive the job.
+Windows support is written but unverified. On macOS, cores are not pinned.
 
 ---
 
@@ -24,9 +95,11 @@ Three user-facing features, all served by **ssh-executor**:
 1. **Add a worker** with only IP, port, username and password. Key generation,
    key installation and verification all happen on the master. The password is
    used once and never stored.
-2. **Task Executor**: run Python code across workers in parallel.
-3. **Training**: Spark (CSV) or Ray (images) on the master prepares and shards
-   the data. Each worker receives one generated stdlib-only training script and
+2. **Task Executor**: run Python code across workers in parallel. (Built as:
+   any language already present on the worker; see Status.)
+3. **Training**: pure Python on the master prepares and shards the data
+   (originally planned as Spark for CSV and Ray for images; both removed in
+   `52b210f`). Each worker receives one generated stdlib-only training script and
    one data shard in a throwaway sandbox. The sandbox is deleted afterwards.
 
 Worker requirements: a running `sshd` and an existing `python3`. Nothing else is
@@ -44,7 +117,7 @@ installed, and nothing is left behind after a job.
 | OS and capability detection (Linux, macOS, Windows) | `capabilities.py`, `os_adapters/*` |
 | Batch fan-out with per-node semaphores and retry on another node | `dispatcher.py::run_across_nodes` |
 | Training sends only a stdlib script and the shard over stdin, so workers need no packages | `ml_templates.py::generate_remote_script`, `training_orchestrator.py:441-449` |
-| Spark/Ray run **on the master only** (`local[*]`, in-process) | `training_orchestrator.py:_read_spark_rows`, `_read_ray_rows`, `_aggregate_with_ray` |
+| (At `dc0dc05`) Spark/Ray ran on the master only, in-process. Since `52b210f`, training is pure Python: `_read_rows` parses CSV/JSON, and `_fedavg` averages | `training_orchestrator.py:_read_rows`, `_fedavg` |
 | ONNX export of trained models | `onnx_export.py`, `routes.py:407` |
 
 ### 1.2 Verified defects and gaps
@@ -349,9 +422,10 @@ restarting it frees capacity within 60 s.
 
 ## 7. Phase 6 — Training validated
 
-- CSV + Spark-on-master, linear and logistic regression, `mode=multi`, on the
-  two dev providers: completes, shards spread across both nodes, ONNX downloads.
-- Image ZIP + Ray-on-master, CNN: the same checks.
+- CSV, linear and logistic regression, `mode=multi` (pure Python on the
+  master), on the two dev providers: completes, shards spread across both
+  nodes, ONNX downloads.
+- Image ZIP (converted to a pixel CSV by storage-service), CNN: the same checks.
 - Failure cases: one worker powered off mid-round (the shard retries
   elsewhere), every worker down (the run fails with a clear message), host key
   changed (rejected).
@@ -390,7 +464,7 @@ restarting it frees capacity within 60 s.
 Phases 2 and 3 can proceed in parallel after Phase 1.
 
 ## 10. Open decisions for the project owner
-1. Remove Spark-master, Livy and MLflow containers too? (Recommended: yes, see §2.1.)
+1. ~~Remove Spark-master, Livy and MLflow containers too?~~ Resolved: removed, and Spark/Ray removed from master and workers (`52b210f`).
 2. Keep a hidden "bring your own key" option for workers with password SSH
    disabled, or rely only on the copy-paste fallback in §3.3?
 3. Is Windows a must-have worker OS for the first release? It needs real-host

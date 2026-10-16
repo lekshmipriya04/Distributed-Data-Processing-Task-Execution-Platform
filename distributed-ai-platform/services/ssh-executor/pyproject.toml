@@ -24,3 +24,13 @@ dependencies = [
     "numpy==1.26.4",
     "setuptools==69.5.1",
 ]
+
+[project.optional-dependencies]
+# Master-only big-data engine. Installed on the master container so the web
+# dashboard's "spark_ray" engine can run Apache Spark sharding + Ray FedAvg.
+# NEVER installed on worker nodes — workers stay zero-install (no JVM, no Spark,
+# no Ray) and only ever receive a stdlib-only Python script over SSH.
+spark_ray = [
+    "pyspark==3.5.1",
+    "ray[default]==2.31.0",
+]

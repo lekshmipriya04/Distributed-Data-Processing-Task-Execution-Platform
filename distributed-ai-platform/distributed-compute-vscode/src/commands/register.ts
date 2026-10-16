@@ -12,6 +12,7 @@ import { readSettings, updateMasterUrl } from '../configuration/settings';
 import { validateMasterUrl } from '../api/urls';
 import { ApiError } from '../models/http';
 import type { Runtime } from '../models/execution';
+import { gpuPresetGb, hasGpu, type ComputeNode, type NodeSliceRequest } from '../models/node';
 import { buildDefault, validateConfig } from '../configuration/projectConfig';
 
 export interface CommandDeps {
@@ -44,11 +45,11 @@ export function registerCommands(deps: CommandDeps): void {
   reg('distributedCompute.showDiagnostics', () => deps.logger.show());
   reg('distributedCompute.showCluster', () => showCluster(deps));
   reg('distributedCompute.viewNode', (...a) => viewNode(deps, a[0]));
+  reg('distributedCompute.configureSlice', (...a) => configureSlice(deps, a[0]));
 
-  reg('distributedCompute.runPythonFile', () => runActiveFile(deps, undefined));
+  reg('distributedCompute.runPythonFile', () => runActiveFile(deps, 'python'));
   reg('distributedCompute.runDistributed', () => runActiveFile(deps, undefined));
-  reg('distributedCompute.runSpark', () => runActiveFile(deps, 'spark'));
-  reg('distributedCompute.runRay', () => runActiveFile(deps, 'ray'));
+  reg('distributedCompute.runWithRuntime', () => runWithPickedRuntime(deps));
 
   reg('distributedCompute.initProject', () => initProject(deps));
   reg('distributedCompute.validateProject', () => validateProject(deps));
@@ -240,12 +241,135 @@ async function viewNode(deps: CommandDeps, arg: unknown): Promise<void> {
   }
 }
 
+async function configureSlice(deps: CommandDeps, arg: unknown): Promise<void> {
+  const gw = requireGateway(deps);
+  if (!gw) {
+    return;
+  }
+  const id = extractNodeId(arg) ?? (await vscode.window.showInputBox({ title: 'Node id', ignoreFocusOut: true }));
+  if (!id) {
+    return;
+  }
+  let node: ComputeNode;
+  try {
+    node = await gw.getNode(id);
+  } catch (err) {
+    reportError(deps, err, 'Failed to load node details.');
+    return;
+  }
+  const req = await pickSlice(node);
+  if (!req) {
+    return;
+  }
+  try {
+    const updated = await gw.updateNodeSlice(id, req);
+    deps.logger.info('node slice updated', { id, ...req });
+    void vscode.window.showInformationMessage(`Updated slice for ${updated.name || updated.id}.`);
+    deps.refreshAll();
+  } catch (err) {
+    reportError(deps, err, 'Failed to update the node slice.');
+  }
+}
+
+/** Quick-pick flow: GPU VRAM preset (when a GPU exists), then cores. */
+async function pickSlice(node: ComputeNode): Promise<NodeSliceRequest | undefined> {
+  const req: NodeSliceRequest = {};
+  if (hasGpu(node)) {
+    const total = node.gpuMemoryTotalGb as number;
+    const presets = [0.25, 1 / 3, 0.5].map((f) => ({
+      label: `${Math.round(f * 100)}%`,
+      description: `${gpuPresetGb(total, f)} GB of ${total} GB VRAM`,
+      gb: gpuPresetGb(total, f) as number | undefined,
+    }));
+    const choice = await vscode.window.showQuickPick(
+      [...presets, { label: 'Custom GB…', description: `0 – ${total} GB`, gb: undefined }],
+      { title: `GPU slice for ${node.name || node.id}${node.gpuModel ? ` (${node.gpuModel})` : ''}`, ignoreFocusOut: true },
+    );
+    if (!choice) {
+      return undefined;
+    }
+    let gb = choice.gb;
+    if (gb === undefined) {
+      const raw = await vscode.window.showInputBox({
+        title: 'GPU memory to lend (GB)',
+        value: String(node.gpuMemoryAllocatableGb ?? 0),
+        ignoreFocusOut: true,
+        validateInput: (v) => {
+          const n = Number(v);
+          return Number.isFinite(n) && n >= 0 && n <= total ? undefined : `Enter a number between 0 and ${total}`;
+        },
+      });
+      if (raw === undefined) {
+        return undefined;
+      }
+      gb = Number(raw);
+    }
+    req.gpuMemoryAllocatableGb = gb;
+    req.gpuAllocatableCount = gb > 0 ? node.gpuCount : 0;
+  }
+  const maxCores = node.cpuTotal;
+  const rawCores = await vscode.window.showInputBox({
+    title: `Cores to lend${maxCores ? ` (1 – ${maxCores})` : ''}`,
+    value: String(node.cpuAllocatable ?? 1),
+    ignoreFocusOut: true,
+    validateInput: (v) => {
+      const n = Number(v);
+      return Number.isInteger(n) && n >= 1 && (maxCores === undefined || n <= maxCores)
+        ? undefined
+        : `Enter a whole number${maxCores ? ` between 1 and ${maxCores}` : ' >= 1'}`;
+    },
+  });
+  if (rawCores === undefined) {
+    return undefined;
+  }
+  req.cpuAllocatable = Number(rawCores);
+  return req;
+}
+
 function extractNodeId(arg: unknown): string | undefined {
   if (arg && typeof arg === 'object' && 'node' in arg) {
     const node = (arg as { node?: { id?: string } }).node;
     return node?.id;
   }
   return undefined;
+}
+
+/**
+ * Ask the backend which runtimes are detected on the user's online nodes, let
+ * the user pick one, then submit the active file with it. `custom` is left out
+ * here because it needs a command template the editor does not know.
+ */
+async function runWithPickedRuntime(deps: CommandDeps): Promise<void> {
+  const gw = requireGateway(deps);
+  if (!gw) {
+    return;
+  }
+  let runtimes;
+  try {
+    runtimes = await gw.listRuntimes();
+  } catch (err) {
+    reportError(deps, err, 'Failed to load the available runtimes.');
+    return;
+  }
+  const usable = runtimes.filter((r) => r.id !== 'custom' && r.availableNodeIds.length > 0);
+  if (usable.length === 0) {
+    void vscode.window.showWarningMessage(
+      'No runtime is available on your online nodes. Runtimes are detected on each worker; nothing is installed there.',
+    );
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    usable.map((r) => ({
+      label: r.name,
+      description: r.id,
+      detail: `${r.availableNodeIds.length} node(s) · ${r.kind}`,
+      id: r.id,
+    })),
+    { placeHolder: 'Run the active file with…' },
+  );
+  if (picked) {
+    await runActiveFile(deps, picked.id);
+  }
 }
 
 async function runActiveFile(deps: CommandDeps, forcedRuntime: Runtime | undefined): Promise<void> {
@@ -277,7 +401,7 @@ async function runActiveFile(deps: CommandDeps, forcedRuntime: Runtime | undefin
       { location: vscode.ProgressLocation.Notification, title: `Submitting ${runtime} execution…` },
       async () => {
         const exec = await gw.createExecution(
-          { runtime, code, timeoutSeconds: settings.defaultTimeoutSeconds },
+          { runtime, code, timeoutSeconds: settings.defaultTimeoutSeconds, executionPolicy: settings.executionPolicy },
           requestId,
         );
         deps.logger.info('execution submitted', { id: exec.id, runtime });

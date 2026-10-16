@@ -20,6 +20,7 @@ class SSHNode(Base):
     """
 
     __tablename__ = "ssh_nodes"
+    __table_args__ = {"extend_existing": True}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -56,6 +57,10 @@ class SSHNode(Base):
     # Allocation the operator chose to borrow (must be <= detected)
     allocated_cpu: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     allocated_memory_gb: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    # GPU slice: devices 0..allocated_gpu_count-1, each capped at
+    # allocated_gpu_memory_gb (per device, <= gpu_memory_gb). 0 = no GPU.
+    allocated_gpu_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    allocated_gpu_memory_gb: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
 
     # Cross-platform capabilities (Phase 2 discovery)
     os_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # linux|macos|windows
@@ -64,6 +69,9 @@ class SSHNode(Base):
     gpu_model: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     gpu_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     gpu_memory_gb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # PyTorch GPU backend already on the worker ("torch-cuda" | "torch-mps"),
+    # detected without installing anything. Only then is a GPU cap enforceable.
+    gpu_runtime: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     python_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     # Languages/toolchains already present on the node, detected over SSH
     # (nothing is installed): JSON {runtime_id: version_string}. See runtimes.py.
@@ -87,6 +95,13 @@ class SSHNode(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
+    @property
+    def allocated_gpu_fraction(self) -> float:
+        """Share of each allocated GPU's memory a job may use (0..1)."""
+        from runtimes import gpu_fraction
+
+        return gpu_fraction(self.allocated_gpu_count, self.allocated_gpu_memory_gb, self.gpu_memory_gb)
+
 
 class PendingProvision(Base):
     """A key that was generated + installed on a node during onboarding but not
@@ -96,6 +111,7 @@ class PendingProvision(Base):
     """
 
     __tablename__ = "pending_provisions"
+    __table_args__ = {"extend_existing": True}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -128,6 +144,7 @@ class ResourceLease(Base):
     """
 
     __tablename__ = "resource_leases"
+    __table_args__ = {"extend_existing": True}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -166,6 +183,7 @@ class TaskBatch(Base):
     """A group of tasks the master fans out across borrowed nodes in parallel."""
 
     __tablename__ = "task_batches"
+    __table_args__ = {"extend_existing": True}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -180,6 +198,10 @@ class TaskBatch(Base):
     custom_filename: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     cpu_per_task: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
+    # safe_background | balanced | max_available (see resource_spec).
+    execution_policy: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="safe_background", server_default="safe_background"
+    )
     # JSON list of node ids the user restricted the run to (empty = all online).
     node_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # pending | running | cancelling | cancelled | completed |
@@ -196,7 +218,7 @@ class TaskBatch(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tasks: Mapped[list["Task"]] = relationship(
-        back_populates="batch", cascade="all, delete-orphan", lazy="selectin"
+        lambda: Task, back_populates="batch", cascade="all, delete-orphan", lazy="selectin"
     )
 
 
@@ -207,6 +229,7 @@ class Task(Base):
     """
 
     __tablename__ = "tasks"
+    __table_args__ = {"extend_existing": True}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -226,7 +249,7 @@ class Task(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    batch: Mapped["TaskBatch"] = relationship(back_populates="tasks")
+    batch: Mapped["TaskBatch"] = relationship(lambda: TaskBatch, back_populates="tasks")
 
 
 class TrainingRun(Base):
@@ -239,6 +262,7 @@ class TrainingRun(Base):
     """
 
     __tablename__ = "training_runs"
+    __table_args__ = {"extend_existing": True}
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

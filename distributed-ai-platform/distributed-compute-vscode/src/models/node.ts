@@ -25,6 +25,14 @@ export interface ComputeNode {
   memoryAllocatableGb?: number;
   memoryReservedGb?: number;
   gpuCount?: number;
+  gpuModel?: string;
+  gpuMemoryTotalGb?: number;
+  /** GPU slice lent to the platform. */
+  gpuAllocatableCount?: number;
+  gpuMemoryAllocatableGb?: number;
+  gpuFraction?: number;
+  /** Detected GPU runtime (e.g. torch); absent when none was found. */
+  gpuRuntime?: string;
   resourceEnforcement?: 'strict' | 'best_effort';
   activeTasks: number;
   lastHealthCheck?: string;
@@ -62,4 +70,45 @@ export function orUnknown(value: number | undefined, suffix = ''): string {
 /** "2 / 8" style capacity label; either side may be unknown. */
 export function capacityLabel(used?: number, total?: number): string {
   return `${orUnknown(used)} / ${orUnknown(total)}`;
+}
+
+/** Body for PATCH /nodes/{id}; omitted fields stay unchanged. */
+export interface NodeSliceRequest {
+  cpuAllocatable?: number;
+  memoryAllocatableGb?: number;
+  gpuAllocatableCount?: number;
+  gpuMemoryAllocatableGb?: number;
+}
+
+function fmtGb(gb: number): string {
+  return `${Number.isInteger(gb) ? gb : gb.toFixed(1)}GB`;
+}
+
+/** True when the node reports a GPU with known VRAM. */
+export function hasGpu(n: ComputeNode): boolean {
+  return (n.gpuCount ?? 0) > 0 && (n.gpuMemoryTotalGb ?? 0) > 0;
+}
+
+/**
+ * "Slice: 8GB / 24GB VRAM | 4 / 10 Cores", or "Slice: 4 / 10 Cores" for
+ * CPU-only nodes. Unknown values render as "Unknown".
+ */
+export function sliceLabel(n: ComputeNode): string {
+  const cores = `${capacityLabel(n.cpuAllocatable, n.cpuTotal)} Cores`;
+  if (!hasGpu(n)) {
+    return `Slice: ${cores}`;
+  }
+  return `Slice: ${fmtGb(n.gpuMemoryAllocatableGb ?? 0)} / ${fmtGb(n.gpuMemoryTotalGb as number)} VRAM | ${cores}`;
+}
+
+/** Tree label: "Worker 1 (RTX 3090) - Slice: ..." */
+export function nodeLabel(n: ComputeNode): string {
+  const name = n.name || n.id;
+  const model = hasGpu(n) && n.gpuModel ? ` (${n.gpuModel})` : '';
+  return `${name}${model} - ${sliceLabel(n)}`;
+}
+
+/** VRAM preset in GB, rounded down to 0.5 GB. */
+export function gpuPresetGb(totalGb: number, fraction: number): number {
+  return Math.floor(totalGb * fraction * 2) / 2;
 }

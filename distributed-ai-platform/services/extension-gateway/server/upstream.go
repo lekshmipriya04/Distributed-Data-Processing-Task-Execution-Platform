@@ -94,6 +94,12 @@ type upNode struct {
 	DetectedMemoryGB    float64           `json:"detected_memory_gb"`
 	DetectedGPU         int               `json:"detected_gpu"`
 	GPUCount            int               `json:"gpu_count"`
+	GPUModel            *string           `json:"gpu_model"`
+	GPUMemoryGB         *float64          `json:"gpu_memory_gb"`
+	GPURuntime          *string           `json:"gpu_runtime"`
+	AllocGPUCount       *int              `json:"allocated_gpu_count"`
+	AllocGPUMemoryGB    *float64          `json:"allocated_gpu_memory_gb"`
+	AllocGPUFraction    *float64          `json:"allocated_gpu_fraction"`
 	Runtimes            map[string]string `json:"runtimes"`
 	ResourceEnforcement string            `json:"resource_enforcement"`
 	AllocatedCPU        int               `json:"allocated_cpu"`
@@ -147,14 +153,23 @@ type upBatchList struct {
 }
 
 type upBatchCreate struct {
-	Code           string   `json:"code"`
-	Inputs         []string `json:"inputs,omitempty"`
-	NodeIDs        []string `json:"node_ids,omitempty"`
-	Runtime        string   `json:"runtime"`
-	CustomCommand  string   `json:"custom_command,omitempty"`
-	CustomFilename string   `json:"custom_filename,omitempty"`
-	CPUPerTask     int      `json:"cpu_per_task,omitempty"`
-	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	Code            string   `json:"code"`
+	Inputs          []string `json:"inputs,omitempty"`
+	NodeIDs         []string `json:"node_ids,omitempty"`
+	Runtime         string   `json:"runtime"`
+	CustomCommand   string   `json:"custom_command,omitempty"`
+	CustomFilename  string   `json:"custom_filename,omitempty"`
+	CPUPerTask      int      `json:"cpu_per_task,omitempty"`
+	TimeoutSeconds  int      `json:"timeout_seconds,omitempty"`
+	ExecutionPolicy string   `json:"execution_policy,omitempty"`
+}
+
+// upNodeUpdate is ssh-executor's NodeUpdateRequest (nil = unchanged).
+type upNodeUpdate struct {
+	AllocatedCPU         *int     `json:"allocated_cpu,omitempty"`
+	AllocatedMemoryGB    *float64 `json:"allocated_memory_gb,omitempty"`
+	AllocatedGPUCount    *int     `json:"allocated_gpu_count,omitempty"`
+	AllocatedGPUMemoryGB *float64 `json:"allocated_gpu_memory_gb,omitempty"`
 }
 
 // upTime accepts the ISO-8601 variants FastAPI/pydantic emit (with or without
@@ -222,6 +237,18 @@ func mapNode(n upNode) ComputeNode {
 	}
 	out.CPUAllocatable = intPtr(n.AllocatedCPU)
 	out.MemoryAllocatableGB = floatPtr(n.AllocatedMemoryGB)
+	if n.GPUModel != nil {
+		out.GPUModel = *n.GPUModel
+	}
+	if n.GPUMemoryGB != nil && *n.GPUMemoryGB > 0 {
+		out.GPUMemoryTotalGB = floatPtr(*n.GPUMemoryGB)
+	}
+	if n.GPURuntime != nil {
+		out.GPURuntime = *n.GPURuntime
+	}
+	out.GPUAllocatableCount = n.AllocGPUCount
+	out.GPUMemoryAllocatableGB = n.AllocGPUMemoryGB
+	out.GPUFraction = n.AllocGPUFraction
 	switch n.ResourceEnforcement {
 	case "strict", "best_effort":
 		out.ResourceEnforcement = n.ResourceEnforcement
@@ -312,6 +339,26 @@ func (s *UpstreamStore) GetNode(ctx context.Context, id string) (ComputeNode, er
 	return nodes[0], nil
 }
 
+// UpdateNodeSlice forwards a slice change to PATCH /nodes/{id}.
+func (s *UpstreamStore) UpdateNodeSlice(ctx context.Context, id string, req NodeSliceRequest) (ComputeNode, error) {
+	if id == "" {
+		return ComputeNode{}, ErrNotFound
+	}
+	body := upNodeUpdate{
+		AllocatedCPU:         req.CPUAllocatable,
+		AllocatedMemoryGB:    req.MemoryAllocatableGB,
+		AllocatedGPUCount:    req.GPUAllocatableCount,
+		AllocatedGPUMemoryGB: req.GPUMemoryAllocatableGB,
+	}
+	var n upNode
+	if err := s.do(ctx, http.MethodPatch, "/nodes/"+url.PathEscape(id), body, &n); err != nil {
+		return ComputeNode{}, err
+	}
+	nodes := []ComputeNode{mapNode(n)}
+	s.fillCapacity(ctx, nodes)
+	return nodes[0], nil
+}
+
 // fillCapacity adds live lease usage to each node, in parallel. A failed
 // capacity lookup leaves the reserved fields nil ("Unknown" in the UI) rather
 // than failing the whole listing.
@@ -386,14 +433,15 @@ func (s *UpstreamStore) GetExecution(ctx context.Context, id string) (Execution,
 
 func (s *UpstreamStore) CreateExecution(ctx context.Context, req ExecutionRequest) (Execution, error) {
 	body := upBatchCreate{
-		Code:           req.Code,
-		Inputs:         req.Inputs,
-		NodeIDs:        req.NodeIDs,
-		Runtime:        req.Runtime,
-		CustomCommand:  req.CustomCommand,
-		CustomFilename: req.CustomFilename,
-		CPUPerTask:     req.CPUPerTask,
-		TimeoutSeconds: req.TimeoutSeconds,
+		Code:            req.Code,
+		Inputs:          req.Inputs,
+		NodeIDs:         req.NodeIDs,
+		Runtime:         req.Runtime,
+		CustomCommand:   req.CustomCommand,
+		CustomFilename:  req.CustomFilename,
+		CPUPerTask:      req.CPUPerTask,
+		TimeoutSeconds:  req.TimeoutSeconds,
+		ExecutionPolicy: req.ExecutionPolicy,
 	}
 	var b upBatch
 	if err := s.do(ctx, http.MethodPost, "/batches", body, &b); err != nil {

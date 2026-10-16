@@ -1,4 +1,5 @@
 """Unit tests for the ssh-executor service (paramiko fully mocked)."""
+import contextlib
 import importlib
 import json
 import subprocess
@@ -18,37 +19,42 @@ import pytest
 _SSH_DIR = str(Path(__file__).resolve().parents[3] / "services" / "ssh-executor")
 _SSH_COLLIDING = {
     "config", "models", "database", "schemas", "routes", "main",
-    "crypto", "ssh_client", "node_service", "batch_service", "dispatcher",
-    "ml_templates", "training_orchestrator",
+    "security", "ssh", "node_service", "tasks",
+    "leases", "training",
 }
 _SSH_LOAD_ORDER = (
-    "config", "models", "database", "schemas", "crypto", "ssh_client",
-    "node_service", "batch_service", "ml_templates", "dispatcher",
-    "training_orchestrator", "routes",
+    "config", "models", "database", "schemas", "security", "ssh",
+    "node_service", "leases",
+    "tasks", "training", "routes",
 )
 _SSH_MODS: dict = {}
 
 
 def _load(module: str):
     if not _SSH_MODS:
+        # Clear service-local modules from sys.modules so we re-import from
+        # _SSH_DIR. Exception: skip modules whose __file__ is already inside
+        # _SSH_DIR (imported by an earlier test file that also uses ssh-executor)
+        # to avoid SQLAlchemy "table already defined" on re-import of models.
         for name in list(sys.modules):
             if name in _SSH_COLLIDING:
-                del sys.modules[name]
-        sys.path.insert(0, _SSH_DIR)
+                mod = sys.modules[name]
+                mod_file = getattr(mod, "__file__", None) or ""
+                if _SSH_DIR not in mod_file:
+                    del sys.modules[name]
+        if _SSH_DIR not in sys.path:
+            sys.path.insert(0, _SSH_DIR)
         try:
             for name in _SSH_LOAD_ORDER:
                 _SSH_MODS[name] = importlib.import_module(name)
         finally:
-            try:
-                sys.path.remove(_SSH_DIR)
-            except ValueError:
-                pass
+            pass  # leave _SSH_DIR in sys.path so later imports resolve
     return _SSH_MODS[module]
 
 
 # --- crypto round-trip ---------------------------------------------------
 def test_credential_encrypt_decrypt_round_trip():
-    crypto = _load("crypto")
+    crypto = _load("security")
     secret = "s3cr3t-private-key-material"
     ciphertext = crypto.encrypt_secret(secret)
     assert ciphertext != secret
@@ -56,7 +62,7 @@ def test_credential_encrypt_decrypt_round_trip():
 
 
 def test_fingerprint_is_sha256_prefixed():
-    ssh_client = _load("ssh_client")
+    ssh_client = _load("ssh")
     import base64
 
     fake_key = base64.b64encode(b"a-host-key").decode()
@@ -90,7 +96,7 @@ def _patch_client(ssh_client, monkeypatch, fake_client):
 
 # --- detect_resources ----------------------------------------------------
 def test_detect_resources_parses_probe_output(monkeypatch):
-    ssh_client = _load("ssh_client")
+    ssh_client = _load("ssh")
 
     client = MagicMock()
     client.exec_command = _fake_exec([
@@ -123,7 +129,7 @@ def test_detect_resources_parses_probe_output(monkeypatch):
 
 # --- run_task ------------------------------------------------------------
 def test_run_task_success_streams_stdin_and_cleans_up(monkeypatch):
-    ssh_client = _load("ssh_client")
+    ssh_client = _load("ssh")
 
     client = MagicMock()
     client.exec_command = _fake_exec([(b"processed\n", b"", 0)])
@@ -143,7 +149,7 @@ def test_run_task_success_streams_stdin_and_cleans_up(monkeypatch):
 
 
 def test_run_task_removes_temp_file_even_on_error(monkeypatch):
-    ssh_client = _load("ssh_client")
+    ssh_client = _load("ssh")
 
     client = MagicMock()
     # exec_command raises to simulate a failure mid-run.
@@ -163,32 +169,51 @@ def test_run_task_removes_temp_file_even_on_error(monkeypatch):
 # --- node_service allocation clamp --------------------------------------
 @pytest.mark.asyncio
 async def test_register_node_clamps_allocation_to_detected(monkeypatch):
+    import uuid as _uuid
     node_service = _load("node_service")
-    monkeypatch.setattr(node_service, "encrypt_secret", lambda s: "ENC:" + s)
-
+    models = _load("models")
     schemas = _load("schemas")
+
+    provision_id = _uuid.uuid4()
+    caps_json = json.dumps({
+        "cpu_total": 4, "memory_total_gb": 8.0, "gpu_count": 0,
+        "os_type": "linux", "os_version": "Ubuntu 22.04",
+        "gpu_vendor": None, "gpu_backend": None, "gpu_model": None,
+        "gpu_memory_gb": None, "gpu_runtime": None,
+        "python_version": "3.11", "runtimes": {"python": "3.11"},
+        "env_path": "/usr/bin",
+    })
+    pending = models.PendingProvision(
+        id=provision_id, owner_id="user-1",
+        host="10.0.0.5", port=22, username="provider",
+        host_key_type="ssh-ed25519", host_key_b64="AAAA==",
+        private_key_encrypted="ENC:privkey", public_key="ssh-ed25519 AAAA",
+        key_comment=f"dp-platform:{provision_id}",
+        status="installed", capabilities_json=caps_json,
+        expires_at=__import__("datetime").datetime(2099, 1, 1, tzinfo=__import__("datetime").timezone.utc),
+    )
+
     req = schemas.NodeRegisterRequest(
+        provision_id=provision_id,
         name="box",
-        host="10.0.0.5",
-        username="provider",
-        auth_type="password",
-        password="pw",
-        detected_cpu=4,
-        detected_memory_gb=8.0,
-        allocated_cpu=100,       # operator asked for more than exists
+        allocated_cpu=100,       # operator asked for more than detected (4)
         allocated_memory_gb=64.0,
     )
 
     db = AsyncMock()
     db.add = MagicMock()
+    db.get = AsyncMock(return_value=None)  # node not yet registered
+    db.refresh = AsyncMock()
     svc = node_service.NodeService(db)
-    node = await svc.register_node(req, owner_id="user-1")
+    # Bypass the real DB lookup for PendingProvision
+    monkeypatch.setattr(svc, "_get_pending", AsyncMock(return_value=pending))
+
+    node = await svc.register(req, owner_id="user-1")
 
     assert node.allocated_cpu == 4
     assert node.allocated_memory_gb == 8.0
-    assert node.secret_encrypted == "ENC:pw"
     assert node.owner_id == "user-1"
-    db.add.assert_called_once()
+    db.add.assert_called()
     db.commit.assert_awaited_once()
 
 
@@ -200,7 +225,7 @@ def _load_fresh(module: str):
 
 
 def _load_dispatcher():
-    return _load("dispatcher")
+    return _load("tasks")
 
 
 def _ns(**kw):
@@ -253,81 +278,152 @@ class _FakeDB:
 
 
 def _patch_dispatcher_db(dispatcher, monkeypatch, batch, tasks, nodes):
-    load_session = _LoadSession([_Result([batch]), _Result(tasks), _Result(nodes)])
-    monkeypatch.setattr(dispatcher, "get_db_manager", lambda: _FakeDB(load_session))
+    """Patch all DB + SSH I/O so dispatch_batch runs without real infrastructure."""
+    execution_manager = _load("leases")
+
+    async def fake_load_batch(batch_id):
+        return batch, tasks
+
+    async def fake_select_nodes(owner_id, node_ids=None):
+        return nodes
+
+    async def fake_acquire(owner_id, nodes_list, *, job_id, cpu_per_task=1, **kw):
+        return [
+            execution_manager.NodeAllocation(
+                node=n, lease_id=None,
+                cpu_allocated=max(1, int(getattr(n, "allocated_cpu", 1) or 1)),
+                memory_allocated_gb=0.0,
+                cpu_per_task=cpu_per_task,
+            )
+            for n in nodes_list
+        ]
+
+    async def fake_release(owner_id, allocations):
+        pass
+
+    async def fake_transition(batch_id, from_statuses, **fields):
+        return True
+
+    async def fake_batch_status(batch_id):
+        return "running"
+
+    @contextlib.asynccontextmanager
+    async def fake_heartbeat(owner_id, allocations, ttl):
+        yield
+
+    def fake_close(slot):
+        pass
+
+    monkeypatch.setattr(dispatcher, "_load_batch", fake_load_batch)
+    monkeypatch.setattr(dispatcher, "_select_nodes", fake_select_nodes)
+    monkeypatch.setattr(dispatcher, "acquire_allocations", fake_acquire)
+    monkeypatch.setattr(dispatcher, "release_allocations", fake_release)
+    monkeypatch.setattr(dispatcher, "_transition_batch", fake_transition)
+    monkeypatch.setattr(dispatcher, "_batch_status", fake_batch_status)
+    monkeypatch.setattr(dispatcher, "lease_heartbeat", fake_heartbeat)
+    monkeypatch.setattr(dispatcher, "_close_slot", fake_close)
+    monkeypatch.setattr(
+        dispatcher, "track_live_job",
+        contextlib.contextmanager(lambda b: iter([None])),
+    )
+    monkeypatch.setattr(dispatcher, "get_settings", lambda: _ns(
+        task_timeout_seconds=120, lease_ttl_seconds=3600,
+        task_nice=19, max_output_bytes=1_000_000, stale_sandbox_minutes=60,
+    ))
 
     updates: dict = {}
+    finalized: dict = {}
 
     async def fake_update(task_id, **fields):
         updates.setdefault(task_id, {}).update(fields)
 
-    async def fake_set_status(batch_id, status):
-        pass
-
-    finalized: dict = {}
-
-    async def fake_finalize(batch_id):
+    async def fake_finalize(batch_id, failure=None):
         finalized["called"] = True
+        finalized["failure"] = failure
 
     monkeypatch.setattr(dispatcher, "_update_task", fake_update)
-    monkeypatch.setattr(dispatcher, "_set_batch_status", fake_set_status)
     monkeypatch.setattr(dispatcher, "_finalize_batch", fake_finalize)
     return updates, finalized
+
+
+def _batch_ns(**kw):
+    """Namespace with all fields dispatch_batch accesses on a batch."""
+    defaults = dict(
+        status="pending", node_ids_json=None, cpu_per_task=1,
+        timeout_seconds=120, runtime="python", execution_policy="safe_background",
+        custom_command=None, custom_filename=None,
+    )
+    defaults.update(kw)
+    return _ns(**defaults)
+
+
+def _node_ns(**kw):
+    """Namespace with all fields dispatch_batch needs on a node."""
+    defaults = dict(
+        status="online", allocated_memory_gb=1.0,
+        allocated_gpu_count=0, gpu_memory_gb=None, gpu_runtime=None,
+        runtimes_json=None, python_version="3.11", os_type="linux",
+        env_path=None,
+    )
+    defaults.update(kw)
+    return _ns(**defaults)
 
 
 async def test_dispatch_batch_fans_out_across_nodes(monkeypatch):
     dispatcher = _load_dispatcher()
 
-    node_a = _ns(id="A", allocated_cpu=2, status="online")
-    node_b = _ns(id="B", allocated_cpu=2, status="online")
-    batch = _ns(id="batch1", owner_id="user-1", code="print(1)")
+    node_a = _node_ns(id="A", allocated_cpu=2)
+    node_b = _node_ns(id="B", allocated_cpu=2)
+    batch = _batch_ns(id="batch1", owner_id="user-1", code="print(1)")
     tasks = [_ns(id=f"t{i}", input_data=str(i), seq=i) for i in range(3)]
 
     updates, finalized = _patch_dispatcher_db(
         dispatcher, monkeypatch, batch, tasks, [node_a, node_b]
     )
 
-    ok = {"status": "success", "exit_code": 0, "stdout": "ok", "stderr": ""}
-    exec_a, exec_b = MagicMock(), MagicMock()
-    exec_a.run_task.return_value = ok
-    exec_b.run_task.return_value = ok
-    execs = {"A": exec_a, "B": exec_b}
-    monkeypatch.setattr(dispatcher, "build_executor", lambda n: execs[n.id])
+    called_nodes: list = []
+
+    def fake_run_in_slot(slot, sweeper, *, runtime_id, code, input_data, spec, **kw):
+        called_nodes.append(slot.node_id)
+        return {"status": "success", "exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    monkeypatch.setattr(dispatcher, "_run_in_slot", fake_run_in_slot)
 
     await dispatcher.dispatch_batch("batch1")
 
     assert len(updates) == 3
     assert all(f["status"] == "completed" for f in updates.values())
-    # Rotated start offsets spread the 3 tasks across BOTH nodes (parallel fan-out).
-    assert exec_a.run_task.called
-    assert exec_b.run_task.called
+    # Fan-out across BOTH nodes — both must have handled at least one task.
+    assert "A" in called_nodes and "B" in called_nodes
     assert finalized["called"]
 
 
 async def test_dispatch_batch_retries_on_another_node(monkeypatch):
     dispatcher = _load_dispatcher()
 
-    node_a = _ns(id="A", allocated_cpu=1, status="online")
-    node_b = _ns(id="B", allocated_cpu=1, status="online")
-    batch = _ns(id="batch1", owner_id="user-1", code="print(1)")
+    node_a = _node_ns(id="A", allocated_cpu=1)
+    node_b = _node_ns(id="B", allocated_cpu=1)
+    batch = _batch_ns(id="batch1", owner_id="user-1", code="print(1)")
     tasks = [_ns(id=f"t{i}", input_data=str(i), seq=i) for i in range(3)]
 
     updates, finalized = _patch_dispatcher_db(
         dispatcher, monkeypatch, batch, tasks, [node_a, node_b]
     )
 
-    exec_a, exec_b = MagicMock(), MagicMock()
-    exec_a.run_task.return_value = {"status": "error", "exit_code": 1, "stdout": "", "stderr": "boom"}
-    exec_b.run_task.return_value = {"status": "success", "exit_code": 0, "stdout": "ok", "stderr": ""}
-    execs = {"A": exec_a, "B": exec_b}
-    monkeypatch.setattr(dispatcher, "build_executor", lambda n: execs[n.id])
+    # exit_code=None → classify_result returns "infra" → triggers retry on another node
+    def fake_run_in_slot(slot, sweeper, *, runtime_id, code, input_data, spec, **kw):
+        if slot.node_id == "A":
+            return {"status": "error", "exit_code": None, "stdout": "", "stderr": "conn lost"}
+        return {"status": "success", "exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    monkeypatch.setattr(dispatcher, "_run_in_slot", fake_run_in_slot)
 
     await dispatcher.dispatch_batch("batch1")
 
-    # Node A always fails, so every task must land completed on node B.
+    # Every task must ultimately complete on node B.
     assert all(f["status"] == "completed" for f in updates.values())
     assert all(f["node_id"] == "B" for f in updates.values())
-    # At least one task needed a second attempt (A then B) — proves retry.
+    # At least one task retried (A then B) — proves retry path.
     assert max(f["attempts"] for f in updates.values()) == 2
     assert finalized["called"]
 
@@ -335,18 +431,18 @@ async def test_dispatch_batch_retries_on_another_node(monkeypatch):
 async def test_dispatch_batch_no_nodes_fails_all(monkeypatch):
     dispatcher = _load_dispatcher()
 
-    batch = _ns(id="batch1", owner_id="user-1", code="print(1)")
+    batch = _batch_ns(id="batch1", owner_id="user-1", code="print(1)")
     tasks = [_ns(id=f"t{i}", input_data=str(i), seq=i) for i in range(2)]
 
     updates, finalized = _patch_dispatcher_db(dispatcher, monkeypatch, batch, tasks, [])
-    monkeypatch.setattr(dispatcher, "build_executor", lambda n: MagicMock())
 
     await dispatcher.dispatch_batch("batch1")
 
-    assert len(updates) == 2
-    assert all(f["status"] == "failed" for f in updates.values())
-    assert all("No online provider" in f["stderr"] for f in updates.values())
+    # When there are no nodes, dispatch passes the failure message to _finalize_batch;
+    # individual task updates are skipped (finalize settles them in bulk).
     assert finalized["called"]
+    assert finalized["failure"] is not None
+    assert "No online provider" in finalized["failure"]
 
 
 # --- rate limiting -------------------------------------------------------
@@ -376,7 +472,7 @@ async def test_rate_limit_is_per_owner():
 
 # --- ml_templates: aggregation + evaluation ------------------------------
 def test_aggregate_is_size_weighted_mean():
-    ml = _load("ml_templates")
+    ml = _load("training")
     # Two shards: 1 row at w=[0], 3 rows at w=[4] -> weighted mean = 3.0.
     agg = ml.aggregate([
         {"w": [0.0], "b": 0.0, "n": 1},
@@ -387,7 +483,7 @@ def test_aggregate_is_size_weighted_mean():
 
 
 def test_aggregate_ignores_empty_shards():
-    ml = _load("ml_templates")
+    ml = _load("training")
     agg = ml.aggregate([
         {"w": [2.0], "b": 1.0, "n": 0},   # empty shard contributes nothing
         {"w": [5.0], "b": 2.0, "n": 10},
@@ -397,7 +493,7 @@ def test_aggregate_ignores_empty_shards():
 
 
 def test_evaluate_regression_perfect_fit():
-    ml = _load("ml_templates")
+    ml = _load("training")
     # y = 2*x1 + 1 exactly -> R² = 1, MSE = 0.
     weights = {"w": [2.0], "b": 1.0}
     rows = [[1.0, 3.0], [2.0, 5.0], [3.0, 7.0]]
@@ -407,7 +503,7 @@ def test_evaluate_regression_perfect_fit():
 
 
 def test_evaluate_logistic_accuracy():
-    ml = _load("ml_templates")
+    ml = _load("training")
     # Large positive weight -> x>0 predicts 1, x<0 predicts 0.
     weights = {"w": [10.0], "b": 0.0}
     rows = [[-1.0, 0.0], [1.0, 1.0], [2.0, 1.0], [-2.0, 0.0]]
@@ -417,7 +513,7 @@ def test_evaluate_logistic_accuracy():
 
 
 def test_train_core_reduces_regression_loss():
-    ml = _load("ml_templates")
+    ml = _load("training")
     rows = [[float(x), 2.0 * x + 1.0] for x in range(1, 11)]
     out = ml.train_core("linear_regression", 0.01, 50, None, rows)
     assert out["n"] == 10
@@ -429,7 +525,7 @@ def test_train_core_reduces_regression_loss():
 # --- ml_templates: remote script is self-contained + round-trips ----------
 def test_generate_remote_script_is_stdlib_and_round_trips(tmp_path):
     """The generated script must run on a bare python3 and match train_core."""
-    ml = _load("ml_templates")
+    ml = _load("training")
     rows = [[float(x), 2.0 * x + 1.0] for x in range(1, 8)]
     script = ml.generate_remote_script("linear_regression", 0.05, 20)
 
@@ -457,7 +553,7 @@ def test_generate_remote_script_is_stdlib_and_round_trips(tmp_path):
 
 
 def test_parse_result_handles_noise_and_missing():
-    ml = _load("ml_templates")
+    ml = _load("training")
     assert ml.parse_result("") is None
     assert ml.parse_result("not json\n") is None
     good = ml.parse_result('warming up\n{"w": [1.0], "b": 2.0, "n": 5}')
@@ -467,16 +563,28 @@ def test_parse_result_handles_noise_and_missing():
 # --- shared fan-out helper (used by BOTH batches and training) -----------
 async def test_run_across_nodes_fans_out_and_aligns_results(monkeypatch):
     dispatcher = _load_dispatcher()
-    node_a = _ns(id="A", allocated_cpu=2)
-    node_b = _ns(id="B", allocated_cpu=2)
-    exec_a, exec_b = MagicMock(), MagicMock()
-    exec_a.run_task.return_value = {"status": "success", "exit_code": 0, "stdout": "a", "stderr": ""}
-    exec_b.run_task.return_value = {"status": "success", "exit_code": 0, "stdout": "b", "stderr": ""}
-    execs = {"A": exec_a, "B": exec_b}
-    monkeypatch.setattr(dispatcher, "build_executor", lambda n: execs[n.id])
+    execution_manager = _load("leases")
+
+    node_a = _node_ns(id="A", allocated_cpu=2)
+    node_b = _node_ns(id="B", allocated_cpu=2)
+    alloc_a = execution_manager.NodeAllocation(
+        node=node_a, lease_id=None, cpu_allocated=2, memory_allocated_gb=0.0, cpu_per_task=1,
+    )
+    alloc_b = execution_manager.NodeAllocation(
+        node=node_b, lease_id=None, cpu_allocated=2, memory_allocated_gb=0.0, cpu_per_task=1,
+    )
+
+    called_nodes: list = []
+
+    def fake_run_in_slot(slot, sweeper, *, runtime_id, code, input_data, spec, **kw):
+        called_nodes.append(slot.node_id)
+        return {"status": "success", "exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    monkeypatch.setattr(dispatcher, "_run_in_slot", fake_run_in_slot)
+    monkeypatch.setattr(dispatcher, "_close_slot", lambda slot: None)
 
     results = await dispatcher.run_across_nodes(
-        [node_a, node_b],
+        [alloc_a, alloc_b],
         "code",
         ["in0", "in1", "in2"],
         nice=19,
@@ -484,25 +592,37 @@ async def test_run_across_nodes_fans_out_and_aligns_results(monkeypatch):
         max_output_bytes=1000,
     )
     assert len(results) == 3
-    assert all(r["status"] == "success" for r in results)
-    # Rotated offsets spread work across both nodes.
-    assert exec_a.run_task.called and exec_b.run_task.called
+    assert all(r["status"] == "completed" for r in results)
+    # Slots from both nodes must have been used.
+    assert "A" in called_nodes and "B" in called_nodes
 
 
 async def test_run_across_nodes_retries_on_another_node(monkeypatch):
     dispatcher = _load_dispatcher()
-    node_a = _ns(id="A", allocated_cpu=1)
-    node_b = _ns(id="B", allocated_cpu=1)
-    exec_a, exec_b = MagicMock(), MagicMock()
-    exec_a.run_task.return_value = {"status": "error", "exit_code": 1, "stdout": "", "stderr": "boom"}
-    exec_b.run_task.return_value = {"status": "success", "exit_code": 0, "stdout": "ok", "stderr": ""}
-    execs = {"A": exec_a, "B": exec_b}
-    monkeypatch.setattr(dispatcher, "build_executor", lambda n: execs[n.id])
+    execution_manager = _load("leases")
+
+    node_a = _node_ns(id="A", allocated_cpu=1)
+    node_b = _node_ns(id="B", allocated_cpu=1)
+    alloc_a = execution_manager.NodeAllocation(
+        node=node_a, lease_id=None, cpu_allocated=1, memory_allocated_gb=0.0, cpu_per_task=1,
+    )
+    alloc_b = execution_manager.NodeAllocation(
+        node=node_b, lease_id=None, cpu_allocated=1, memory_allocated_gb=0.0, cpu_per_task=1,
+    )
+
+    # exit_code=None → classify_result → "infra" → retry on another node
+    def fake_run_in_slot(slot, sweeper, *, runtime_id, code, input_data, spec, **kw):
+        if slot.node_id == "A":
+            return {"status": "error", "exit_code": None, "stdout": "", "stderr": "conn lost"}
+        return {"status": "success", "exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    monkeypatch.setattr(dispatcher, "_run_in_slot", fake_run_in_slot)
+    monkeypatch.setattr(dispatcher, "_close_slot", lambda slot: None)
 
     results = await dispatcher.run_across_nodes(
-        [node_a, node_b], "code", ["only"], nice=19, timeout_seconds=120, max_output_bytes=1000
+        [alloc_a, alloc_b], "code", ["only"], nice=19, timeout_seconds=120, max_output_bytes=1000
     )
-    assert results[0]["status"] == "success"
+    assert results[0]["status"] == "completed"
     assert results[0]["node_id"] == "B"
     assert results[0]["attempts"] == 2
 
@@ -548,12 +668,12 @@ def _patch_orchestrator_db(orch, monkeypatch, run):
 
 
 async def test_run_training_single_node_completes_locally(monkeypatch):
-    orch = _load("training_orchestrator")
+    orch = _load("training")
     run = _train_run_ns("single", rounds=2, local_cores=2)
     _patch_orchestrator_db(orch, monkeypatch, run)
 
     rows = [[float(x), 2.0 * x + 1.0] for x in range(1, 13)]
-    async def fake_load(dataset_id, target, feats, settings):
+    async def fake_load(dataset_id, target, feats, settings, num_shards=1, engine="python", **_kw):
         return rows, ["x"]
     monkeypatch.setattr(orch, "_load_dataset_rows", fake_load)
 
@@ -578,31 +698,44 @@ async def test_run_training_single_node_completes_locally(monkeypatch):
 
 
 async def test_run_training_multi_node_uses_fan_out_helper(monkeypatch):
-    orch = _load("training_orchestrator")
+    orch = _load("training")
     run = _train_run_ns("multi", rounds=1)
     _patch_orchestrator_db(orch, monkeypatch, run)
 
     rows = [[float(x), 2.0 * x + 1.0] for x in range(1, 9)]
-    async def fake_load(dataset_id, target, feats, settings):
+    async def fake_load(dataset_id, target, feats, settings, num_shards=1, engine="python", **_kw):
         return rows, ["x"]
     monkeypatch.setattr(orch, "_load_dataset_rows", fake_load)
-    monkeypatch.setattr(
-        orch, "_online_nodes",
-        AsyncMock(return_value=[_ns(id="A", allocated_cpu=1), _ns(id="B", allocated_cpu=1)]),
-    )
+
+    fake_nodes = [_ns(id="A", allocated_cpu=1, allocated_gpu_memory_gb=0.0),
+                  _ns(id="B", allocated_cpu=1, allocated_gpu_memory_gb=0.0)]
+    monkeypatch.setattr(orch, "_online_nodes", AsyncMock(return_value=fake_nodes))
+
+    # Fake NodeAllocation-like wrappers so reserve_allocations returns usable objects.
+    class _FakeAlloc:
+        def __init__(self, node):
+            self.node = node
+            self.cpu_allocated = getattr(node, "allocated_cpu", 1)
+            self.memory_allocated_gb = 0.0
+            self.gpu_allocated = 0
+            self.slots = self.cpu_allocated
+
+    fake_allocs = [_FakeAlloc(n) for n in fake_nodes]
+    monkeypatch.setattr(orch, "reserve_allocations", AsyncMock(return_value=fake_allocs))
+    monkeypatch.setattr(orch, "release_allocations", AsyncMock())
 
     import json as _json
     captured = {}
 
-    async def fake_fan_out(nodes, code, payloads, **kw):
+    async def fake_fan_out(allocations, code, payloads, **kw):
         captured["n_shards"] = len(payloads)
         # Each shard trains locally via train_core, returned as remote-shaped stdout.
         out = []
         for i, p in enumerate(payloads):
             data = _json.loads(p)
             w = orch.train_core("linear_regression", 0.01, 20, data["weights"], data["rows"])
-            node = nodes[i % len(nodes)]
-            out.append({"status": "success", "stdout": _json.dumps(w), "node_id": node.id, "attempts": 1})
+            alloc = allocations[i % len(allocations)]
+            out.append({"status": "success", "stdout": _json.dumps(w), "node_id": alloc.node.id, "attempts": 1})
         return out
 
     # Patch the exact symbol the orchestrator calls -> proves multi reuses it.

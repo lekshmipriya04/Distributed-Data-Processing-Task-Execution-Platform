@@ -56,11 +56,6 @@ class StorageError(PlatformException):
     error_code = "STORAGE_ERROR"
 
 
-class SparkJobError(PlatformException):
-    http_status = 500
-    error_code = "SPARK_JOB_ERROR"
-
-
 class ModelNotReadyError(PlatformException):
     http_status = 503
     error_code = "MODEL_NOT_READY"

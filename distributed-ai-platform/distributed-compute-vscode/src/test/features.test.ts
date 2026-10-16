@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { validateConfig, isSafeRelativePath, buildDefault } from '../configuration/projectConfig';
 import { progressFraction, isTerminal, isRuntime } from '../models/execution';
-import { normalizeStatus, capacityLabel, orUnknown } from '../models/node';
+import { normalizeStatus, capacityLabel, orUnknown, nodeLabel, sliceLabel, gpuPresetGb } from '../models/node';
 import { GatewayApi } from '../api/gateway';
 import { ApiClient } from '../api/client';
 
@@ -11,7 +11,7 @@ describe('projectConfig validation', () => {
     expect(validateConfig(cfg).ok).toBe(true);
   });
   it('rejects bad version, runtime, and missing name', () => {
-    const r = validateConfig({ version: 2, runtime: 'cobol', entrypoint: 'a.py' });
+    const r = validateConfig({ version: 2, runtime: 'Not A Runtime', entrypoint: 'a.py' });
     expect(r.ok).toBe(false);
     expect(r.errors.length).toBeGreaterThanOrEqual(2);
   });
@@ -35,8 +35,13 @@ describe('execution model helpers', () => {
     expect(isTerminal('running')).toBe(false);
   });
   it('guards runtime values', () => {
-    expect(isRuntime('spark')).toBe(true);
-    expect(isRuntime('cobol')).toBe(false);
+    for (const id of ['python', 'bash', 'node', 'go', 'cpp', 'custom']) {
+      expect(isRuntime(id)).toBe(true);
+    }
+    expect(isRuntime('')).toBe(false);
+    expect(isRuntime('Python')).toBe(false);
+    expect(isRuntime('rm -rf')).toBe(false);
+    expect(isRuntime(42)).toBe(false);
   });
 });
 
@@ -67,7 +72,7 @@ describe('GatewayApi', () => {
   });
 
   it('rejects a malformed execution payload as bad-response', async () => {
-    const api = clientReturning({ id: 'x', runtime: 'cobol' });
+    const api = clientReturning({ id: 'x', runtime: 'Not A Runtime' });
     await expect(api.getExecution('x')).rejects.toMatchObject({ kind: 'bad-response' });
   });
 
@@ -81,5 +86,65 @@ describe('GatewayApi', () => {
     expect(exec.id).toBe('e1');
     const [, init] = fetchImpl.mock.calls[0];
     expect((init.headers as any)['X-Request-Id']).toBe('req-xyz');
+  });
+});
+
+describe('GatewayApi.listRuntimes', () => {
+  it('returns runtimes with their available nodes', async () => {
+    const fetchImpl = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [
+              { id: 'node', name: 'Node.js', filename: 'task.js', kind: 'interpreted', windowsSupported: true, availableNodeIds: ['n1'] },
+              { id: 'go', name: 'Go', filename: 'main.go', kind: 'compiled', windowsSupported: true },
+            ],
+            total: 2,
+          }),
+        }) as unknown as Response,
+    );
+    const api = new GatewayApi(new ApiClient({ baseUrl: 'http://x', getToken: () => 't', fetchImpl }));
+    const rts = await api.listRuntimes();
+    expect(rts.map((r) => r.id)).toEqual(['node', 'go']);
+    expect(rts[1].availableNodeIds).toEqual([]);
+    expect(String(fetchImpl.mock.calls[0][0])).toContain('/runtimes');
+  });
+});
+
+describe('node slice labels', () => {
+  it('renders GPU and CPU slice', () => {
+    const n = {
+      id: 'n1', name: 'Worker 1', status: 'online' as const, activeTasks: 0, cpuTotal: 10, cpuAllocatable: 4,
+      gpuCount: 1, gpuModel: 'RTX 3090', gpuMemoryTotalGb: 24, gpuMemoryAllocatableGb: 8,
+    };
+    expect(nodeLabel(n)).toBe('Worker 1 (RTX 3090) - Slice: 8GB / 24GB VRAM | 4 / 10 Cores');
+  });
+  it('renders CPU-only slice', () => {
+    const n = { id: 'n2', name: 'Pi', status: 'online' as const, activeTasks: 0, cpuTotal: 10, cpuAllocatable: 4, gpuCount: 0 };
+    expect(sliceLabel(n)).toBe('Slice: 4 / 10 Cores');
+    expect(nodeLabel(n)).toBe('Pi - Slice: 4 / 10 Cores');
+  });
+  it('computes VRAM presets', () => {
+    expect(gpuPresetGb(24, 0.25)).toBe(6);
+    expect(gpuPresetGb(24, 1 / 3)).toBe(8);
+    expect(gpuPresetGb(24, 0.5)).toBe(12);
+  });
+});
+
+describe('GatewayApi.updateNodeSlice', () => {
+  it('PATCHes the node with the slice body', async () => {
+    const fetchImpl = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        ({ ok: true, status: 200, json: async () => ({ id: 'n1', name: 'W', status: 'online', cpuAllocatable: 4 }) }) as unknown as Response,
+    );
+    const api = new GatewayApi(new ApiClient({ baseUrl: 'http://x', getToken: () => 't', fetchImpl }));
+    const n = await api.updateNodeSlice('n1', { cpuAllocatable: 4, gpuMemoryAllocatableGb: 8 });
+    expect(n.cpuAllocatable).toBe(4);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/nodes/n1');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(String(init.body))).toEqual({ cpuAllocatable: 4, gpuMemoryAllocatableGb: 8 });
   });
 });

@@ -12,8 +12,9 @@ import {
   type ExecutionList,
   type ExecutionRequest,
   type Health,
+  type RuntimeInfo,
 } from '../models/execution';
-import { normalizeStatus, type ComputeNode, type NodeList } from '../models/node';
+import { normalizeStatus, type ComputeNode, type NodeList, type NodeSliceRequest } from '../models/node';
 
 function badResponse(what: string): never {
   throw new ApiError(`The gateway returned an unexpected ${what} payload.`, 'bad-response');
@@ -68,6 +69,35 @@ export class GatewayApi {
   async getNode(id: string, signal?: AbortSignal): Promise<ComputeNode> {
     const raw = await this.client.request<unknown>(`/nodes/${encodeURIComponent(id)}`, { signal });
     return coerceNode(raw);
+  }
+
+  /** Change the resource slice a node lends (PATCH /nodes/{id}). */
+  async updateNodeSlice(id: string, req: NodeSliceRequest, signal?: AbortSignal): Promise<ComputeNode> {
+    const raw = await this.client.request<unknown>(`/nodes/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: req,
+      signal,
+    });
+    return coerceNode(raw);
+  }
+
+  /** Runtimes the backend offers, each with the nodes where it was detected. */
+  async listRuntimes(signal?: AbortSignal): Promise<RuntimeInfo[]> {
+    const raw = await this.client.request<unknown>('/runtimes', { signal });
+    const o = asObject(raw, 'runtime list');
+    if (!Array.isArray(o.items)) {
+      badResponse('runtime list');
+    }
+    return (o.items as unknown[]).map((v) => {
+      const r = asObject(v, 'runtime');
+      if (!isRuntime(r.id)) {
+        badResponse('runtime');
+      }
+      return {
+        ...(r as unknown as RuntimeInfo),
+        availableNodeIds: Array.isArray(r.availableNodeIds) ? (r.availableNodeIds as string[]) : [],
+      };
+    });
   }
 
   async listExecutions(signal?: AbortSignal): Promise<ExecutionList> {

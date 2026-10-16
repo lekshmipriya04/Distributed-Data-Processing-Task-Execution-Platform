@@ -26,8 +26,7 @@ dev = [
     "safety==3.2.3",
     # Runtime deps needed to import and unit-test storage-service and
     # ssh-executor in-process (pins match services/*/pyproject.toml).
-    # pyspark and ray are deliberately left out: ssh-executor imports them
-    # lazily inside the training readers, and the unit tests mock those.
+    # No pyspark/ray: training is pure Python on the master (commit 52b210f).
     "fastapi==0.111.1",
     "sqlalchemy[asyncio]==2.0.31",
     "asyncpg==0.29.0",

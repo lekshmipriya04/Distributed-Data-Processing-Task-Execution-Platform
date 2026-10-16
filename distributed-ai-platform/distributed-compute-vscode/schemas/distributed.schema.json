@@ -9,7 +9,7 @@
     "version": { "type": "integer", "const": 1 },
     "name": { "type": "string", "minLength": 1 },
     "entrypoint": { "type": "string", "minLength": 1, "description": "Workspace-relative path to the task entrypoint." },
-    "runtime": { "type": "string", "enum": ["python", "spark", "ray"] },
+    "runtime": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.+-]{0,31}$", "description": "Runtime id from GET /runtimes, e.g. python, bash, node, go." },
     "dataset": { "type": "string", "description": "Workspace-relative dataset path or a storage-service dataset reference." },
     "resources": {
       "type": "object",

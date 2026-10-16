@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../connection/connectionManager';
 import { ApiError } from '../models/http';
-import { capacityLabel, orUnknown, type ComputeNode } from '../models/node';
+import { capacityLabel, hasGpu, nodeLabel, orUnknown, sliceLabel, type ComputeNode } from '../models/node';
 import { Logger } from '../utilities/logger';
 
 type NodeTreeItem =
@@ -50,7 +50,7 @@ export class NodeTreeProvider implements vscode.TreeDataProvider<NodeTreeItem> {
       return item;
     }
     const n = element.node;
-    const item = new vscode.TreeItem(n.name || n.id, vscode.TreeItemCollapsibleState.Collapsed);
+    const item = new vscode.TreeItem(nodeLabel(n), vscode.TreeItemCollapsibleState.Collapsed);
     item.description = `${n.status} · CPU ${capacityLabel(n.cpuReserved, n.cpuTotal)}`;
     item.iconPath = new vscode.ThemeIcon(STATUS_ICON[n.status] ?? 'question');
     item.contextValue = `node:${n.status}`;
@@ -61,6 +61,8 @@ export class NodeTreeProvider implements vscode.TreeDataProvider<NodeTreeItem> {
         `- Status: ${n.status}`,
         `- OS: ${n.osType ?? 'Unknown'} ${n.osVersion ?? ''}`.trim(),
         `- CPU reserved/total: ${capacityLabel(n.cpuReserved, n.cpuTotal)}`,
+        `- ${sliceLabel(n)}`,
+        ...(hasGpu(n) && !n.gpuRuntime ? ['- torch not found — GPU slice not enforceable'] : []),
         `- Enforcement: ${n.resourceEnforcement ?? 'Not reported'}`,
       ].join('\n'),
     );
@@ -104,6 +106,21 @@ export class NodeTreeProvider implements vscode.TreeDataProvider<NodeTreeItem> {
       { kind: 'detail', label: 'Memory total (GB)', value: orUnknown(n.memoryTotalGb) },
       { kind: 'detail', label: 'Memory reserved (GB)', value: orUnknown(n.memoryReservedGb) },
       { kind: 'detail', label: 'GPU', value: orUnknown(n.gpuCount) },
+      ...(hasGpu(n)
+        ? [
+            { kind: 'detail' as const, label: 'GPU model', value: n.gpuModel ?? 'Unknown' },
+            {
+              kind: 'detail' as const,
+              label: 'GPU slice (GB)',
+              value: capacityLabel(n.gpuMemoryAllocatableGb ?? 0, n.gpuMemoryTotalGb),
+            },
+            {
+              kind: 'detail' as const,
+              label: 'GPU runtime',
+              value: n.gpuRuntime ?? 'torch not found — GPU slice not enforceable',
+            },
+          ]
+        : []),
       { kind: 'detail', label: 'Enforcement', value: n.resourceEnforcement ?? 'Not reported' },
       { kind: 'detail', label: 'Active tasks', value: String(n.activeTasks) },
       { kind: 'detail', label: 'Last health check', value: n.lastHealthCheck ?? 'Not reported' },

@@ -18,19 +18,28 @@ import "time"
 // owner lent to the platform, and CPUReserved/MemoryReservedGB are currently
 // held by active leases.
 type ComputeNode struct {
-	ID                  string            `json:"id"`
-	Name                string            `json:"name"`
-	Host                string            `json:"host,omitempty"`
-	OSType              string            `json:"osType,omitempty"`
-	OSVersion           string            `json:"osVersion,omitempty"`
-	Status              string            `json:"status"` // online|busy|degraded|offline|unreachable|draining|unknown
-	CPUTotal            *int              `json:"cpuTotal,omitempty"`
-	CPUAllocatable      *int              `json:"cpuAllocatable,omitempty"`
-	CPUReserved         *int              `json:"cpuReserved,omitempty"`
-	MemoryTotalGB       *float64          `json:"memoryTotalGb,omitempty"`
-	MemoryAllocatableGB *float64          `json:"memoryAllocatableGb,omitempty"`
-	MemoryReservedGB    *float64          `json:"memoryReservedGb,omitempty"`
-	GPUCount            *int              `json:"gpuCount,omitempty"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	Host                string   `json:"host,omitempty"`
+	OSType              string   `json:"osType,omitempty"`
+	OSVersion           string   `json:"osVersion,omitempty"`
+	Status              string   `json:"status"` // online|busy|degraded|offline|unreachable|draining|unknown
+	CPUTotal            *int     `json:"cpuTotal,omitempty"`
+	CPUAllocatable      *int     `json:"cpuAllocatable,omitempty"`
+	CPUReserved         *int     `json:"cpuReserved,omitempty"`
+	MemoryTotalGB       *float64 `json:"memoryTotalGb,omitempty"`
+	MemoryAllocatableGB *float64 `json:"memoryAllocatableGb,omitempty"`
+	MemoryReservedGB    *float64 `json:"memoryReservedGb,omitempty"`
+	GPUCount            *int     `json:"gpuCount,omitempty"`
+	GPUModel            string   `json:"gpuModel,omitempty"`
+	GPUMemoryTotalGB    *float64 `json:"gpuMemoryTotalGb,omitempty"`
+	// GPU slice lent to the platform (count / VRAM GB / fraction of VRAM).
+	GPUAllocatableCount    *int     `json:"gpuAllocatableCount,omitempty"`
+	GPUMemoryAllocatableGB *float64 `json:"gpuMemoryAllocatableGb,omitempty"`
+	GPUFraction            *float64 `json:"gpuFraction,omitempty"`
+	// GPURuntime is the detected GPU runtime (e.g. torch); empty when none was
+	// found, in which case a GPU slice cannot be enforced on the worker.
+	GPURuntime          string            `json:"gpuRuntime,omitempty"`
 	ResourceEnforcement string            `json:"resourceEnforcement,omitempty"` // strict|best_effort
 	Runtimes            map[string]string `json:"runtimes,omitempty"`            // runtime id -> detected version
 	ActiveTasks         int               `json:"activeTasks"`
@@ -67,6 +76,18 @@ type ExecutionRequest struct {
 	CustomFilename string   `json:"customFilename,omitempty"` // runtime "custom" only, e.g. main.zig
 	CPUPerTask     int      `json:"cpuPerTask,omitempty"`
 	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	// ExecutionPolicy is safe_background (default) | balanced | max_available.
+	ExecutionPolicy string `json:"executionPolicy,omitempty"`
+}
+
+// NodeSliceRequest is the body for PATCH /nodes/{id}: change the resource
+// slice lent to the platform. Nil fields are left unchanged; ssh-executor
+// clamps/validates against detected values.
+type NodeSliceRequest struct {
+	CPUAllocatable         *int     `json:"cpuAllocatable,omitempty"`
+	MemoryAllocatableGB    *float64 `json:"memoryAllocatableGb,omitempty"`
+	GPUAllocatableCount    *int     `json:"gpuAllocatableCount,omitempty"`
+	GPUMemoryAllocatableGB *float64 `json:"gpuMemoryAllocatableGb,omitempty"`
 }
 
 // Runtime is a language runtime the backend knows how to run. A runtime is

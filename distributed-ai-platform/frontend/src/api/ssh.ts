@@ -78,6 +78,8 @@ export interface NodeRegisterRequest {
   name: string; // empty -> host
   allocated_cpu: number;
   allocated_memory_gb: number;
+  allocated_gpu_count?: number | null;
+  allocated_gpu_memory_gb?: number | null;
 }
 
 export interface NodeResecureRequest {
@@ -88,6 +90,8 @@ export interface NodeUpdateRequest {
   name?: string | null;
   allocated_cpu?: number | null;
   allocated_memory_gb?: number | null;
+  allocated_gpu_count?: number | null;
+  allocated_gpu_memory_gb?: number | null;
 }
 
 export type NodeAuthType = 'managed_key' | 'password' | 'private_key' | string;
@@ -105,6 +109,11 @@ export interface NodeResponse extends NodeCapabilities {
   key_created_at?: string | null;
   allocated_cpu: number;
   allocated_memory_gb: number;
+  allocated_gpu_count?: number | null;
+  allocated_gpu_memory_gb?: number | null;
+  allocated_gpu_fraction?: number | null;
+  /** e.g. "torch-cuda"; null when no GPU runtime (torch) was found. */
+  gpu_runtime?: string | null;
   status: string;
   health_status: string;
   last_health_check?: string | null;
@@ -153,6 +162,15 @@ export interface RuntimeListResponse {
   items: RuntimeInfo[];
 }
 
+// --- execution policy --------------------------------------------------------
+export type ExecutionPolicy = 'safe_background' | 'balanced' | 'max_available';
+
+export const EXECUTION_POLICIES: { value: ExecutionPolicy; label: string; hint: string }[] = [
+  { value: 'safe_background', label: 'Safe background', hint: 'Low priority; never starve the worker owner (default)' },
+  { value: 'balanced', label: 'Balanced', hint: 'Normal priority within the allocated slice' },
+  { value: 'max_available', label: 'Max available', hint: 'Use the full allocated slice at normal priority' },
+];
+
 // --- task batches ------------------------------------------------------------
 export type BatchStatus =
   | 'pending'
@@ -176,6 +194,7 @@ export interface BatchCreateRequest {
   custom_filename?: string | null;
   cpu_per_task: number;
   timeout_seconds?: number | null;
+  execution_policy?: ExecutionPolicy;
 }
 
 export interface TaskResponse {
@@ -205,8 +224,16 @@ export interface BatchResponse {
   cancelled: number;
   cpu_per_task: number;
   timeout_seconds: number;
+  /** Priority the batch ran with (server default `safe_background`). */
+  execution_policy?: ExecutionPolicy | string;
   created_at: string;
   finished_at?: string | null;
+}
+
+/** Human label for an execution policy id (falls back to the raw id). */
+export function executionPolicyLabel(policy?: string | null): string {
+  const p = policy || 'safe_background';
+  return EXECUTION_POLICIES.find((e) => e.value === p)?.label ?? p;
 }
 
 export interface BatchListResponse {
@@ -221,7 +248,7 @@ export interface BatchTasksResponse {
 // --- distributed ML training -------------------------------------------------
 export type TrainModelType = 'linear_regression' | 'logistic_regression' | 'cnn';
 /** Master-side engine. Workers always execute a stdlib-only Python script. */
-export type TrainEngine = 'python';
+export type TrainEngine = 'python' | 'spark_ray';
 export type TrainMode = 'single' | 'multi';
 
 export interface TrainRequest {
@@ -237,6 +264,7 @@ export interface TrainRequest {
   rounds: number;
   num_classes: number;
   node_ids: string[];
+  execution_policy?: ExecutionPolicy;
 }
 
 export interface TrainShardInfo {

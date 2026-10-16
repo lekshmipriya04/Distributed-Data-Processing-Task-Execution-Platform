@@ -6,7 +6,8 @@ import { useToast } from '../context/ToastContext';
 import { errorMessage } from '../api/client';
 import { isImageDataset } from '../api/storage';
 import { sshApi } from '../api/ssh';
-import type { TrainMode, TrainModelType, TrainRunResponse, NodeResponse } from '../api/ssh';
+import type { ExecutionPolicy, TrainMode, TrainModelType, TrainRunResponse, NodeResponse, TrainEngine } from '../api/ssh';
+import { ExecutionPolicySelect } from '../components/common/ExecutionPolicySelect';
 import type { Dataset } from '../types';
 
 const EMPTY_SPLIT: QuickSplitConfig = { targetColumn: '', featureColumns: [] };
@@ -23,6 +24,7 @@ export function TrainPage() {
   const { showError, showSuccess } = useToast();
 
   const [modelType, setModelType] = useState<TrainModelType>('logistic_regression');
+  const [engine, setEngine] = useState<TrainEngine>('spark_ray');
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [split, setSplit] = useState<QuickSplitConfig>(EMPTY_SPLIT);
   const [learningRate, setLearningRate] = useState(0.01);
@@ -32,6 +34,7 @@ export function TrainPage() {
 
   const [mode, setMode] = useState<TrainMode>('multi');
   const [localCores, setLocalCores] = useState(2);
+  const [executionPolicy, setExecutionPolicy] = useState<ExecutionPolicy>('safe_background');
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
 
   const [nodes, setNodes] = useState<NodeResponse[]>([]);
@@ -95,7 +98,7 @@ export function TrainPage() {
       const created = await sshApi.startTraining({
         dataset_id: dataset.id,
         model_type: modelType,
-        engine: 'python',
+        engine,
         target_column: split.targetColumn,
         feature_columns: split.featureColumns,
         mode,
@@ -105,6 +108,7 @@ export function TrainPage() {
         rounds,
         num_classes: modelType === 'cnn' ? numClasses : 0,
         node_ids: isMulti ? chosenNodes.map((n) => n.id) : [],
+        execution_policy: executionPolicy,
       });
       setRun(created);
       poll(created.id);
@@ -164,7 +168,51 @@ export function TrainPage() {
         </div>
       </Card>
 
-      {/* 3. Compute: master cores or selected workers */}
+      {/* 3. Distributed Execution Engine */}
+      <Card>
+        <SectionTitle>Distributed Engine</SectionTitle>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-2">
+          {[
+            {
+              value: 'spark_ray' as const,
+              title: 'Apache Spark + Ray Pipeline',
+              tag: 'Course Stack',
+              desc: 'Master uses PySpark for dataset sharding & Ray actors for Federated Averaging (FedAvg). Workers stay 100% zero-install.',
+            },
+            {
+              value: 'python' as const,
+              title: 'Native Python Engine',
+              tag: 'Edge Mode',
+              desc: 'Pure-Python stdlib sharding and FedAvg on the master container without Spark or Ray dependencies.',
+            },
+          ].map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              onClick={() => setEngine(item.value)}
+              className={`text-left p-4 rounded-xl border transition-all ${
+                engine === item.value
+                  ? 'bg-blue-50/70 border-blue-500 shadow-xs ring-1 ring-blue-500/20'
+                  : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              <div className="flex items-center justify-between mb-1.5">
+                <span className={`font-semibold text-sm ${engine === item.value ? 'text-blue-900' : 'text-slate-800'}`}>
+                  {item.title}
+                </span>
+                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                  engine === item.value ? 'bg-blue-200 text-blue-800' : 'bg-slate-100 text-slate-600'
+                }`}>
+                  {item.tag}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 leading-relaxed">{item.desc}</p>
+            </button>
+          ))}
+        </div>
+      </Card>
+
+      {/* 4. Compute: master cores or selected workers */}
       <Card>
         <SectionTitle>Compute</SectionTitle>
         <div className="flex gap-3 mb-5">
@@ -216,7 +264,7 @@ export function TrainPage() {
                         <StatusBadge status={n.status} />
                       </div>
                       <div className="text-xs text-slate-500 mt-0.5">
-                        {n.host}:{n.port} · {n.allocated_cpu} cores{n.python_version ? ` · Python ${n.python_version}` : ''}
+                        {n.host}:{n.port} · {n.allocated_cpu} cores{n.allocated_gpu_memory_gb ? ` · ${n.allocated_gpu_memory_gb}GB GPU slice` : ''}{n.gpu_model ? ` (${n.gpu_model})` : ''}{n.python_version ? ` · Python ${n.python_version}` : ''}
                       </div>
                     </button>
                   );
@@ -235,6 +283,9 @@ export function TrainPage() {
               className="w-40 bg-white rounded-lg px-3 py-2 text-slate-900 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
           </label>
         )}
+        <div className="mt-4 max-w-xs">
+          <ExecutionPolicySelect value={executionPolicy} onChange={setExecutionPolicy} />
+        </div>
       </Card>
 
       {/* 4. Dataset upload + column config */}
@@ -303,7 +354,7 @@ export function TrainPage() {
               {dataset && !split.targetColumn && 'Set the target column.'}
               {dataset && split.targetColumn && split.featureColumns.length === 0 && 'Add at least one feature column.'}
               {isMulti && chosenNodes.length === 0 && dataset && <span className="text-rose-600">Select an online worker above.</span>}
-              {canSubmit && <span className="text-emerald-600 font-semibold">Ready to train on {engine}.</span>}
+              {canSubmit && <span className="text-emerald-600 font-semibold">Ready to train ({isMulti ? `${chosenNodes.length} worker(s)` : "master"}).</span>}
             </div>
             <PrimaryButton onClick={handleTrain} disabled={!canSubmit}>
               {submitting ? 'Starting…' : 'Start Training'}

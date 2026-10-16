@@ -45,6 +45,7 @@ func (e *StatusError) Unwrap() error { return e.Err }
 type Store interface {
 	ListNodes(ctx context.Context) ([]ComputeNode, error)
 	GetNode(ctx context.Context, id string) (ComputeNode, error)
+	UpdateNodeSlice(ctx context.Context, id string, req NodeSliceRequest) (ComputeNode, error)
 	ClusterStatus(ctx context.Context) (ClusterStatus, error)
 	ListRuntimes(ctx context.Context) ([]Runtime, error)
 	ListExecutions(ctx context.Context) ([]Execution, error)
@@ -104,6 +105,30 @@ func (s *MemStore) GetNode(_ context.Context, id string) (ComputeNode, error) {
 	if !ok {
 		return ComputeNode{}, ErrNotFound
 	}
+	return n, nil
+}
+
+// UpdateNodeSlice applies the provided slice fields to a seeded node.
+func (s *MemStore) UpdateNodeSlice(_ context.Context, id string, req NodeSliceRequest) (ComputeNode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.nodes[id]
+	if !ok {
+		return ComputeNode{}, ErrNotFound
+	}
+	if req.CPUAllocatable != nil {
+		n.CPUAllocatable = intPtr(*req.CPUAllocatable)
+	}
+	if req.MemoryAllocatableGB != nil {
+		n.MemoryAllocatableGB = floatPtr(*req.MemoryAllocatableGB)
+	}
+	if req.GPUAllocatableCount != nil {
+		n.GPUAllocatableCount = intPtr(*req.GPUAllocatableCount)
+	}
+	if req.GPUMemoryAllocatableGB != nil {
+		n.GPUMemoryAllocatableGB = floatPtr(*req.GPUMemoryAllocatableGB)
+	}
+	s.nodes[id] = n
 	return n, nil
 }
 

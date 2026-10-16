@@ -26,6 +26,9 @@ func (e errStore) GetExecution(context.Context, string) (Execution, error) { ret
 func (e errStore) CancelExecution(context.Context, string) (Execution, error) {
 	return Execution{}, e.err
 }
+func (e errStore) UpdateNodeSlice(context.Context, string, NodeSliceRequest) (ComputeNode, error) {
+	return ComputeNode{}, e.err
+}
 func (e errStore) CreateExecution(context.Context, ExecutionRequest) (Execution, error) {
 	return Execution{}, e.err
 }
@@ -72,6 +75,11 @@ const (
 	upNode2 = `{"id":"n2","owner_id":"alice","name":"pi","host":"10.0.0.6","port":22,"username":"u",
 		"auth_type":"password","detected_cpu":0,"detected_memory_gb":0,"allocated_cpu":1,"allocated_memory_gb":1.0,
 		"status":"online","health_status":"unreachable","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
+	upNodeGPU = `{"id":"n1","owner_id":"alice","name":"rig","host":"10.0.0.5","port":22,"username":"u",
+		"auth_type":"managed_key","detected_cpu":10,"detected_memory_gb":32.0,"detected_gpu":1,"gpu_count":1,
+		"gpu_model":"RTX 3090","gpu_memory_gb":24.0,"gpu_runtime":null,"allocated_cpu":4,"allocated_memory_gb":8.0,
+		"allocated_gpu_count":1,"allocated_gpu_memory_gb":8.0,"allocated_gpu_fraction":0.333,
+		"status":"online","health_status":"online","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
 	upBatchRunning = `{"id":"b1","owner_id":"alice","runtime":"node","status":"running","message":null,"total":3,
 		"completed":1,"failed":0,"cancelled":0,"cpu_per_task":2,"timeout_seconds":60,"created_at":"2026-10-16T09:00:00"}`
 	upBatchDone = `{"id":"b2","owner_id":"alice","runtime":"python","status":"completed_with_errors","message":"1 task failed",
@@ -91,6 +99,8 @@ func (f *fakeExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(200, `{"items":[`+upNode1+`,`+upNode2+`],"total":2}`)
 	case "GET /api/v1/ssh/nodes/n1":
 		write(200, upNode1)
+	case "PATCH /api/v1/ssh/nodes/n1":
+		write(200, upNodeGPU)
 	case "GET /api/v1/ssh/nodes/n1/capacity":
 		write(200, `{"node_id":"n1","name":"laptop","status":"online","cpu_total":4,"cpu_reserved":2,
 			"cpu_available":2,"memory_total_gb":8.0,"memory_reserved_gb":1.5,"memory_available_gb":6.5,"active_leases":1}`)
@@ -426,5 +436,50 @@ func TestNewUpstreamStoreURLHandling(t *testing.T) {
 		if err != nil || st.base != want {
 			t.Fatalf("%q -> %q (%v), want %q", in, st.base, err, want)
 		}
+	}
+}
+
+func TestUpstreamUpdateNodeSlice(t *testing.T) {
+	fake := &fakeExecutor{}
+	s, _ := newUpstreamGateway(t, fake, time.Second)
+	tok := userToken(t, "alice")
+
+	w := do(t, s, "PATCH", "/nodes/n1", tok, NodeSliceRequest{CPUAllocatable: intp(4), GPUMemoryAllocatableGB: fp(8)})
+	if w.Code != 200 {
+		t.Fatalf("patch = %d: %s", w.Code, w.Body.String())
+	}
+	n := decodeBody[ComputeNode](t, w)
+	if n.GPUModel != "RTX 3090" || *n.GPUMemoryTotalGB != 24 || *n.GPUMemoryAllocatableGB != 8 ||
+		*n.GPUAllocatableCount != 1 || *n.GPUFraction != 0.333 || n.GPURuntime != "" || *n.CPUAllocatable != 4 {
+		t.Fatalf("node = %+v", n)
+	}
+	var patch recorded
+	for _, r := range fake.all() {
+		if r.Method == "PATCH" {
+			patch = r
+		}
+	}
+	if patch.Path != "/api/v1/ssh/nodes/n1" || patch.Body["allocated_cpu"] != float64(4) ||
+		patch.Body["allocated_gpu_memory_gb"] != float64(8) {
+		t.Fatalf("upstream patch = %+v", patch)
+	}
+	for _, k := range []string{"allocated_memory_gb", "allocated_gpu_count"} {
+		if _, ok := patch.Body[k]; ok {
+			t.Fatalf("unset field %s forwarded: %+v", k, patch.Body)
+		}
+	}
+}
+
+func TestUpstreamExecutionPolicyForwarded(t *testing.T) {
+	fake := &fakeExecutor{}
+	s, _ := newUpstreamGateway(t, fake, time.Second)
+	w := do(t, s, "POST", "/executions", userToken(t, "alice"),
+		ExecutionRequest{Runtime: "python", Code: "print(1)", ExecutionPolicy: "balanced"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+	}
+	reqs := fake.all()
+	if p := reqs[len(reqs)-1].Body["execution_policy"]; p != "balanced" {
+		t.Fatalf("execution_policy = %v", p)
 	}
 }

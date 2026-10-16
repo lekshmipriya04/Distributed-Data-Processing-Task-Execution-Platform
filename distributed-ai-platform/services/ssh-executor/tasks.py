@@ -1,31 +1,10 @@
-"""Parallel task dispatcher — the one execution path for batches and training.
+"""Tasks domain module — batch lifecycle, distributed task execution, and sandboxing.
 
-Flow for a batch (``dispatch_batch``):
-
-1. Select the owner's online nodes (optionally the user's subset) that have the
-   batch's runtime (``custom`` runs on every selected node). None -> the batch
-   fails with a message naming the runtime.
-2. Reserve a lease on each node **before** dispatching
-   (:func:`execution_manager.reserve_allocations`, atomic per node). Only nodes
-   that got a lease are used. If every node is fully leased by other jobs, wait
-   for capacity (bounded by :data:`CAPACITY_WAIT_SECONDS`).
-3. Fan out with :func:`run_across_nodes`: each node runs
-   ``lease.cpu_allocated // cpu_per_task`` concurrent slots; every slot owns one
-   SSH connection, a distinct core slice and ``memory / slots`` of the lease's
-   memory, all passed to the sandboxed :class:`task_executor.TaskExecutor`.
-4. A task is retried on another node (max ``min(nodes, 3)`` attempts) only for
-   infrastructure failures (cannot connect, connection lost). A user program
-   that exits non-zero is a finished task with status ``failed``; it is never
-   retried.
-5. Cancellation: ``POST /batches/{id}/cancel`` sets ``cancelling``; a watcher
-   polls it, stops queuing, kills running sandboxes via ``TaskExecutor.cancel``
-   and the remaining tasks end ``cancelled``.
-6. Leases are always released in ``finally`` and the batch is finalised with
-   completed/failed/cancelled counts and ``finished_at``.
-
-Training reuses :func:`acquire_allocations`, :func:`lease_heartbeat` and
-:func:`run_across_nodes` unchanged (runtime ``python``, shard as ``input.json``).
-Blocking paramiko work always runs in worker threads.
+Unifies:
+- Sandbox execution and OS adaptation (TaskExecutor, detect_os, select_adapter)
+- Core pinning and multi-slot worker fan-out (CORE_POOL, make_spec, run_across_nodes)
+- Batch orchestration and lease handling (acquire_allocations, lease_heartbeat, dispatch_batch)
+- Batch & Task database persistence (BatchService, CANCELLABLE_STATUSES)
 """
 from __future__ import annotations
 
@@ -33,6 +12,7 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import posixpath
 import threading
 import time
 import types
@@ -40,37 +20,41 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import desc, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-import lease_logic
-from config import get_settings
-from database import get_db_manager
-from execution_manager import (
-    NodeAllocation,
-    release_allocations,
-    renew_allocations,
-    reserve_allocations,
-    select_runtime_nodes,
-)
-from lease_recovery import track_live_job
-from models import SSHNode, Task, TaskBatch
-from node_service import transport_for_node
-from resource_spec import ResourceSpec
-from task_executor import TaskExecutor, select_adapter
+from os_adapters.base import OSAdapter
+from os_adapters.linux import LinuxAdapter
+from os_adapters.macos import MacOSAdapter
+from os_adapters.windows import WindowsAdapter
+from runtimes import DEFAULT_EXECUTION_POLICY, ResourceSpec, policy_nice
+from runtimes import CUSTOM_RUNTIME, get_runtime
+from schemas import BatchCreateRequest
+from ssh import SSHTransport
 
 logger = structlog.get_logger(__name__)
 
-#: How often a running batch re-reads its status to notice a cancel request.
+# ==============================================================================
+# SECTION 1: Sandbox Constants & OS Adaptation
+# ==============================================================================
+
+SANDBOX_PREFIX = "dp-exec."
+DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+MACOS_EXTRA_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin"
+INPUT_FILENAME = "input.txt"
+
 CANCEL_POLL_SECONDS = 1.0
-#: While every selected node is fully leased, retry the reservation this often…
 CAPACITY_POLL_SECONDS = 2.0
-#: …for at most this long before failing the batch/run.
 CAPACITY_WAIT_SECONDS = 300.0
 
 CANCEL_STATUSES = ("cancelling", "cancelled")
+CANCELLABLE_STATUSES = frozenset({"pending", "running"})
+TERMINAL_BATCH_STATUSES = frozenset(
+    {"cancelled", "completed", "completed_with_errors", "failed"}
+)
 
 OnUpdate = Callable[[int, str, dict], Awaitable[None]]
 CancelCheck = Callable[[], Awaitable[bool]]
@@ -80,16 +64,305 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# --- per-node core bookkeeping ------------------------------------------------
-class _CorePool:
-    """Which borrowed cores of each node are handed to a slot right now.
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
 
-    Leases already guarantee that the slots of all concurrent jobs on a node
-    need at most ``allocated_cpu`` cores in total, so handing out cores from
-    ``0..allocated_cpu-1`` gives every running slot — across batches and
-    training runs in this process — a disjoint core set.
+
+def _coerce_dt(value: Any, fallback: datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)) and value > 0:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return fallback
+
+
+def detect_os(transport: SSHTransport, timeout: int = 15) -> str:
+    """Return ``'linux' | 'macos' | 'windows'`` for a connected transport."""
+    res = transport.exec("uname -s", timeout=timeout)
+    out = (res.get("stdout") or "").strip().lower()
+    if res.get("exit_code") == 0 and out:
+        return "macos" if "darwin" in out else "linux"
+    res2 = transport.exec("echo %OS%", timeout=timeout)
+    if "windows" in (res2.get("stdout") or "").strip().lower():
+        return "windows"
+    res3 = transport.exec(
+        'powershell -NoProfile -Command "$PSVersionTable.PSVersion.Major"', timeout=timeout
+    )
+    if (res3.get("stdout") or "").strip():
+        return "windows"
+    raise RuntimeError("Could not determine the remote operating system")
+
+
+def select_adapter(os_type: str) -> OSAdapter:
+    return {
+        "linux": LinuxAdapter,
+        "macos": MacOSAdapter,
+        "windows": WindowsAdapter,
+    }.get((os_type or "").strip().lower(), LinuxAdapter)()
+
+
+# ==============================================================================
+# SECTION 2: TaskExecutor (Confinement & Sandboxing)
+# ==============================================================================
+
+class TaskExecutor:
+    """Runs jobs in throwaway sandboxes over one :class:`SSHTransport`.
+
+    The transport is opened lazily and left open when the caller already owns
+    it (the dispatcher reuses one transport per worker slot).
     """
 
+    def __init__(
+        self,
+        transport: SSHTransport,
+        adapter: OSAdapter,
+        *,
+        nice: int = 19,
+        max_output_bytes: int = 1_000_000,
+        control_timeout: int = 30,
+    ):
+        self.transport = transport
+        self.adapter = adapter
+        self.nice = nice
+        self.max_output_bytes = max_output_bytes
+        self.control_timeout = control_timeout
+
+    @property
+    def _is_windows(self) -> bool:
+        return self.adapter.os_type == "windows"
+
+    def _run(self, command: str, *, timeout: Optional[int] = None) -> Dict[str, Any]:
+        return self.transport.exec(command, timeout=timeout or self.control_timeout)
+
+    def _path_for(self, node_path: Optional[str]) -> str:
+        if node_path:
+            return node_path
+        if self._is_windows:
+            return ""
+        if self.adapter.os_type == "macos":
+            return DEFAULT_PATH + ":" + MACOS_EXTRA_PATH
+        return DEFAULT_PATH
+
+    def _create_sandbox(self, execution_id: str) -> str:
+        res = self._run(self.adapter.create_sandbox_command(execution_id))
+        path = (res.get("stdout") or "").strip().splitlines()
+        path = path[-1].strip() if path else ""
+        if res.get("exit_code") != 0 or not path:
+            raise RuntimeError(
+                f"Could not create a sandbox on {self.transport.host}: "
+                f"{(res.get('stderr') or '').strip()[:300]}"
+            )
+        return path
+
+    def _remove_sandbox(self, sandbox: Optional[str]) -> None:
+        if not sandbox:
+            return
+        try:
+            self._run(
+                self.adapter.remove_sandbox_command(sandbox),
+                timeout=max(self.control_timeout, 30),
+            )
+        except Exception as exc:
+            logger.warning("sandbox_cleanup_failed", host=self.transport.host,
+                           sandbox=sandbox, error=str(exc))
+
+    def _sandbox_path(self, sandbox: str, *parts: str) -> str:
+        if self._is_windows:
+            return "/".join((sandbox.rstrip("/\\"),) + tuple(parts))
+        return posixpath.join(sandbox, *parts)
+
+    def _write_file(self, path: str, content: str) -> None:
+        self.transport.put_text(path, content)
+
+    def cancel(self, execution_id: str) -> bool:
+        if self._is_windows:
+            res = self._run(self.adapter.cancel_command(execution_id))
+            return res.get("exit_code") == 0
+        res = self._run(self.adapter.cancel_command(execution_id))
+        killed = bool((res.get("stdout") or "").strip())
+        self._run(self.adapter.remove_sandbox_by_execution_command(execution_id))
+        return killed
+
+    def sweep_stale_sandboxes(self, older_than_minutes: int) -> int:
+        try:
+            res = self._run(
+                self.adapter.sweep_sandboxes_command(older_than_minutes),
+                timeout=max(self.control_timeout, 60),
+            )
+            out = (res.get("stdout") or "").strip()
+            if not out:
+                return 0
+            return len([ln for ln in out.splitlines() if ln.strip()])
+        except Exception as exc:
+            logger.warning("sandbox_sweep_failed", host=self.transport.host, error=str(exc))
+            return 0
+
+    def run(
+        self,
+        runtime_id: str,
+        code: str,
+        input_data: str = "",
+        spec: Optional[ResourceSpec] = None,
+        *,
+        env_path: Optional[str] = None,
+        custom_command: Optional[str] = None,
+        custom_filename: Optional[str] = None,
+        execution_id: Optional[str] = None,
+        extra_files: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        spec = spec or ResourceSpec(cpu_cores=1, memory_gb=1.0)
+        execution_id = execution_id or f"exec_{uuid.uuid4().hex}"
+        runtime = get_runtime(runtime_id)
+        if runtime is None:
+            return self._error_result(execution_id, f"Unknown runtime '{runtime_id}'")
+
+        started = _now()
+        sandbox: Optional[str] = None
+        owns_connection = not self.transport.is_connected
+        try:
+            if owns_connection:
+                self.transport.connect()
+            sandbox = self._create_sandbox(execution_id)
+            return self._run_in_sandbox(
+                sandbox, runtime, code, input_data, spec,
+                env_path=env_path, custom_command=custom_command,
+                custom_filename=custom_filename, execution_id=execution_id,
+                extra_files=extra_files, started=started,
+            )
+        except Exception as exc:
+            logger.error("task_execution_failed", host=self.transport.host,
+                         runtime=runtime_id, error=str(exc))
+            return {
+                "status": "error",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": f"{type(exc).__name__}: {exc}",
+                "execution_id": execution_id,
+                "started_at": _iso(started),
+                "finished_at": _iso(_now()),
+                "duration_ms": None,
+            }
+        finally:
+            self._remove_sandbox(sandbox)
+            if owns_connection:
+                self.transport.close()
+
+    def _run_in_sandbox(
+        self,
+        sandbox: str,
+        runtime: Any,
+        code: str,
+        input_data: str,
+        spec: ResourceSpec,
+        *,
+        env_path: Optional[str],
+        custom_command: Optional[str],
+        custom_filename: Optional[str],
+        execution_id: str,
+        extra_files: Optional[Dict[str, str]],
+        started: datetime,
+    ) -> Dict[str, Any]:
+        filename = custom_filename if runtime.id == CUSTOM_RUNTIME and custom_filename else None
+        source_name = runtime.source_filename(self.adapter.os_type) if filename is None else filename
+        source_path = self._sandbox_path(sandbox, source_name)
+
+        self._write_file(source_path, code)
+        self._write_file(self._sandbox_path(sandbox, INPUT_FILENAME), input_data)
+        for name, content in (extra_files or {}).items():
+            self._write_file(self._sandbox_path(sandbox, name), content)
+        for name, content in self.adapter.sandbox_support_files(runtime, spec).items():
+            self._write_file(self._sandbox_path(sandbox, name), content)
+
+        launch = self.adapter.build_sandbox_command(
+            sandbox=sandbox,
+            runtime=runtime,
+            filename=source_name,
+            spec=spec,
+            nice=spec.nice,
+            env_path=self._path_for(env_path),
+            custom_command=custom_command,
+            execution_id=execution_id,
+            max_output_bytes=self.max_output_bytes,
+        )
+        res = self.transport.exec(
+            launch,
+            input_data=input_data,
+            timeout=spec.timeout_seconds + 30,
+            max_output_bytes=self.max_output_bytes,
+        )
+        finished = _now()
+        stdout = res.get("stdout") or ""
+        stderr = res.get("stderr") or ""
+        exit_code = res.get("exit_code")
+        if exit_code == 124 and "[task timed out]" not in stderr:
+            stderr = (stderr + "\n[task timed out]").strip()
+        status = "success" if exit_code == 0 else "error"
+        duration_ms = int((finished - started).total_seconds() * 1000)
+        return {
+            "status": status,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "execution_id": execution_id,
+            "started_at": _iso(started),
+            "finished_at": _iso(finished),
+            "duration_ms": duration_ms,
+            "runtime": runtime.id,
+            "sandbox": sandbox,
+        }
+
+    def run_python(
+        self,
+        code: str,
+        input_data: str = "",
+        spec: Optional[ResourceSpec] = None,
+        execution_id: Optional[str] = None,
+        strict: bool = False,
+        env_path: Optional[str] = None,
+        extra_files: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        return self.run(
+            "python", code, input_data, spec,
+            env_path=env_path, execution_id=execution_id, extra_files=extra_files,
+        )
+
+    def _error_result(self, execution_id: str, message: str) -> Dict[str, Any]:
+        now = _now()
+        return {
+            "status": "error",
+            "exit_code": None,
+            "stdout": "",
+            "stderr": message,
+            "execution_id": execution_id,
+            "started_at": _iso(now),
+            "finished_at": _iso(now),
+            "duration_ms": 0,
+        }
+
+
+# ==============================================================================
+# SECTION 3: Resource Pooling & Slot Fan-Out
+# ==============================================================================
+
+import leases as lease_logic
+from leases import (
+    NodeAllocation,
+    node_gpu_enforceable,
+    release_allocations,
+    renew_allocations,
+    reserve_allocations,
+    select_runtime_nodes,
+    track_live_job,
+)
+
+
+class _CorePool:
     def __init__(self) -> None:
         self._busy: dict[str, set[int]] = {}
         self._lock = threading.Lock()
@@ -99,7 +372,6 @@ class _CorePool:
         total = max(int(total or 0), count)
         with self._lock:
             busy = self._busy.setdefault(str(node_id), set())
-            # Prefer an aligned contiguous block (slot i -> i*c … i*c+c-1).
             for start in range(0, total - count + 1, count):
                 block = list(range(start, start + count))
                 if not busy.intersection(block):
@@ -128,16 +400,27 @@ class _CorePool:
 CORE_POOL = _CorePool()
 
 
-def make_spec(cores: list[int], memory_gb: float, timeout_seconds: int) -> ResourceSpec:
-    """Build the :class:`ResourceSpec` for one slot.
-
-    ``cpu_cores`` is the slot's core count. If ResourceSpec carries an explicit
-    core list/offset field, the slot's distinct cores are passed through it.
-    """
+def make_spec(
+    cores: list[int],
+    memory_gb: float,
+    timeout_seconds: int,
+    *,
+    nice: int = 19,
+    gpu_count: int = 0,
+    gpu_memory_fraction: float = 0.0,
+    gpu_memory_gb: float = 0.0,
+    gpu_enforceable: bool = False,
+) -> ResourceSpec:
+    fraction = max(0.0, min(1.0, float(gpu_memory_fraction or 0.0)))
     kwargs: dict[str, Any] = {
         "cpu_cores": max(1, len(cores)),
         "memory_gb": max(0.0, float(memory_gb or 0.0)),
         "timeout_seconds": max(1, int(timeout_seconds)),
+        "nice": max(0, min(19, int(nice))),
+        "gpu_count": max(0, int(gpu_count or 0)) if fraction > 0 else 0,
+        "gpu_memory_fraction": fraction if gpu_count else 0.0,
+        "gpu_memory_gb": max(0.0, float(gpu_memory_gb or 0.0)) if fraction > 0 else 0.0,
+        "gpu_enforceable": bool(gpu_enforceable),
     }
     fields = {f.name: f for f in dataclasses.fields(ResourceSpec)}
     for name in ("cores", "core_ids", "cpu_ids", "cpu_list", "cpu_set", "cpuset", "core_list"):
@@ -157,7 +440,6 @@ def make_spec(cores: list[int], memory_gb: float, timeout_seconds: int) -> Resou
     return ResourceSpec(**kwargs)
 
 
-# --- slots: one SSH connection + one core slice each ----------------------------
 @dataclass
 class _Slot:
     alloc: NodeAllocation
@@ -177,8 +459,6 @@ class _Slot:
 
 
 class _Sweeper:
-    """Run ``sweep_stale_sandboxes`` once per node per job."""
-
     def __init__(self, minutes: Optional[int]) -> None:
         self._minutes = minutes
         self._done: set[str] = set()
@@ -193,13 +473,13 @@ class _Sweeper:
             self._done.add(str(node_id))
         try:
             executor.sweep_stale_sandboxes(self._minutes)
-        except Exception as exc:  # never fatal
+        except Exception as exc:
             logger.warning("sandbox_sweep_failed", node_id=str(node_id), error=str(exc))
 
 
 def _open_slot(slot: _Slot, nice: int, max_output_bytes: int, sweeper: _Sweeper) -> Any:
-    """Blocking: connect the slot's transport on first use."""
     if slot.executor is None:
+        from node_service import transport_for_node
         transport = transport_for_node(slot.node)
         transport.connect()
         slot.transport = transport
@@ -233,11 +513,6 @@ def _cancel_in_slot(slot: _Slot, execution_id: str) -> None:
 
 
 def classify_result(result: dict) -> str:
-    """``completed`` | ``failed`` (user program) | ``cancelled`` | ``infra``.
-
-    Only ``infra`` (no process exit status at all, e.g. the sandbox could not
-    be created because the connection dropped) is retried on another node.
-    """
     status = str(result.get("status") or "").lower()
     exit_code = result.get("exit_code")
     if status in ("success", "completed"):
@@ -251,20 +526,6 @@ def classify_result(result: dict) -> str:
     if exit_code == 0 and status not in ("error", "failed"):
         return "completed"
     return "failed"
-
-
-def _coerce_dt(value: Any, fallback: datetime) -> datetime:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, (int, float)) and value > 0:
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
-    if isinstance(value, str) and value:
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
-    return fallback
 
 
 @dataclass
@@ -289,21 +550,8 @@ async def run_across_nodes(
     on_update: Optional[OnUpdate] = None,
     cancel_check: Optional[CancelCheck] = None,
     sweep_minutes: Optional[int] = None,
+    affinity: Optional[list] = None,
 ) -> list[dict]:
-    """Run ``code`` once per entry of ``inputs`` across leased nodes, in parallel.
-
-    Shared fan-out engine for task batches and distributed training. Each
-    allocation contributes ``alloc.slots`` workers; a slot pulls the next task
-    it may run, so faster nodes take more work. ``files_for(i)`` adds extra
-    sandbox files for input *i* (training writes its shard as ``input.json``).
-
-    Returns one dict per input (same order) with ``status`` (``completed`` |
-    ``failed`` | ``cancelled``), ``exit_code``, ``stdout``, ``stderr``,
-    ``node_id``, ``attempts``, ``execution_id``, ``started_at``,
-    ``finished_at``, ``duration_ms`` and ``infra_error``. ``on_update(idx,
-    phase, info)`` is awaited on ``running``, ``retrying`` and the terminal
-    phase so callers can persist progress.
-    """
     n = len(inputs)
     if n == 0:
         return []
@@ -354,13 +602,15 @@ async def run_across_nodes(
 
     def take_locked(node_id) -> Optional[_Item]:
         for item in pending:
-            if node_id not in item.tried:
+            if node_id in item.tried:
+                continue
+            pref = affinity[item.idx] if affinity else None
+            if pref is None or pref == node_id or pref in dead or pref in item.tried:
                 pending.remove(item)
                 return item
         return None
 
     def strand_check_locked() -> list[dict]:
-        """Fail pending items no live, untried node can take any more."""
         stranded = []
         live = [nid for nid in node_ids if nid not in dead]
         for item in list(pending):
@@ -378,7 +628,15 @@ async def run_across_nodes(
 
     async def worker(slot: _Slot) -> None:
         node_id = slot.node_id
-        spec = make_spec(slot.cores, slot.alloc.memory_per_slot_gb, timeout_seconds)
+        alloc = slot.alloc
+        spec = make_spec(
+            slot.cores, alloc.memory_per_slot_gb, timeout_seconds,
+            nice=nice,
+            gpu_count=getattr(alloc, "gpu_allocated", 0),
+            gpu_memory_fraction=getattr(alloc, "gpu_fraction_per_slot", 0.0),
+            gpu_memory_gb=getattr(alloc, "gpu_memory_per_slot_gb", 0.0),
+            gpu_enforceable=node_gpu_enforceable(alloc.node),
+        )
         try:
             while True:
                 async with cond:
@@ -449,8 +707,6 @@ async def run_across_nodes(
                     cond.notify_all()
 
                 if requeue:
-                    # Persist "retrying" before the item becomes visible to other
-                    # workers so the DB never ends on a stale phase.
                     await notify(item.idx, "retrying", {
                         "node_id": node_id, "attempts": item.attempts,
                         "stderr": f"Attempt {item.attempts} on node {node_id} failed "
@@ -477,7 +733,7 @@ async def run_across_nodes(
         while True:
             await asyncio.sleep(CANCEL_POLL_SECONDS)
             try:
-                requested = await cancel_check()  # type: ignore[misc]
+                requested = await cancel_check()
             except Exception as exc:
                 logger.warning("cancel_check_failed", error=str(exc))
                 continue
@@ -514,7 +770,6 @@ async def run_across_nodes(
             if s.pooled:
                 CORE_POOL.release(s.node_id, s.cores)
 
-    # Anything never settled (every worker gone) ends cancelled or failed.
     for idx in range(n):
         if results[idx] is None:
             now = _now()
@@ -524,13 +779,12 @@ async def run_across_nodes(
                              None, 0, None, now, now, infra=not state["cancelled"])
             results[idx] = info
             await notify(idx, phase, info)
-    return results  # type: ignore[return-value]
+    return results
 
 
 def _run_in_slot(slot: _Slot, sweeper: _Sweeper, *, runtime_id, code, input_data, spec,
                  custom_command, custom_filename, execution_id, extra_files,
                  nice, max_output_bytes) -> dict:
-    """Blocking: run one task through the slot's sandboxed executor."""
     executor = _open_slot(slot, nice, max_output_bytes, sweeper)
     return executor.run(
         runtime_id,
@@ -569,7 +823,10 @@ def _terminal(idx: int, status: str, raw: dict, node_id, attempts: int,
     }
 
 
-# --- allocation helpers shared with training ------------------------------------
+# ==============================================================================
+# SECTION 4: Lease Acquisition & Heartbeat
+# ==============================================================================
+
 async def acquire_allocations(
     owner_id: str,
     nodes: list,
@@ -582,11 +839,6 @@ async def acquire_allocations(
     on_wait: Optional[Callable[[], Awaitable[None]]] = None,
     wait_seconds: Optional[float] = None,
 ) -> list[NodeAllocation]:
-    """Reserve leases on ``nodes``; if all are full, wait for capacity.
-
-    Returns ``[]`` when nothing frees up within ``wait_seconds`` (default
-    :data:`CAPACITY_WAIT_SECONDS`) or the job is cancelled meanwhile.
-    """
     budget = CAPACITY_WAIT_SECONDS if wait_seconds is None else wait_seconds
     deadline = time.monotonic() + max(0.0, budget)
     waited = False
@@ -611,7 +863,6 @@ async def acquire_allocations(
 async def lease_heartbeat(
     owner_id: str, allocations: list[NodeAllocation], ttl_seconds: int
 ) -> AsyncIterator[None]:
-    """Renew the leases every ``ttl/3`` while the body runs."""
     interval = max(5.0, float(ttl_seconds) / 3.0)
 
     async def beat() -> None:
@@ -628,9 +879,16 @@ async def lease_heartbeat(
             await task
 
 
-# --- batch persistence (each in its own short session) --------------------------
+# ==============================================================================
+# SECTION 5: Batch Dispatching
+# ==============================================================================
+
+from config import get_settings
+from database import get_db_manager
+from models import SSHNode, Task, TaskBatch
+
+
 async def _load_batch(batch_id: uuid.UUID) -> Optional[tuple[Any, list[Any]]]:
-    """Snapshot of the batch and its tasks (plain namespaces, no ORM state)."""
     async with get_db_manager().session() as session:
         batch = (
             await session.execute(select(TaskBatch).where(TaskBatch.id == batch_id))
@@ -652,6 +910,7 @@ async def _load_batch(batch_id: uuid.UUID) -> Optional[tuple[Any, list[Any]]]:
             custom_filename=batch.custom_filename, cpu_per_task=batch.cpu_per_task or 1,
             timeout_seconds=batch.timeout_seconds, node_ids_json=batch.node_ids_json,
             status=batch.status,
+            execution_policy=getattr(batch, "execution_policy", None) or DEFAULT_EXECUTION_POLICY,
         )
         task_snaps = [
             types.SimpleNamespace(id=t.id, seq=t.seq, input_data=t.input_data or "")
@@ -688,7 +947,6 @@ async def _batch_status(batch_id: uuid.UUID) -> Optional[str]:
 
 
 async def _transition_batch(batch_id: uuid.UUID, from_statuses: tuple, **fields) -> bool:
-    """Conditional update: only applies while the batch is in ``from_statuses``."""
     async with get_db_manager().session() as session:
         res = await session.execute(
             update(TaskBatch)
@@ -699,7 +957,6 @@ async def _transition_batch(batch_id: uuid.UUID, from_statuses: tuple, **fields)
 
 
 async def _finalize_batch(batch_id: uuid.UUID, failure: Optional[str] = None) -> Optional[str]:
-    """Settle leftover tasks, store counts + ``finished_at``; return final status."""
     now = _now()
     async with get_db_manager().session() as session:
         batch = (
@@ -776,12 +1033,6 @@ def _task_fields(phase: str, info: dict) -> dict:
 
 
 async def dispatch_batch(batch_id: uuid.UUID, node_ids: Optional[list] = None) -> None:
-    """Execute every task of ``batch_id`` across the owner's leased nodes.
-
-    ``node_ids`` optionally restricts the run to a subset of the owner's online
-    nodes; when omitted the batch's stored ``node_ids_json`` is used (empty =
-    all online nodes).
-    """
     settings = get_settings()
     with track_live_job(batch_id):
         loaded = await _load_batch(batch_id)
@@ -856,7 +1107,7 @@ async def dispatch_batch(batch_id: uuid.UUID, node_ids: Optional[list] = None) -
                             custom_command=batch.custom_command,
                             custom_filename=batch.custom_filename,
                             timeout_seconds=timeout,
-                            nice=settings.task_nice,
+                            nice=policy_nice(batch.execution_policy, settings.task_nice),
                             max_output_bytes=settings.max_output_bytes,
                             on_update=on_update,
                             cancel_check=cancel_check,
@@ -869,3 +1120,86 @@ async def dispatch_batch(batch_id: uuid.UUID, node_ids: Optional[list] = None) -
             await release_allocations(owner_id, allocations)
             status = await _finalize_batch(batch_id, failure=failure)
         logger.info("dispatch_batch_done", batch_id=str(batch_id), tasks=len(tasks), status=status)
+
+
+# ==============================================================================
+# SECTION 6: BatchService (Persistence & Lifecycle Requests)
+# ==============================================================================
+
+class BatchService:
+    def __init__(self, db_session: AsyncSession):
+        self._db = db_session
+
+    async def create_batch(
+        self,
+        request: BatchCreateRequest,
+        owner_id: str,
+        *,
+        timeout_seconds: int,
+    ) -> TaskBatch:
+        inputs = request.inputs or [""]
+        batch = TaskBatch(
+            owner_id=owner_id,
+            code=request.code,
+            runtime=request.runtime,
+            custom_command=request.custom_command if request.runtime == "custom" else None,
+            custom_filename=request.custom_filename if request.runtime == "custom" else None,
+            cpu_per_task=max(1, int(request.cpu_per_task or 1)),
+            timeout_seconds=int(timeout_seconds),
+            execution_policy=request.execution_policy,
+            node_ids_json=json.dumps([str(n) for n in request.node_ids]),
+            status="pending",
+            total=len(inputs),
+        )
+        self._db.add(batch)
+        await self._db.flush()
+        for seq, shard in enumerate(inputs):
+            self._db.add(
+                Task(batch_id=batch.id, seq=seq, input_data=shard, status="pending")
+            )
+        await self._db.commit()
+        await self._db.refresh(batch)
+        logger.info(
+            "batch_created", batch_id=str(batch.id), total=batch.total,
+            runtime=batch.runtime, cpu_per_task=batch.cpu_per_task,
+            execution_policy=batch.execution_policy,
+        )
+        return batch
+
+    async def get_batch(self, batch_id: uuid.UUID, owner_id: str) -> Optional[TaskBatch]:
+        result = await self._db.execute(
+            select(TaskBatch).where(
+                TaskBatch.id == batch_id, TaskBatch.owner_id == owner_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_batches(self, owner_id: str, limit: int = 20) -> list[TaskBatch]:
+        result = await self._db.execute(
+            select(TaskBatch)
+            .where(TaskBatch.owner_id == owner_id)
+            .order_by(desc(TaskBatch.created_at))
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def list_tasks(self, batch_id: uuid.UUID) -> list[Task]:
+        result = await self._db.execute(
+            select(Task).where(Task.batch_id == batch_id).order_by(Task.seq)
+        )
+        return list(result.scalars().all())
+
+    async def request_cancel(self, batch: TaskBatch) -> TaskBatch:
+        if batch.status in CANCELLABLE_STATUSES:
+            await self._db.execute(
+                update(TaskBatch)
+                .where(
+                    TaskBatch.id == batch.id,
+                    TaskBatch.status.in_(tuple(CANCELLABLE_STATUSES)),
+                )
+                .values(status="cancelling")
+            )
+            await self._db.commit()
+            await self._db.refresh(batch)
+            logger.info("batch_cancel_requested", batch_id=str(batch.id), status=batch.status)
+        return batch

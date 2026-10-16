@@ -43,6 +43,109 @@ function memBounds(detectedGb: number) {
   return { min: Math.min(0.5, max), max };
 }
 
+/** Detected GPU count (0 when the node has no usable GPU). */
+function gpuCount(caps: NodeCapabilities): number {
+  return Math.max(caps.gpu_count || 0, caps.detected_gpu || 0);
+}
+
+/** Detected VRAM in GB, 0 when no GPU (or unknown memory). */
+function gpuTotalGb(caps: NodeCapabilities): number {
+  return gpuCount(caps) > 0 && caps.gpu_memory_gb ? caps.gpu_memory_gb : 0;
+}
+
+const fmtGb = (gb: number) => `${Number.isInteger(gb) ? gb : gb.toFixed(1)}GB`;
+
+/** "Slice: 8GB / 24GB VRAM | 4 / 10 cores" (CPU-only: "Slice: 4 / 10 cores"). */
+export function sliceSummary(node: NodeResponse): string {
+  const cores = `${node.allocated_cpu} / ${node.detected_cpu} cores`;
+  const total = gpuTotalGb(node);
+  if (total <= 0) return `Slice: ${cores}`;
+  return `Slice: ${fmtGb(node.allocated_gpu_memory_gb ?? 0)} / ${fmtGb(total)} VRAM | ${cores}`;
+}
+
+const GPU_PRESETS = [
+  { label: '25%', frac: 0.25 },
+  { label: '33%', frac: 1 / 3 },
+  { label: '50%', frac: 0.5 },
+];
+
+/** GPU memory slice: presets + custom slider, 0..detected VRAM. */
+function GpuSliceControl({
+  caps,
+  value,
+  onChange,
+}: {
+  caps: NodeCapabilities;
+  value: number;
+  onChange: (gb: number) => void;
+}) {
+  const total = gpuTotalGb(caps);
+  if (total <= 0) {
+    return (
+      <div className="text-sm">
+        <span className="text-xs text-slate-500 font-medium block mb-1">GPU slice</span>
+        <input type="range" disabled min={0} max={1} value={0} className="w-full opacity-40" readOnly />
+        <span className="text-xs text-slate-400">no GPU</span>
+      </div>
+    );
+  }
+  const round = (gb: number) => Math.min(total, Math.round(gb * 2) / 2);
+  const activePreset = GPU_PRESETS.find((p) => round(total * p.frac) === value);
+  return (
+    <div className="text-sm">
+      <span className="text-xs text-slate-500 font-medium block mb-1">
+        GPU slice: {fmtGb(value)} / {fmtGb(total)} VRAM
+      </span>
+      <div className="flex flex-wrap gap-1 mb-1">
+        {GPU_PRESETS.map((p) => (
+          <button
+            key={p.label}
+            type="button"
+            onClick={() => onChange(round(total * p.frac))}
+            className={`text-xs px-2 py-0.5 rounded-md border ${
+              activePreset === p ? 'bg-blue-600 text-white border-blue-600' : 'border-slate-300 text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+        <label className="text-xs flex items-center gap-1 text-slate-600">
+          Custom
+          <input
+            type="number"
+            min={0}
+            max={total}
+            step={0.5}
+            value={value}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              onChange(Number.isFinite(v) ? Math.max(0, Math.min(total, v)) : 0);
+            }}
+            className="w-16 border border-slate-300 rounded px-1 py-0.5"
+          />
+          GB
+        </label>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={total}
+        step={0.5}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="w-full accent-blue-600"
+      />
+    </div>
+  );
+}
+
+/** allocated_gpu_* fields for a register/update request. */
+function gpuAllocation(caps: NodeCapabilities, gb: number) {
+  const total = gpuTotalGb(caps);
+  if (total <= 0) return { allocated_gpu_count: 0, allocated_gpu_memory_gb: 0 };
+  return { allocated_gpu_count: gb > 0 ? gpuCount(caps) : 0, allocated_gpu_memory_gb: gb };
+}
+
 export function SSHExecutorPage() {
   const { showError } = useToast();
 
@@ -134,6 +237,7 @@ function OnboardingCard({
   const [provisioned, setProvisioned] = useState<NodeProvisionResponse | null>(null);
   const [allocCpu, setAllocCpu] = useState(1);
   const [allocMem, setAllocMem] = useState(1);
+  const [allocGpuGb, setAllocGpuGb] = useState(0);
   const [busy, setBusy] = useState<null | 'connect' | 'provision' | 'manual' | 'verify' | 'register'>(null);
   const [notice, setNotice] = useState<Notice>(null);
 
@@ -151,6 +255,7 @@ function OnboardingCard({
     setAllocCpu(Math.max(1, res.detected_cpu));
     const { max } = memBounds(res.detected_memory_gb);
     setAllocMem(max);
+    setAllocGpuGb(Math.round(gpuTotalGb(res) * 0.25 * 2) / 2);
     setNotice(null);
     setStep('detected');
   };
@@ -261,6 +366,7 @@ function OnboardingCard({
         name: form.name.trim(),
         allocated_cpu: allocCpu,
         allocated_memory_gb: allocMem,
+        ...gpuAllocation(provisioned, allocGpuGb),
       });
       showSuccess(`Worker "${node.name}" added`);
       setForm({ name: '', host: '', port: 22, username: '' });
@@ -494,6 +600,7 @@ function OnboardingCard({
                 className="w-full accent-blue-600"
               />
             </div>
+            <GpuSliceControl caps={provisioned} value={allocGpuGb} onChange={setAllocGpuGb} />
           </div>
           <div className="mt-5 flex gap-3">
             <PrimaryButton onClick={handleRegister} disabled={busy !== null}>
@@ -531,7 +638,13 @@ function NodeRow({
   const { showSuccess, showError } = useToast();
   const [busy, setBusy] = useState<RowAction | null>(null);
   const [editing, setEditing] = useState(false);
-  const [edit, setEdit] = useState({ name: node.name, cpu: node.allocated_cpu, mem: node.allocated_memory_gb });
+  const editFromNode = () => ({
+    name: node.name,
+    cpu: node.allocated_cpu,
+    mem: node.allocated_memory_gb,
+    gpuGb: node.allocated_gpu_memory_gb ?? 0,
+  });
+  const [edit, setEdit] = useState(editFromNode);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRotate, setConfirmRotate] = useState(false);
   const [resecureOpen, setResecureOpen] = useState(false);
@@ -581,6 +694,7 @@ function NodeRow({
           name: edit.name.trim() || null,
           allocated_cpu: edit.cpu,
           allocated_memory_gb: edit.mem,
+          ...gpuAllocation(node, edit.gpuGb),
         }),
       (n) => `"${n.name}" updated`,
     );
@@ -614,10 +728,15 @@ function NodeRow({
             )}
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            Lending {node.allocated_cpu} / {node.detected_cpu} cores · {node.allocated_memory_gb} / {node.detected_memory_gb} GB
+            {sliceSummary(node)} · {node.allocated_memory_gb} / {node.detected_memory_gb} GB RAM
             {' · '}health {node.health_status}
             {node.last_health_check ? ` (${new Date(node.last_health_check).toLocaleString()})` : ''}
           </div>
+          {gpuCount(node) > 0 && !node.gpu_runtime && (
+            <div className="text-xs text-amber-700 mt-0.5 flex items-center gap-1">
+              <AlertTriangle size={11} /> torch not found — GPU slice not enforceable
+            </div>
+          )}
           {node.fingerprint && (
             <div className="text-[11px] text-slate-400 font-mono mt-0.5 truncate" title={node.fingerprint}>
               {node.fingerprint}
@@ -661,7 +780,7 @@ function NodeRow({
             title="Edit name and allocation"
             disabled={busy !== null}
             onClick={() => {
-              setEdit({ name: node.name, cpu: node.allocated_cpu, mem: node.allocated_memory_gb });
+              setEdit(editFromNode());
               setEditing((v) => !v);
             }}
           >
@@ -715,6 +834,9 @@ function NodeRow({
               className="w-full accent-blue-600"
             />
           </label>
+          <div className="sm:col-span-3">
+            <GpuSliceControl caps={node} value={edit.gpuGb} onChange={(gpuGb) => setEdit({ ...edit, gpuGb })} />
+          </div>
           <div className="sm:col-span-3 flex gap-2">
             <PrimaryButton onClick={saveEdit} disabled={busy !== null}>
               {busy === 'save' ? 'Saving…' : 'Save'}

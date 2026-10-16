@@ -59,6 +59,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /cluster/status", s.handleClusterStatus)
 	s.mux.HandleFunc("GET /nodes", s.handleListNodes)
 	s.mux.HandleFunc("GET /nodes/{id}", s.handleGetNode)
+	s.mux.HandleFunc("PATCH /nodes/{id}", s.handleUpdateNodeSlice)
 	s.mux.HandleFunc("GET /runtimes", s.handleListRuntimes)
 	s.mux.HandleFunc("GET /executions", s.handleListExecutions)
 	s.mux.HandleFunc("POST /executions", s.handleCreateExecution)

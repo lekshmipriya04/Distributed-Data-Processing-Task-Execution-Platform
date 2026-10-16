@@ -4,8 +4,11 @@ import { Code2, Play, Server, Cpu, Square, History, RefreshCw, Loader2, Clock } 
 import { useToast } from '../context/ToastContext';
 import { Card, SectionTitle, PrimaryButton, SecondaryButton, StatusBadge, NumberField } from '../components/common/Primitives';
 import { ApiError, errorMessage } from '../api/client';
+import { ExecutionPolicySelect } from '../components/common/ExecutionPolicySelect';
+import type { ExecutionPolicy } from '../api/ssh';
 import {
   sshApi,
+  executionPolicyLabel,
   TERMINAL_BATCH_STATUSES,
   type BatchCreateRequest,
   type BatchResponse,
@@ -46,6 +49,7 @@ export function TaskExecutorPage() {
   const [selected, setSelected] = useState<string[]>([]);
   const [inputsText, setInputsText] = useState('alpha\nbeta\ngamma\ndelta');
   const [cpuPerTask, setCpuPerTask] = useState(1);
+  const [executionPolicy, setExecutionPolicy] = useState<ExecutionPolicy>('safe_background');
   const [timeoutText, setTimeoutText] = useState('');
 
   const [submitting, setSubmitting] = useState(false);
@@ -178,6 +182,7 @@ export function TaskExecutorPage() {
       custom_filename: isCustom ? customFilename : null,
       cpu_per_task: cpuPerTask,
       timeout_seconds: timeoutValue,
+      execution_policy: executionPolicy,
     };
     setSubmitting(true);
     try {
@@ -404,6 +409,7 @@ export function TaskExecutorPage() {
             <span className="text-xs text-slate-500 font-medium block mb-1">Cores per task</span>
             <NumberField value={cpuPerTask} min={1} max={256} step={1} onChange={(n) => setCpuPerTask(Math.round(n))} className={INPUT_CLS} />
           </label>
+          <ExecutionPolicySelect value={executionPolicy} onChange={setExecutionPolicy} className={INPUT_CLS} />
           <label className="text-sm">
             <span className="text-xs text-slate-500 font-medium block mb-1">Timeout (s)</span>
             <input
@@ -434,7 +440,10 @@ export function TaskExecutorPage() {
             <div className="flex items-center gap-2">
               {running ? <Loader2 size={18} className="text-blue-600 animate-spin" /> : <Cpu size={18} className="text-blue-600" />}
               <h3 className="font-semibold text-slate-900">
-                Batch {batch.batch.id.slice(0, 8)} <span className="text-slate-400 font-normal">· {batch.batch.runtime}</span>
+                Batch {batch.batch.id.slice(0, 8)}{' '}
+                <span className="text-slate-400 font-normal">
+                  · {batch.batch.runtime} · {executionPolicyLabel(batch.batch.execution_policy)}
+                </span>
               </h3>
             </div>
             <div className="flex items-center gap-3 text-sm">

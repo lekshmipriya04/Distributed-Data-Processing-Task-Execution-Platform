@@ -30,6 +30,9 @@ class _CapabilityFields(BaseModel):
     gpu_model: Optional[str] = None
     gpu_count: int = 0
     gpu_memory_gb: Optional[float] = None
+    # PyTorch GPU backend already on the node ("torch-cuda" | "torch-mps"), or
+    # None. A GPU memory cap is only enforceable when this is set.
+    gpu_runtime: Optional[str] = None
     python_version: Optional[str] = None
     # Languages already present on the node: {runtime_id: version}. Nothing is
     # installed by the platform; see runtimes.py for the registry.
@@ -108,6 +111,9 @@ class NodeRegisterRequest(BaseModel):
     name: str = Field(default="", max_length=256)  # empty -> host
     allocated_cpu: int = Field(default=1, ge=1)
     allocated_memory_gb: float = Field(default=1.0, ge=0.0)
+    # GPU slice (clamped to the detected GPU; per-device memory cap).
+    allocated_gpu_count: int = Field(default=0, ge=0)
+    allocated_gpu_memory_gb: float = Field(default=0.0, ge=0.0)
 
 
 class NodeResecureRequest(BaseModel):
@@ -120,6 +126,8 @@ class NodeUpdateRequest(BaseModel):
     name: Optional[str] = Field(default=None, max_length=256)
     allocated_cpu: Optional[int] = Field(default=None, ge=1)
     allocated_memory_gb: Optional[float] = Field(default=None, ge=0.0)
+    allocated_gpu_count: Optional[int] = Field(default=None, ge=0)
+    allocated_gpu_memory_gb: Optional[float] = Field(default=None, ge=0.0)
 
 
 class NodeResponse(_CapabilityFields):
@@ -135,6 +143,10 @@ class NodeResponse(_CapabilityFields):
     key_created_at: Optional[datetime] = None
     allocated_cpu: int
     allocated_memory_gb: float
+    allocated_gpu_count: int = 0
+    allocated_gpu_memory_gb: float = 0.0
+    # allocated_gpu_memory_gb / gpu_memory_gb, clamped 0..1 (0 = no GPU).
+    allocated_gpu_fraction: float = 0.0
     status: str
     health_status: str = "unknown"
     last_health_check: Optional[datetime] = None
@@ -188,6 +200,9 @@ class BatchCreateRequest(BaseModel):
     custom_filename: Optional[str] = Field(default=None, max_length=128)
     cpu_per_task: int = Field(default=1, ge=1)
     timeout_seconds: Optional[int] = Field(default=None, ge=1)
+    execution_policy: str = Field(
+        default="safe_background", pattern="^(safe_background|balanced|max_available)$"
+    )
 
 
 class TaskResponse(BaseModel):
@@ -219,6 +234,7 @@ class BatchResponse(BaseModel):
     cancelled: int = 0
     cpu_per_task: int = 1
     timeout_seconds: int = 120
+    execution_policy: str = "safe_background"
     created_at: datetime
     finished_at: Optional[datetime] = None
 
@@ -246,7 +262,10 @@ class TrainRequest(BaseModel):
 
     dataset_id: UUID
     model_type: str = Field(pattern="^(linear_regression|logistic_regression|cnn)$")
-    engine: str = Field(default="python", pattern="^python$")
+    # "python": pure-stdlib sharding + FedAvg on the master (default).
+    # "spark_ray": Apache Spark data sharding + Ray FedAvg aggregation, both
+    # on the MASTER only. Worker nodes stay zero-install either way.
+    engine: str = Field(default="python", pattern="^(python|spark_ray)$")
     target_column: str
     feature_columns: list[str] = Field(default_factory=list)
     mode: str = Field(default="multi", pattern="^(single|multi)$")
@@ -256,6 +275,9 @@ class TrainRequest(BaseModel):
     rounds: int = Field(default=3, ge=1)
     num_classes: int = Field(default=0, ge=0)
     node_ids: list[UUID] = Field(default_factory=list)
+    execution_policy: str = Field(
+        default="safe_background", pattern="^(safe_background|balanced|max_available)$"
+    )
 
 
 class TrainRunResponse(BaseModel):

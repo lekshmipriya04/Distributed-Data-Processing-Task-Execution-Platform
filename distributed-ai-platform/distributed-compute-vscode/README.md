@@ -1,8 +1,9 @@
 # Distributed Compute (VS Code Extension)
 
 A developer-facing control interface for the **Distributed Data Processing & Task
-Execution Platform**. Browse compute nodes, submit Python / Spark / Ray
-executions, and monitor them from inside VS Code. The extension is a **client**
+Execution Platform**. Browse compute nodes, submit executions in any runtime
+detected on your workers (Python, Bash, Node.js, Go, Rust, Java, ...), and
+monitor them from inside VS Code. The extension is a **client**
 of your own backend (the extension gateway) over REST — it is not a second
 control plane, and it never talks to compute nodes directly.
 
@@ -16,8 +17,10 @@ control plane, and it never talks to compute nodes directly.
   backend values render as `Unknown` — never fabricated.
 - **Jobs & Executions views.** Submitted executions with runtime, status, and
   task progress (shown only when the backend reports a meaningful total).
-- **Run commands.** Submit the active file as a Python, Spark, or Ray execution;
-  a client-generated request id guards against duplicate submits.
+- **Run commands.** Submit the active file as a Python execution, with your
+  default runtime, or with a runtime picked from `GET /runtimes` (only runtimes
+  detected on your online nodes are offered; nothing is installed on workers).
+  A client-generated request id guards against duplicate submits.
 - **Status bar + polling.** A connection indicator and a controlled refresh
   interval (REST polling until a client-facing event stream exists backend-side).
 - **`distributed.json`.** Initialize and validate project configuration against a
@@ -42,7 +45,7 @@ security boundary.
 | `distributedCompute.masterUrl` | `""` | Gateway base URL (https remote; http local only). |
 | `distributedCompute.autoConnect` | `false` | Connect on activation. |
 | `distributedCompute.refreshIntervalSeconds` | `15` | Poll interval (floor 5s). |
-| `distributedCompute.defaultRuntime` | `python` | Runtime for new executions. |
+| `distributedCompute.defaultRuntime` | `python` | Runtime id for new executions (any id from `GET /runtimes`). |
 | `distributedCompute.defaultTimeoutSeconds` | `600` | Default execution timeout. |
 | `distributedCompute.showNotifications` | `true` | Job lifecycle notifications. |
 | `distributedCompute.logLevel` | `info` | Diagnostics output verbosity. |

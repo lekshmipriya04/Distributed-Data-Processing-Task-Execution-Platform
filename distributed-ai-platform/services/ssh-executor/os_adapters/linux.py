@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import shlex
 
-from resource_spec import ResourceSpec
+from runtimes import ResourceSpec
 
 from .base import OSAdapter, PosixSandboxMixin
 from .base import NodeProbe

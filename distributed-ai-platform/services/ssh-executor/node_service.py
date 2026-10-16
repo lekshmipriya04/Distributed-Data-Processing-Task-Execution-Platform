@@ -33,24 +33,33 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from capabilities import detect_capabilities
+import base64
+from dataclasses import asdict, dataclass, field
+import runtimes as runtime_registry
+from os_adapters.base import OSAdapter
 from config import get_settings
-from crypto import decrypt_secret, encrypt_secret
+from security import decrypt_secret, encrypt_secret
 from database import get_db_manager
-from key_install import install_authorized_key, manual_install_commands, remove_authorized_key
-from key_manager import (
+from ssh import (
     HostKeyFetchError,
+    HostKeyMismatch,
     InvalidOnboardingToken,
     ManagedKey,
     OnboardingClaims,
+    SSHTransport,
     authorized_key_line,
     fetch_host_key,
+    fingerprint,
     generate_keypair,
+    install_authorized_key,
     issue_onboarding_token,
     key_comment,
+    manual_install_commands,
+    remove_authorized_key,
     verify_onboarding_token,
 )
 from models import PendingProvision, SSHNode
+from runtimes import clamp_gpu_allocation
 from schemas import (
     NodeConnectRequest,
     NodeManualProvisionRequest,
@@ -59,8 +68,7 @@ from schemas import (
     NodeResecureRequest,
     NodeUpdateRequest,
 )
-from ssh_transport import HostKeyMismatch, SSHTransport, fingerprint
-from task_executor import detect_os, select_adapter
+from tasks import detect_os, select_adapter
 
 logger = structlog.get_logger(__name__)
 
@@ -196,6 +204,194 @@ async def check_host_allowed(host: str) -> str:
 
 
 # --- capabilities ----------------------------------------------------------------
+_PATH_MARK = "__DP_ENV_PATH__"
+
+GPU_RUNTIME_PROBE = (
+    "try:\n"
+    "    import torch\n"
+    "    if torch.cuda.is_available():\n"
+    "        print('torch-cuda')\n"
+    "    elif getattr(getattr(torch, 'backends', None), 'mps', None) is not None "
+    "and torch.backends.mps.is_available():\n"
+    "        print('torch-mps')\n"
+    "except Exception:\n"
+    "    pass\n"
+)
+_GPU_RUNTIMES = frozenset({"torch-cuda", "torch-mps"})
+
+
+@dataclass
+class NodeCapabilities:
+    os_type: str
+    os_version: Optional[str] = None
+    cpu_total: int = 0
+    memory_total_gb: float = 0.0
+    gpu_vendor: Optional[str] = None
+    gpu_backend: Optional[str] = None
+    gpu_model: Optional[str] = None
+    gpu_count: int = 0
+    gpu_memory_gb: Optional[float] = None
+    gpu_runtime: Optional[str] = None
+    python_version: Optional[str] = None
+    runtimes: dict[str, str] = field(default_factory=dict)
+    env_path: Optional[str] = None
+    execution_backend: str = "ssh"
+    resource_enforcement: str = "best_effort"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _run_probe(transport: Any, command: str, timeout: int, input_data: str = "") -> str:
+    try:
+        return (
+            transport.exec(command, input_data=input_data, timeout=timeout).get("stdout") or ""
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _search_probe(pattern: str, text: str) -> Optional[str]:
+    if not text:
+        return None
+    m = re.search(pattern, text)
+    return m.group(1) if m else None
+
+
+def _mib_to_gb(text: str) -> Optional[float]:
+    m = re.search(r"(\d+(?:\.\d+)?)", text or "")
+    if not m:
+        return None
+    return round(float(m.group(1)) / 1024.0, 2)
+
+
+def _sh_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _ps_encoded(script: str) -> str:
+    b64 = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return f"powershell -NoProfile -NonInteractive -EncodedCommand {b64}"
+
+
+def parse_env_path(output: str) -> Optional[str]:
+    m = re.search(re.escape(_PATH_MARK) + r"(.*?)" + re.escape(_PATH_MARK), output or "", re.S)
+    if not m:
+        return None
+    value = m.group(1).strip()
+    return value or None
+
+
+def parse_gpu_runtime(output: str) -> Optional[str]:
+    for line in (output or "").splitlines():
+        if line.strip() in _GPU_RUNTIMES:
+            return line.strip()
+    return None
+
+
+def env_path_command(os_type: str) -> str:
+    if os_type == "windows":
+        return _ps_encoded(f"Write-Output ('{_PATH_MARK}' + $env:Path + '{_PATH_MARK}')")
+    script = f'printf "%s%s%s" {_PATH_MARK} "$PATH" {_PATH_MARK}'
+    return f'"${{SHELL:-/bin/sh}}" -lc {_sh_quote(script)} </dev/null 2>/dev/null'
+
+
+def runtime_detection_command(os_type: str, env_path: Optional[str]) -> str:
+    if os_type == "windows":
+        script = runtime_registry.windows_detection_script()
+        if env_path:
+            script = f"$env:Path = '{env_path.replace(chr(39), chr(39) * 2)}'\n" + script
+        return _ps_encoded(script)
+    script = runtime_registry.detection_script()
+    prefix = f"PATH={_sh_quote(env_path)}; export PATH; " if env_path else ""
+    return f"{prefix}sh -c {_sh_quote(script)}"
+
+
+def detect_capabilities(
+    transport: Any, adapter: OSAdapter, timeout: int = 20
+) -> NodeCapabilities:
+    raw = {name: _run_probe(transport, cmd, timeout) for name, cmd in adapter.probe_commands().items()}
+    try:
+        probe = adapter.parse_probe(raw)
+    except Exception:
+        probe = None
+
+    py = adapter.python_command()
+    os_type = adapter.os_type
+
+    env_path = parse_env_path(_run_probe(transport, env_path_command(os_type), timeout))
+    if not env_path:
+        default_path = getattr(adapter, "default_path", None)
+        env_path = default_path() if callable(default_path) else None
+    found = runtime_registry.parse_detection_output(
+        _run_probe(transport, runtime_detection_command(os_type, env_path), timeout)
+    )
+    python_version = _search_probe(r"Python\s+([\d.]+)", found.get("python", ""))
+    if "python" not in found:
+        python_version = _search_probe(r"Python\s+([\d.]+)", _run_probe(transport, f"{py} --version 2>&1", timeout))
+        if python_version:
+            found["python"] = f"Python {python_version}"
+
+    gpu_vendor = gpu_backend = gpu_model = None
+    gpu_count = int(getattr(probe, "detected_gpu", 0) or 0)
+    gpu_memory_gb: Optional[float] = None
+
+    if os_type == "linux":
+        nv = _run_probe(transport, "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null", timeout)
+        if nv:
+            lines = [l for l in nv.splitlines() if l.strip()]
+            gpu_count = max(gpu_count, len(lines))
+            gpu_vendor, gpu_backend = "nvidia", "cuda"
+            if lines:
+                parts = lines[0].split(",")
+                gpu_model = parts[0].strip() or None
+                if len(parts) > 1:
+                    gpu_memory_gb = _mib_to_gb(parts[1])
+    elif os_type == "macos":
+        if gpu_count:
+            gpu_vendor, gpu_backend = "apple", "metal"
+    elif os_type == "windows":
+        name = _run_probe(transport, 'powershell -NoProfile -Command "(Get-CimInstance Win32_VideoController | Select-Object -First 1).Name"', timeout)
+        if name:
+            gpu_model = name.strip()
+            gpu_count = max(gpu_count, 1)
+            low = gpu_model.lower()
+            if "nvidia" in low:
+                gpu_vendor, gpu_backend = "nvidia", "cuda"
+                nv = _run_probe(transport, "nvidia-smi --query-gpu=memory.total --format=csv,noheader", timeout)
+                if nv:
+                    gpu_memory_gb = _mib_to_gb(nv.splitlines()[0])
+            elif "amd" in low or "radeon" in low:
+                gpu_vendor, gpu_backend = "amd", "directml"
+            elif "intel" in low:
+                gpu_vendor, gpu_backend = "intel", "directml"
+
+    gpu_runtime: Optional[str] = None
+    if python_version and gpu_count:
+        prefix = f"PATH={_sh_quote(env_path)}; export PATH; " if env_path and os_type != "windows" else ""
+        gpu_runtime = parse_gpu_runtime(
+            _run_probe(transport, f"{prefix}{py} -I -", max(timeout, 60), input_data=GPU_RUNTIME_PROBE)
+        )
+
+    return NodeCapabilities(
+        os_type=os_type,
+        os_version=getattr(probe, "os_info", None),
+        cpu_total=int(getattr(probe, "detected_cpu", 0) or 0),
+        memory_total_gb=float(getattr(probe, "detected_memory_gb", 0.0) or 0.0),
+        gpu_vendor=gpu_vendor,
+        gpu_backend=gpu_backend,
+        gpu_model=gpu_model,
+        gpu_count=gpu_count,
+        gpu_memory_gb=gpu_memory_gb,
+        gpu_runtime=gpu_runtime,
+        python_version=python_version,
+        runtimes=found,
+        env_path=env_path,
+        execution_backend="ssh",
+        resource_enforcement=getattr(adapter, "resource_enforcement", "best_effort") or "best_effort",
+    )
+
+
 def _caps_to_dict(caps: Any) -> dict:
     """Normalise a NodeCapabilities (old or new shape) into a JSON-able dict."""
     g = lambda name, default=None: getattr(caps, name, default)  # noqa: E731
@@ -213,6 +409,7 @@ def _caps_to_dict(caps: Any) -> dict:
         "gpu_model": g("gpu_model"),
         "gpu_count": int(g("gpu_count", 0) or 0),
         "gpu_memory_gb": g("gpu_memory_gb"),
+        "gpu_runtime": g("gpu_runtime"),
         "python_version": python_version,
         "runtimes": {str(k): str(v) for k, v in runtimes.items()},
         "env_path": g("env_path"),
@@ -234,6 +431,7 @@ def capability_fields(caps: dict) -> dict:
         "gpu_model": caps.get("gpu_model"),
         "gpu_count": int(caps.get("gpu_count") or 0),
         "gpu_memory_gb": caps.get("gpu_memory_gb"),
+        "gpu_runtime": caps.get("gpu_runtime"),
         "python_version": caps.get("python_version"),
         "runtimes": dict(caps.get("runtimes") or {}),
         "execution_backend": caps.get("execution_backend") or "ssh",
@@ -252,6 +450,7 @@ def _apply_caps(node: SSHNode, caps: dict) -> None:
     node.gpu_model = caps.get("gpu_model")
     node.gpu_count = int(caps.get("gpu_count") or 0)
     node.gpu_memory_gb = caps.get("gpu_memory_gb")
+    node.gpu_runtime = caps.get("gpu_runtime")
     node.python_version = caps.get("python_version")
     node.runtimes_json = json.dumps(caps.get("runtimes") or {})
     node.env_path = caps.get("env_path")
@@ -266,6 +465,16 @@ def _clamp_allocation(cpu: int, memory_gb: float, detected_cpu: int, detected_me
     if detected_mem:
         memory_gb = min(memory_gb, detected_mem)
     return max(1, int(cpu)), max(0.0, float(memory_gb))
+
+
+def _clamp_gpu(node: SSHNode, count: Optional[int] = None, memory_gb: Optional[float] = None) -> None:
+    """Set (or re-clamp) the node's GPU slice against its detected GPU."""
+    node.allocated_gpu_count, node.allocated_gpu_memory_gb = clamp_gpu_allocation(
+        node.allocated_gpu_count if count is None else count,
+        node.allocated_gpu_memory_gb if memory_gb is None else memory_gb,
+        node.gpu_count,
+        node.gpu_memory_gb,
+    )
 
 
 def _require_python(transport: SSHTransport, adapter, timeout: int) -> str:
@@ -595,6 +804,7 @@ class NodeService:
             request.allocated_cpu, request.allocated_memory_gb,
             node.detected_cpu, node.detected_memory_gb,
         )
+        _clamp_gpu(node, request.allocated_gpu_count, request.allocated_gpu_memory_gb)
         self._db.add(node)
         await self._db.delete(pending)
         await self._db.commit()
@@ -637,6 +847,7 @@ class NodeService:
         node.allocated_cpu, node.allocated_memory_gb = _clamp_allocation(
             cpu, mem, node.detected_cpu, node.detected_memory_gb
         )
+        _clamp_gpu(node, request.allocated_gpu_count, request.allocated_gpu_memory_gb)
         await self._db.commit()
         await self._db.refresh(node)
         return node
@@ -718,6 +929,7 @@ class NodeService:
         node.allocated_cpu, node.allocated_memory_gb = _clamp_allocation(
             node.allocated_cpu, node.allocated_memory_gb, node.detected_cpu, node.detected_memory_gb
         )
+        _clamp_gpu(node)
         node.health_status = "online"
         node.last_health_check = datetime.now(timezone.utc)
         await self._db.commit()
@@ -818,6 +1030,7 @@ class NodeService:
             node.allocated_cpu, node.allocated_memory_gb = _clamp_allocation(
                 node.allocated_cpu, node.allocated_memory_gb, node.detected_cpu, node.detected_memory_gb
             )
+            _clamp_gpu(node)
             node.health_status = "online"
             node.last_health_check = datetime.now(timezone.utc)
             await self._db.commit()

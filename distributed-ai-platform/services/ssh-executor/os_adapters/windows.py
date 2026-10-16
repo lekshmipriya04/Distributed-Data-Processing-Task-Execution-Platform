@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import base64
 
-from resource_spec import ResourceSpec
+from runtimes import ResourceSpec
 
 from .base import NodeProbe, OSAdapter, WindowsSandboxMixin
 

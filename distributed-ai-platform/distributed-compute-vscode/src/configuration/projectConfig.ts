@@ -91,7 +91,7 @@ export function validateConfig(value: unknown): ValidationResult {
     errors.push('"entrypoint" must be a workspace-relative path inside the project.');
   }
   if (!isRuntime(c.runtime)) {
-    errors.push(`"runtime" must be one of ${RUNTIMES.join(', ')}.`);
+    errors.push(`"runtime" must be a runtime id from GET /runtimes (e.g. ${RUNTIMES.join(', ')}).`);
   }
   for (const key of ['dataset', 'output'] as const) {
     const v = c[key];

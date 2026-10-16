@@ -207,3 +207,33 @@ func TestStatusErrorRendering(t *testing.T) {
 		t.Fatalf("envelope = %+v", e)
 	}
 }
+
+func TestUpdateNodeSliceValidationAndMemStore(t *testing.T) {
+	s := newTestServer(ComputeNode{ID: "n1", Name: "rig", Status: "online", CPUAllocatable: intp(2)})
+	for _, body := range []any{
+		map[string]any{},
+		map[string]any{"cpuAllocatable": 0},
+		map[string]any{"gpuMemoryAllocatableGb": -1},
+		map[string]any{"bogus": 1},
+	} {
+		if w := do(t, s, "PATCH", "/nodes/n1", "tok", body); w.Code != http.StatusBadRequest {
+			t.Fatalf("%v = %d, want 400", body, w.Code)
+		}
+	}
+	if w := do(t, s, "PATCH", "/nodes/missing", "tok", NodeSliceRequest{CPUAllocatable: intp(1)}); w.Code != http.StatusNotFound {
+		t.Fatalf("missing = %d", w.Code)
+	}
+	w := do(t, s, "PATCH", "/nodes/n1", "tok", NodeSliceRequest{CPUAllocatable: intp(4), GPUMemoryAllocatableGB: fp(8)})
+	n := decodeBody[ComputeNode](t, w)
+	if w.Code != 200 || *n.CPUAllocatable != 4 || *n.GPUMemoryAllocatableGB != 8 {
+		t.Fatalf("patch = %d %+v", w.Code, n)
+	}
+}
+
+func TestCreateExecutionRejectsBadPolicy(t *testing.T) {
+	s := newTestServer()
+	w := do(t, s, "POST", "/executions", "tok", map[string]any{"runtime": "python", "code": "x", "executionPolicy": "turbo"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad policy = %d", w.Code)
+	}
+}

@@ -102,7 +102,7 @@ class Runtime:
 
 def _py(name: str, tool: str, run: str, example: str, **kw) -> Runtime:
     return Runtime(
-        id=name, name=name.replace("_", " ").title(), filename=f"task.py",
+        id=name, name=name.replace("_", " ").title(), filename="task.py",
         kind="interpreted", example_code=example, tool_names=(tool,),
         version_command=None, run_command=run, **kw,
     )
@@ -111,8 +111,10 @@ def _py(name: str, tool: str, run: str, example: str, **kw) -> Runtime:
 RUNTIMES: tuple[Runtime, ...] = (
     Runtime(
         id="python", name="Python", filename="task.py", kind="interpreted",
+        # POSIX workers must have python3 (onboarding checks it; the sandbox
+        # runner itself needs it), so the run command names it directly.
         tool_names=("python3", "python"), version_command="{tool} --version",
-        run_command="{tool} -I -B task.py",
+        run_command="python3 -I -B task.py",
         windows_run_command="python -I -B task.py", windows_filename="task.py",
         sandbox_env={"PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"},
         example_code=(
@@ -144,7 +146,7 @@ RUNTIMES: tuple[Runtime, ...] = (
     Runtime(
         id="powershell", name="PowerShell", filename="task.ps1", kind="interpreted",
         tool_names=("pwsh", "powershell"), version_command="{tool} -Version",
-        run_command="pwsh -NoProfile -File task.ps1",
+        run_command="{tool} -NoProfile -File task.ps1",
         windows_run_command="powershell -NoProfile -NonInteractive -File task.ps1",
         example_code=(
             "$input | ForEach-Object { \"powershell read: $_\" }\n"
@@ -152,8 +154,8 @@ RUNTIMES: tuple[Runtime, ...] = (
     ),
     Runtime(
         id="node", name="Node.js (JavaScript)", filename="task.js", kind="interpreted",
-        tool_names=("node", "nodejs"), version_command="node --version",
-        run_command="node task.js",
+        tool_names=("node", "nodejs"), version_command="{tool} --version",
+        run_command="{tool} task.js",
         windows_run_command="node task.js",
         sandbox_env={"npm_config_cache": "{sandbox}/.npm"},
         example_code=(
@@ -218,8 +220,8 @@ RUNTIMES: tuple[Runtime, ...] = (
     ),
     Runtime(
         id="lua", name="Lua", filename="task.lua", kind="interpreted",
-        tool_names=("lua", "lua5.4", "lua5.3"), version_command="lua -v",
-        run_command="lua task.lua",
+        tool_names=("lua", "lua5.4", "lua5.3"), version_command="{tool} -v",
+        run_command="{tool} task.lua",
         example_code=(
             "local data = io.read('*a') or ''\n"
             "print('lua processed ' .. #data .. ' chars')\n"
@@ -227,7 +229,8 @@ RUNTIMES: tuple[Runtime, ...] = (
     ),
     Runtime(
         id="r", name="R", filename="task.R", kind="interpreted",
-        tool_names=("Rscript", "R"), version_command="Rscript --version",
+        # Only Rscript: plain `R` cannot run a script file the same way.
+        tool_names=("Rscript",), version_command="Rscript --version",
         run_command="Rscript task.R",
         example_code=(
             "data <- paste(readLines(file('stdin')), collapse=' ')\n"
@@ -287,8 +290,8 @@ RUNTIMES: tuple[Runtime, ...] = (
     ),
     Runtime(
         id="scala", name="Scala (script)", filename="task.scala", kind="interpreted",
-        tool_names=("scala", "scala-cli"), version_command="scala -version",
-        run_command="scala task.scala",
+        tool_names=("scala", "scala-cli"), version_command="{tool} -version",
+        run_command="{tool} task.scala",
         sandbox_env={"COURSIER_CACHE": "{sandbox}/.coursier"},
         example_code=(
             "val data = scala.io.Source.stdin.getLines().mkString(\"\\n\").trim\n"
@@ -378,8 +381,9 @@ RUNTIMES: tuple[Runtime, ...] = (
     ),
     Runtime(
         id="csharp", name="C# (dotnet-script)", filename="task.csx", kind="interpreted",
-        tool_names=("dotnet-script", "dotnet"), version_command="{tool} --version",
-        run_command="{tool} task.csx",
+        # Only dotnet-script: a bare `dotnet` SDK cannot run a .csx file.
+        tool_names=("dotnet-script",), version_command="dotnet-script --version",
+        run_command="dotnet-script task.csx",
         sandbox_env={"DOTNET_CLI_HOME": "{sandbox}", "NUGET_PACKAGES": "{sandbox}/.nuget"},
         example_code=(
             "using System;\n"
@@ -537,16 +541,29 @@ def build_run_command(
 
 
 def _substitute_tool(command: str, runtime: Runtime, os_type: str) -> str:
-    """Replace ``{tool}`` with the first tool name (kept symbolic for shells).
+    """Replace ``{tool}`` with the tool the worker actually has.
 
-    The registry lists alternatives (``cc``/``gcc``/``clang``); the probe
-    already established that at least one exists, so the first name is used
-    directly. Detection-time probing resolves the same order.
+    The registry lists alternatives (``node``/``nodejs``, ``cc``/``gcc``/
+    ``clang``) and detection reports the runtime when *any* of them exists, so
+    on POSIX the run command resolves the same names, in the same order, on
+    the worker at run time (the first one found on ``PATH`` wins, exactly like
+    :func:`detection_script`). With a single tool name, or on Windows, the
+    name is substituted directly.
     """
     if "{tool}" not in command:
         return command
-    tool = runtime.tool_names[0] if runtime.tool_names else ""
-    return command.replace("{tool}", tool)
+    names = runtime.tool_names
+    if not names:
+        return command.replace("{tool}", "")
+    if os_type == "windows" or len(names) == 1:
+        return command.replace("{tool}", names[0])
+    candidates = " ".join(_sh_quote(t) for t in names)
+    resolve = (
+        f"DP_TOOL=$(for t in {candidates}; do "
+        f'if command -v "$t" >/dev/null 2>&1; then printf "%s" "$t"; break; fi; '
+        f"done); "
+    )
+    return resolve + command.replace("{tool}", f'"${{DP_TOOL:-{names[0]}}}"')
 
 
 def detection_script(runtime_list: Optional[list[Runtime]] = None) -> str:
@@ -563,6 +580,8 @@ def detection_script(runtime_list: Optional[list[Runtime]] = None) -> str:
             continue
         candidates = " ".join(_sh_quote(t) for t in rt.tool_names)
         version = rt.version_command or "{tool} --help >/dev/null 2>&1 && echo available"
+        # {tool} is the name the loop below found on PATH.
+        version = version.replace("{tool}", '"$tool"')
         # Resolve the first tool that exists, then print "<id>\t<version>".
         script = (
             f'for tool in {candidates}; do '
@@ -623,3 +642,146 @@ def sandbox_env_for(runtime: Runtime | str, sandbox_dir: str) -> dict[str, str]:
 
 def _sh_quote(value: str) -> str:
     return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+# ==============================================================================
+# Resource Specification & Execution Policies (consolidated from resource_spec)
+# ==============================================================================
+
+import dataclasses
+
+
+@dataclass(frozen=True)
+class ResourceSpec:
+    """Bounded resources granted to one task on one node.
+
+    ``cpu_cores`` and ``memory_gb`` are the enforced allocation (how the task is
+    confined), not merely a priority hint. ``timeout_seconds`` and
+    ``max_processes`` bound runtime and fork-bombs. The OS adapter decides which
+    of these it can enforce strictly vs. best-effort.
+
+    ``cores`` carries the **exact** core slice this task is pinned to. The
+    dispatcher allocates one slot per borrowed core, so two concurrent tasks on
+    the same node must not both be pinned to core 0 — slot *i* of a node gets
+    ``cores`` ``i*c .. i*c+c-1``. When ``cores`` is empty the slice defaults to
+    the first ``cpu_cores`` cores (the historical behaviour).
+    """
+
+    cpu_cores: int
+    memory_gb: float
+    gpu_count: int = 0
+    timeout_seconds: int = 600
+    max_processes: int = 32
+    cores: tuple[int, ...] = field(default=())
+    gpu_memory_fraction: float = 0.0
+    gpu_memory_gb: float = 0.0
+    gpu_enforceable: bool = False
+    nice: int = 19
+    threads: int = 0
+
+    def __post_init__(self) -> None:
+        if self.cpu_cores < 1:
+            raise ValueError("cpu_cores must be >= 1")
+        if self.memory_gb < 0:
+            raise ValueError("memory_gb must be >= 0")
+        if self.gpu_count < 0:
+            raise ValueError("gpu_count must be >= 0")
+        if self.timeout_seconds < 1:
+            raise ValueError("timeout_seconds must be >= 1")
+        if self.max_processes < 1:
+            raise ValueError("max_processes must be >= 1")
+        if self.cores and any(core < 0 for core in self.cores):
+            raise ValueError("core indices must be >= 0")
+        if self.cores and len(self.cores) != self.cpu_cores:
+            raise ValueError("cores must name exactly cpu_cores core indices")
+        if not 0.0 <= self.gpu_memory_fraction <= 1.0:
+            raise ValueError("gpu_memory_fraction must be within 0..1")
+        if self.gpu_memory_gb < 0:
+            raise ValueError("gpu_memory_gb must be >= 0")
+        if not 0 <= self.nice <= 19:
+            raise ValueError("nice must be within 0..19")
+        if self.threads < 0:
+            raise ValueError("threads must be >= 0")
+
+    @property
+    def thread_count(self) -> int:
+        if self.threads:
+            return max(1, min(self.threads, self.cpu_cores))
+        return self.cpu_cores
+
+    @property
+    def uses_gpu(self) -> bool:
+        return self.gpu_enforceable and self.gpu_count > 0 and self.gpu_memory_fraction > 0
+
+    @property
+    def memory_mb(self) -> int:
+        return int(self.memory_gb * 1024)
+
+    @property
+    def core_indices(self) -> tuple[int, ...]:
+        return self.cores or tuple(range(max(1, self.cpu_cores)))
+
+    @property
+    def core_list(self) -> str:
+        return ",".join(str(i) for i in self.core_indices)
+
+    def with_cores(self, cores: tuple[int, ...]) -> "ResourceSpec":
+        return dataclasses.replace(self, cores=tuple(cores))
+
+
+def slice_for_slot(slot: int, cores_per_task: int, total_cores: int) -> tuple[int, ...]:
+    per_task = max(1, int(cores_per_task))
+    start = max(0, int(slot)) * per_task
+    end = min(start + per_task, max(0, int(total_cores)))
+    if start >= end:
+        return ()
+    return tuple(range(start, end))
+
+
+def default_cores(cpu_cores: int, offset: Optional[int] = None) -> tuple[int, ...]:
+    start = max(0, int(offset or 0))
+    return tuple(range(start, start + max(1, int(cpu_cores))))
+
+
+def gpu_fraction(allocated_gpu_count: int, allocated_gpu_memory_gb: float,
+                 gpu_memory_gb: Optional[float]) -> float:
+    try:
+        total = float(gpu_memory_gb or 0.0)
+        mem = float(allocated_gpu_memory_gb or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if int(allocated_gpu_count or 0) <= 0 or total <= 0 or mem <= 0:
+        return 0.0
+    return max(0.0, min(1.0, mem / total))
+
+
+def clamp_gpu_allocation(count: Optional[int], memory_gb: Optional[float],
+                         detected_count: Optional[int],
+                         detected_memory_gb: Optional[float]) -> tuple[int, float]:
+    det_count = max(0, int(detected_count or 0))
+    det_mem = max(0.0, float(detected_memory_gb or 0.0))
+    if det_count == 0 or det_mem == 0:
+        return 0, 0.0
+    c = max(0, min(int(count or 0), det_count))
+    m = max(0.0, min(float(memory_gb or 0.0), det_mem))
+    if m == 0:
+        return 0, 0.0
+    if c == 0:
+        c = 1
+    return c, round(m, 3)
+
+
+EXECUTION_POLICIES: dict[str, int] = {
+    "safe_background": 19,
+    "balanced": 10,
+    "max_available": 0,
+}
+DEFAULT_EXECUTION_POLICY = "safe_background"
+
+
+def policy_nice(policy: Optional[str], floor: int = 19) -> int:
+    name = policy if policy in EXECUTION_POLICIES else DEFAULT_EXECUTION_POLICY
+    if name == DEFAULT_EXECUTION_POLICY:
+        return max(0, min(19, max(int(floor), 0)))
+    return EXECUTION_POLICIES[name]
+

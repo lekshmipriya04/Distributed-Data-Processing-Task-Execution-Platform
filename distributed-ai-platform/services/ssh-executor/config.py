@@ -67,6 +67,12 @@ class SSHExecutorSettings(BaseServiceSettings):
     hdfs_url: str = Field(default="hdfs://namenode:9000")
     training_timeout_seconds: int = Field(default=600, ge=1)
     max_train_rows: int = Field(default=200_000, ge=1)
+    # Compute-weighted sharding: a node's score is
+    #   gpu_memory_gb * shard_weight_gpu + cores * shard_weight_cpu
+    # and shard sizes are proportional to it. The GPU term only counts when the
+    # job can really use the GPU (see training_orchestrator.plan_shard_sizes).
+    shard_weight_gpu: float = Field(default=5.0, ge=0.0)
+    shard_weight_cpu: float = Field(default=1.0, ge=0.0)
 
     model_config = {"frozen": True}
 

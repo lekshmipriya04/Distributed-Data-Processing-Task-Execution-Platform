@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 WORKDIR /app
+# Training is pure Python on the master (no Spark/Ray), so no JVM is needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-	openjdk-21-jre-headless \
 	procps \
 	&& rm -rf /var/lib/apt/lists/*
 COPY shared/ /app/shared/

@@ -64,11 +64,11 @@ Gateway proxies `/resources` and `/scheduler`; audit
 exact `GET /cluster/status`, `GET /resources`, `GET /health` shapes before wiring
 the cluster dashboard.
 
-## Spark / Ray — VERIFY
+## Spark / Ray — removed
 
-Audit `batch_service.py`, `training_orchestrator.py`, and the `livy/` integration
-for actual Spark submission endpoints; no dedicated Ray submission route was
-confirmed. Treat both as VERIFY/GAP and guard accordingly.
+The backend no longer has Spark or Ray (commit 52b210f): training is pure Python
+on the master and workers run stdlib scripts. The extension submits any runtime
+id from `GET /runtimes` instead.
 
 ## Open questions for backend owners
 
@@ -77,5 +77,5 @@ confirmed. Treat both as VERIFY/GAP and guard accordingly.
 2. Will `batches`/`train` be unified under `/executions`, or should the extension
    keep two job types?
 3. Exact schemas for `/resources` and `/cluster/status`.
-4. Spark (Livy) and Ray submission contracts and runtime-readiness reporting.
+4. (Resolved) Spark/Ray were removed; runtime readiness comes from `GET /runtimes`.
 5. Node lifecycle endpoints (`drain`/`resume`/`refresh`/`runtime-check`).

@@ -5,12 +5,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app
 
-from routes_batches import router as batches_router
-from routes_nodes import router as nodes_router
-from routes_train import router as train_router
+from routes import batches_router, nodes_router, train_router
 from config import get_settings
 from database import get_db_manager
-from lease_recovery import start_recovery_loop, stop_recovery_loop
+from leases import start_recovery_loop, stop_recovery_loop
 from security import enforce_secrets
 from shared.common.error_handlers import generic_exception_handler, platform_exception_handler
 from shared.common.exceptions import PlatformException

@@ -26,14 +26,14 @@ from os_adapters import (  # noqa: E402
     detect_adapter,
     get_adapter,
 )
-from resource_spec import ResourceSpec  # noqa: E402
+from runtimes import ResourceSpec  # noqa: E402
 
 
-def _legacy_linux_command(remote_path: str, allocated_cpu: int, nice: int, timeout: int) -> str:
-    """The exact command ssh_client.py produced before the adapter refactor."""
+def _expected_linux_command(remote_path: str, allocated_cpu: int, nice: int) -> str:
+    """Current Linux build_execute_command output (timeout handled by sandbox runner)."""
     cores = ",".join(str(i) for i in range(max(1, allocated_cpu)))
     quoted = shlex.quote(remote_path)
-    confine = f"nice -n {nice} timeout {timeout}s python3 {quoted}"
+    confine = f"nice -n {nice} python3 {quoted}"
     return (
         f"if command -v taskset >/dev/null 2>&1; then "
         f"taskset -c {cores} {confine}; else {confine}; fi"
@@ -60,7 +60,7 @@ class LinuxAdapterTests(unittest.TestCase):
         self.adapter = LinuxAdapter()
 
     def test_backward_compatible_command(self):
-        """The default Linux command must byte-match the pre-refactor command."""
+        """The default Linux command: nice + taskset; timeout lives in sandbox runner."""
         for path, cpu, nice, timeout in [
             ("/tmp/task_abc.py", 2, 19, 120),
             ("/tmp/task_x.py", 1, 10, 60),
@@ -68,16 +68,16 @@ class LinuxAdapterTests(unittest.TestCase):
         ]:
             spec = ResourceSpec(cpu_cores=cpu, memory_gb=0.0, timeout_seconds=timeout)
             got = self.adapter.build_execute_command(path, spec, nice=nice)
-            self.assertEqual(got, _legacy_linux_command(path, cpu, nice, timeout))
+            self.assertEqual(got, _expected_linux_command(path, cpu, nice))
 
     def test_strict_uses_cgroups_with_fallback(self):
         spec = ResourceSpec(cpu_cores=2, memory_gb=4.0, timeout_seconds=120, max_processes=16)
         cmd = self.adapter.build_execute_command("/tmp/t.py", spec, strict=True)
-        self.assertIn("systemd-run --scope", cmd)
+        self.assertIn("systemd-run --user --scope", cmd)
         self.assertIn("CPUQuota=200%", cmd)      # 2 cores * 100%
         self.assertIn("MemoryMax=4096M", cmd)
         self.assertIn("TasksMax=16", cmd)
-        self.assertIn("else", cmd)               # degrades to legacy
+        self.assertIn("else", cmd)               # degrades to best_effort
         self.assertIn("taskset -c 0,1", cmd)
 
     def test_probe_parsing(self):
@@ -120,11 +120,16 @@ class WindowsAdapterTests(unittest.TestCase):
         self.adapter = WindowsAdapter()
 
     def test_powershell_wrapped_timeout(self):
+        import base64
         spec = ResourceSpec(cpu_cores=2, memory_gb=4.0, timeout_seconds=5)
         cmd = self.adapter.build_execute_command("C:/tmp/t.py", spec)
         self.assertIn("powershell", cmd)
-        self.assertIn("WaitForExit(5000)", cmd)
-        self.assertIn("exit 124", cmd)
+        self.assertIn("-EncodedCommand", cmd)
+        # Decode the base64 payload and check for timeout and exit 124.
+        b64_part = cmd.split("-EncodedCommand ")[-1].strip()
+        decoded = base64.b64decode(b64_part).decode("utf-16-le")
+        self.assertIn("WaitForExit(5000)", decoded)
+        self.assertIn("exit 124", decoded)
 
     def test_probe_uses_cim(self):
         self.assertIn("Win32_ComputerSystem", self.adapter.probe_commands()["cpu"])

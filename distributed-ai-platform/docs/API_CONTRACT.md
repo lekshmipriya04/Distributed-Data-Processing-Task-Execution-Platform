@@ -25,7 +25,7 @@ shows `detail` (or `message`) as text.
 | 2 Provision | `POST /api/v1/ssh/nodes/provision` `NodeProvisionRequest {onboarding_token, password}` | `NodeProvisionResponse {provision_id, host, port, username, fingerprint, expires_at, os_type, os_info, detected_cpu, detected_memory_gb, detected_gpu, gpu_*, python_version, runtimes, resource_enforcement, execution_backend}` |
 | 2b Manual fallback | `POST /api/v1/ssh/nodes/provision/manual` `{onboarding_token}` | `NodeManualProvisionResponse {provision_id, public_key, install_command_posix, install_command_windows, expires_at}` |
 | 2c Verify manual | `POST /api/v1/ssh/nodes/provision/{provision_id}/verify` (no body) | `NodeProvisionResponse` |
-| 3 Register | `POST /api/v1/ssh/nodes` `NodeRegisterRequest {provision_id, name, allocated_cpu, allocated_memory_gb}` | `201 NodeResponse` |
+| 3 Register | `POST /api/v1/ssh/nodes` `NodeRegisterRequest {provision_id, name, allocated_cpu, allocated_memory_gb, allocated_gpu_count=0, allocated_gpu_memory_gb=0}` | `201 NodeResponse` |
 
 Semantics:
 - Step 1 sends **no credential**. The server reads the host key only and
@@ -54,7 +54,7 @@ Semantics:
 |---|---|---|
 | `GET /api/v1/ssh/nodes` | `NodeListResponse {items: NodeResponse[], total}` | |
 | `GET /api/v1/ssh/nodes/{id}` | `NodeResponse` | |
-| `PATCH /api/v1/ssh/nodes/{id}` `NodeUpdateRequest` | `NodeResponse` | rename / change allocation (≤ detected) |
+| `PATCH /api/v1/ssh/nodes/{id}` `NodeUpdateRequest {name?, allocated_cpu?, allocated_memory_gb?, allocated_gpu_count?, allocated_gpu_memory_gb?}` | `NodeResponse` | rename / change allocation (≤ detected, GPU included) |
 | `DELETE /api/v1/ssh/nodes/{id}` | `NodeDeleteResponse {deleted, key_removed, message}` | removes our authorized_keys line, then the row |
 | `POST /api/v1/ssh/nodes/{id}/health-check` | `NodeResponse` | key login + `echo` |
 | `POST /api/v1/ssh/nodes/{id}/refresh` | `NodeResponse` | re-detect capabilities + runtimes |
@@ -64,9 +64,47 @@ Semantics:
 
 `NodeResponse` = capability fields + `{id, owner_id, name, host, port, username,
 auth_type, fingerprint, key_created_at, allocated_cpu, allocated_memory_gb,
-status, health_status, last_health_check, created_at, updated_at}`.
+allocated_gpu_count, allocated_gpu_memory_gb, allocated_gpu_fraction, status,
+health_status, last_health_check, created_at, updated_at}`.
 `auth_type != "managed_key"` means a legacy node; the UI shows a "Re-secure"
-action. `runtimes` is `{runtime_id: version}`.
+action. `runtimes` is `{runtime_id: version}`. Capability fields include
+`gpu_runtime` (`"torch-cuda" | "torch-mps" | null`): PyTorch with a GPU
+backend that is **already** on the worker (detected, never installed).
+
+#### GPU slice (per node)
+* `allocated_gpu_count` (int, default 0): devices `0..count-1` are exposed.
+* `allocated_gpu_memory_gb` (float, default 0): cap **per device**.
+* `allocated_gpu_fraction` (read-only) = `allocated_gpu_memory_gb / gpu_memory_gb`
+  clamped to 0..1; 0 when there is no GPU, no slice, or unknown device memory.
+* Both are clamped to the detected `gpu_count` / `gpu_memory_gb` on register,
+  update, refresh and re-secure. A memory slice with count 0 implies 1 device;
+  memory 0 means no GPU.
+* Enforcement only exists where PyTorch is already installed
+  (`gpu_runtime` set) and only for the `python` runtime: the task gets
+  `CUDA_VISIBLE_DEVICES`, `DP_GPU_FRACTION`, `DP_GPU_MEMORY_GB`,
+  `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128`, and is launched as
+  `python3 -I -B dp_gpu_preamble.py task.py`; the preamble calls
+  `torch.cuda.set_per_process_memory_fraction(f, device=i)` (or the MPS
+  equivalent) if `torch` imports, then runs `task.py` via `runpy` as
+  `__main__`. (`-I` ignores `PYTHONPATH`/`sitecustomize`, hence the wrapper.)
+  This is PyTorch's caching-allocator limit: it binds torch allocations only,
+  and code that calls the setter again can raise it — best effort.
+* Every other case (no slice, no torch, non-python runtime) gets
+  `CUDA_VISIBLE_DEVICES=""`.
+* A slot's fraction is the node fraction × `cpu_per_task / allocated_cpu`, so
+  all concurrent slots on a node (leases bound their cores) stay within the
+  node's slice. Leases record `gpu_allocated = allocated_gpu_count`.
+
+#### Always applied to POSIX sandbox tasks
+`nice -n <policy>` around the whole command (`/bin/sh -c`), `taskset -c` to the
+slot's cores where available, and `OMP_NUM_THREADS`, `MKL_NUM_THREADS`,
+`OPENBLAS_NUM_THREADS`, `NUMEXPR_NUM_THREADS` = the slot's cores. Windows is
+unchanged (no thread/GPU env yet).
+
+#### Execution policy (`execution_policy` on batches and training)
+`safe_background` (default; `nice` = `task_nice`, 19) | `balanced` (`nice 10`)
+| `max_available` (`nice 0`). Only priority changes; cores, threads and GPU
+memory never exceed the allocated slice under any policy.
 
 There are no public lease endpoints. Leases are internal (§4).
 
@@ -104,7 +142,7 @@ sandbox is deleted afterwards.
 ### 2.2 Batches
 | Request | Response |
 |---|---|
-| `POST /api/v1/ssh/batches` `BatchCreateRequest {code, inputs[], node_ids[], runtime, custom_command?, custom_filename?, cpu_per_task=1, timeout_seconds?}` | `201 BatchResponse` |
+| `POST /api/v1/ssh/batches` `BatchCreateRequest {code, inputs[], node_ids[], runtime, custom_command?, custom_filename?, cpu_per_task=1, timeout_seconds?, execution_policy="safe_background"}` | `201 BatchResponse` |
 | `GET /api/v1/ssh/batches` | `BatchListResponse {items}` (latest 20) |
 | `GET /api/v1/ssh/batches/{id}` | `BatchResponse` |
 | `GET /api/v1/ssh/batches/{id}/tasks` | `BatchTasksResponse {batch, tasks[]}` |
@@ -128,10 +166,24 @@ completed | failed | cancelled`.
 `POST /api/v1/ssh/train` `TrainRequest`, `GET /api/v1/ssh/train`,
 `GET /api/v1/ssh/train/{id}`, `GET /api/v1/ssh/train/{id}/model` (ONNX),
 `GET /api/v1/ssh/train/{id}/data` (JSON), `DELETE /api/v1/ssh/train/{id}`.
-`engine` is `spark` (CSV/tabular) or `ray` (image datasets); both run **on the
-master only**. Workers receive a stdlib-only `job.py` plus `input.json` (the
-shard) in a sandbox, through the same executor as batches, with the runtime
-fixed to `python`.
+`engine` is `python` (pure-Python on the master; Spark/Ray were removed).
+Workers receive a stdlib-only training script and their shard on stdin in a
+sandbox, through the same executor as batches, with the runtime fixed to
+`python`. `TrainRequest` also takes `execution_policy` (see §1.2).
+
+Multi mode leases every selected node (`cpu_per_task=1`, one shard per leased
+core) and sizes shards by **compute score** instead of equal `rows[i::k]`:
+`P = gpu_mem_gb × shard_weight_gpu + cores × shard_weight_cpu` (settings,
+defaults 5.0 / 1.0), rows split by largest-remainder rounding, ≥1 row per node
+when rows allow, rows dealt interleaved (smooth round-robin) to keep class
+balance. A shard is preferably run by the node it was sized for (other nodes
+take it only if that node died or already failed it). The GPU term only counts
+when the node has `gpu_runtime` **and** the job uses the GPU. The built-in
+stdlib trainer never uses the GPU (`ml_templates.REMOTE_SCRIPT_USES_GPU =
+False`), so today training is scored by cores only — weighting GPU nodes
+higher would make them stragglers. Example (GPU job): W1 8 GB/4c, W2 4 GB/4c,
+W3 0/4c → 44 : 24 : 4; CPU-only → equal. FedAvg weights by shard size, so
+unequal shards stay correct.
 
 ---
 
@@ -140,7 +192,7 @@ fixed to `python`.
 | Provider (owner) | Interface | Consumers |
 |---|---|---|
 | `node_service.py` | `transport_for_node(node: SSHNode) -> SSHTransport` (not connected; key auth for managed nodes, legacy secret otherwise, host key pinned) | dispatcher, training, recovery |
-| `capabilities.py` | `detect_capabilities(transport, adapter, timeout=20) -> NodeCapabilities` with fields `os_type, os_version, cpu_total, memory_total_gb, gpu_vendor, gpu_backend, gpu_model, gpu_count, gpu_memory_gb, python_version, runtimes: dict[str,str], env_path: Optional[str], execution_backend, resource_enforcement` (no java/spark/ray fields) | node_service |
+| `capabilities.py` | `detect_capabilities(transport, adapter, timeout=20) -> NodeCapabilities` with fields `os_type, os_version, cpu_total, memory_total_gb, gpu_vendor, gpu_backend, gpu_model, gpu_count, gpu_memory_gb, gpu_runtime: Optional[str], python_version, runtimes: dict[str,str], env_path: Optional[str], execution_backend, resource_enforcement` (no java/spark/ray fields) | node_service |
 | `task_executor.py` | `detect_os(transport, timeout=15) -> str`, `select_adapter(os_type) -> OSAdapter` (signatures stable) | node_service |
 | `task_executor.py` | `TaskExecutor(transport, adapter, ...).run(runtime_id, code, input_data, spec, *, env_path, custom_command=None, custom_filename=None, execution_id=None, extra_files=None) -> dict{status, exit_code, stdout, stderr, execution_id, started_at, finished_at, duration_ms}`; `cancel(execution_id)`; `sweep_stale_sandboxes(older_than_minutes)` | dispatcher, training |
 | `runtimes.py` | `list_runtimes() -> list[Runtime]`, `get_runtime(id) -> Runtime \| None` | routes_batches, capabilities, validation |

@@ -9,7 +9,8 @@ Two things live here beyond the abstract interface:
 * :data:`SANDBOX_RUNNER_SOURCE` — a small POSIX Python program the master
   uploads into each sandbox. It sets the clean environment, puts the task in its
   own session/process group, records that group id for cancellation, enforces the
-  wall-clock timeout and reaps grandchildren. Python 3 is the one interpreter we
+  wall-clock timeout, kills the group afterwards and then (best effort) any
+  process that left the group but still runs in the sandbox. Python 3 is the one interpreter we
   require on a worker, so this works everywhere without GNU coreutils
   (``timeout``/``setsid`` are absent on macOS).
 * :class:`PosixSandboxMixin` / :class:`WindowsSandboxMixin` — the per-OS naming
@@ -22,7 +23,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-from resource_spec import ResourceSpec
+from runtimes import ResourceSpec
 
 if TYPE_CHECKING:
     # The sandbox mixins below are combined with an OSAdapter subclass, which
@@ -55,7 +56,12 @@ Written by the master into the sandbox and executed with python3. It:
   * runs the task with a clean environment rooted in the sandbox,
   * puts it in its own session/process group and records that group id,
   * enforces the wall-clock timeout (exit 124, like timeout(1)),
-  * kills the whole process tree on timeout, cancel or normal exit.
+  * kills the task's process group on timeout, cancel or normal exit,
+  * then, best effort, kills processes that left the group (setsid / double
+    fork) but still run inside the sandbox: on Linux those whose cwd is in the
+    sandbox or whose environment carries DP_SANDBOX=<sandbox>; on macOS those
+    whose cwd is in the sandbox (via lsof). A task that leaves the group AND
+    changes directory (and, on Linux, clears its environment) can still escape.
 """
 import json
 import os
@@ -71,6 +77,68 @@ def _killpg(pgid, sig):
         pass
 
 
+def _inside(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _escaped_pids(sandbox):
+    """PIDs of this user's processes that still belong to the sandbox."""
+    me, parent, uid = os.getpid(), os.getppid(), os.getuid()
+    root = os.path.realpath(sandbox)
+    marker = ("DP_SANDBOX=" + sandbox).encode()
+    found = set()
+    if os.path.isdir("/proc/self"):
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            try:
+                if os.stat("/proc/%d" % pid).st_uid != uid:
+                    continue
+                if _inside(os.path.realpath(os.readlink("/proc/%d/cwd" % pid)), root):
+                    found.add(pid)
+                    continue
+            except OSError:
+                pass
+            try:
+                with open("/proc/%d/environ" % pid, "rb") as fh:
+                    if marker in fh.read().split(b"\0"):
+                        found.add(pid)
+            except OSError:
+                pass
+    else:
+        try:
+            out = subprocess.run(
+                ["lsof", "-a", "-d", "cwd", "-u", str(uid), "-Fpn"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15,
+            ).stdout.decode("utf-8", "replace")
+        except Exception:
+            out = ""
+        pid = None
+        for line in out.splitlines():
+            if line.startswith("p") and line[1:].isdigit():
+                pid = int(line[1:])
+            elif line.startswith("n") and pid is not None:
+                if _inside(os.path.realpath(line[1:]), root):
+                    found.add(pid)
+    found.discard(me)
+    found.discard(parent)
+    return found
+
+
+def _kill_escaped(sandbox):
+    """Kill processes that left the task's group but still live in the sandbox."""
+    for _ in range(3):  # repeat: a survivor may fork while we sweep
+        pids = _escaped_pids(sandbox)
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+
 def main():
     sandbox = sys.argv[1]
     timeout_s = float(sys.argv[2])
@@ -81,6 +149,7 @@ def main():
     env.setdefault("HOME", sandbox)
     env.setdefault("TMPDIR", sandbox)
     env.setdefault("PWD", sandbox)
+    env["DP_SANDBOX"] = sandbox  # lets the final sweep find escaped processes
 
     proc = subprocess.Popen(
         command,
@@ -111,8 +180,10 @@ def main():
         sys.stderr.flush()
         return 124
     finally:
-        # Reap anything the task left running (background jobs, children).
+        # Reap anything the task left running (background jobs, children),
+        # then anything that escaped the process group (setsid, daemonize).
         _killpg(proc.pid, signal.SIGKILL)
+        _kill_escaped(sandbox)
 
     if rc is None:
         return 1
@@ -124,6 +195,91 @@ def main():
 if __name__ == "__main__":
     sys.exit(main())
 '''
+
+
+#: Wrapper the master uploads next to a Python task that was given a GPU slice.
+GPU_PREAMBLE_FILENAME = "dp_gpu_preamble.py"
+
+#: Runs *before* the user's script in the same interpreter. ``python -I``
+#: ignores PYTHONPATH and sitecustomize, so instead the launch line becomes
+#: ``python3 -I -B dp_gpu_preamble.py task.py``: this file caps the GPU memory
+#: (only if PyTorch is already installed -- nothing is ever installed) and then
+#: executes the task with :func:`runpy.run_path` as ``__main__``.
+#: The cap is PyTorch's caching-allocator limit: best effort, it binds torch
+#: allocations only, and code that calls the setter again can raise it.
+GPU_PREAMBLE_SOURCE = r'''"""dp GPU preamble: cap this process's GPU memory, then run the task."""
+import os
+import runpy
+import sys
+
+
+def _cap():
+    try:
+        fraction = float(os.environ.get("DP_GPU_FRACTION") or 0)
+    except ValueError:
+        return
+    if not 0 < fraction <= 1:
+        return
+    try:
+        import torch
+    except Exception:
+        return  # no PyTorch on this worker: nothing to enforce with
+    try:
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                torch.cuda.set_per_process_memory_fraction(fraction, device=i)
+        else:
+            mps = getattr(torch, "mps", None)
+            if mps is not None and hasattr(mps, "set_per_process_memory_fraction"):
+                if torch.backends.mps.is_available():
+                    mps.set_per_process_memory_fraction(fraction)
+    except Exception as exc:
+        sys.stderr.write("[dp] GPU cap not applied: %s\n" % (exc,))
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write("usage: dp_gpu_preamble.py SCRIPT [ARGS...]\n")
+        return 2
+    _cap()
+    script = sys.argv[1]
+    sys.argv = sys.argv[1:]
+    runpy.run_path(script, run_name="__main__")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+#: Thread-pool variables capped to the slot's cores so BLAS/OpenMP never
+#: fan out over the owner's other cores.
+THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
+def gpu_preamble_applies(runtime: Any, spec: ResourceSpec) -> bool:
+    """True when ``runtime`` is plain Python and the task has a GPU slice."""
+    return getattr(runtime, "id", runtime) == "python" and spec.uses_gpu
+
+
+def resource_env(runtime: Any, spec: ResourceSpec) -> dict[str, str]:
+    """Thread caps + GPU visibility/caps for one task (values may be "")."""
+    threads = str(spec.thread_count)
+    env = {name: threads for name in THREAD_ENV_VARS}
+    if gpu_preamble_applies(runtime, spec):
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(spec.gpu_count))
+        env["DP_GPU_FRACTION"] = f"{spec.gpu_memory_fraction:.6f}"
+        env["DP_GPU_MEMORY_GB"] = f"{spec.gpu_memory_gb:.3f}"
+        env["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+    else:
+        # No enforceable slice: the task must not touch the GPU at all.
+        env["CUDA_VISIBLE_DEVICES"] = ""
+    return env
 
 
 @dataclass
@@ -218,6 +374,16 @@ class OSAdapter(ABC):
         """Source of the runner file to upload into each sandbox (or None)."""
         return SANDBOX_RUNNER_SOURCE
 
+    def sandbox_support_files(self, runtime: Any, spec: ResourceSpec) -> dict[str, str]:
+        """Files (name -> source) to upload into the sandbox before launch."""
+        files: dict[str, str] = {}
+        runner = self.sandbox_runner()
+        if runner:
+            files[RUNNER_FILENAME] = runner
+        if runner and gpu_preamble_applies(runtime, spec):
+            files[GPU_PREAMBLE_FILENAME] = GPU_PREAMBLE_SOURCE
+        return files
+
 
 def _safe_execution_id(execution_id: str) -> str:
     """Validate an execution id for use in a shell command and a path."""
@@ -227,7 +393,10 @@ def _safe_execution_id(execution_id: str) -> str:
     return ident[:64]
 
 
-def _env_for(runtime: Any, sandbox: str, env_path: str, timeout_seconds: int) -> dict:
+def _env_for(
+    runtime: Any, sandbox: str, env_path: str, timeout_seconds: int,
+    spec: Optional[ResourceSpec] = None,
+) -> dict:
     """Build the clean environment the task runs with, rooted in the sandbox."""
     from runtimes import sandbox_env_for
 
@@ -241,7 +410,11 @@ def _env_for(runtime: Any, sandbox: str, env_path: str, timeout_seconds: int) ->
     if env_path:
         env["PATH"] = env_path
     env.update(sandbox_env_for(runtime, sandbox))
-    return {k: v for k, v in env.items() if v}
+    env = {k: v for k, v in env.items() if v}
+    if spec is not None:
+        # Added after the filter: CUDA_VISIBLE_DEVICES="" must survive.
+        env.update(resource_env(runtime, spec))
+    return env
 
 
 class PosixSandboxMixin:
@@ -260,16 +433,20 @@ class PosixSandboxMixin:
         return f'rm -rf {quoted} 2>/dev/null; true'
 
     def _sandbox_glob(self, execution_id: str) -> str:
+        """Shell glob matching this execution's sandbox(es).
+
+        Only the base directory is quoted: the ``*`` must stay live for the
+        shell, and the id is already restricted to ``[A-Za-z0-9._-]``.
+        """
         ident = _safe_execution_id(execution_id)
-        base = self.temp_directory().rstrip("/")
-        return shlex.quote(f"{base}/dp-exec.{ident}.*")
+        base = shlex.quote(self.temp_directory().rstrip("/"))
+        return f"{base}/dp-exec.{ident}.*"
 
     def remove_sandbox_by_execution_command(self, execution_id: str) -> str:
-        base = shlex.quote(self.temp_directory().rstrip("/"))
         pattern = self._sandbox_glob(execution_id)
         return (
-            f"for d in {base}/dp-exec.*; do "
-            f'case "$d" in {pattern}) rm -rf "$d" 2>/dev/null ;; esac; '
+            f"for d in {pattern}; do "
+            '[ -d "$d" ] && rm -rf "$d" 2>/dev/null; '
             "done; true"
         )
 
@@ -318,12 +495,20 @@ class PosixSandboxMixin:
         """
         from runtimes import build_run_command
 
-        inner = build_run_command(
-            runtime, filename=filename, os_type=self.os_type, custom_command=custom_command
-        )
+        if gpu_preamble_applies(runtime, spec):
+            # -I drops PYTHONPATH/sitecustomize, so the preamble is the script
+            # python runs; it then runs the task file via runpy.
+            tool = runtime.tool_names[0] if getattr(runtime, "tool_names", None) else "python3"
+            inner = f"{tool} -I -B {GPU_PREAMBLE_FILENAME} {shlex.quote(filename)}"
+        else:
+            inner = build_run_command(
+                runtime, filename=filename, os_type=self.os_type, custom_command=custom_command
+            )
+        # nice wraps a shell so compound commands (build && run) are all niced.
+        inner = f"nice -n {int(nice)} /bin/sh -c {shlex.quote(inner)}"
         inner = self._pin_cores(inner, spec)
         env_json = _json_dumps(
-            _env_for(runtime, sandbox, env_path, spec.timeout_seconds)
+            _env_for(runtime, sandbox, env_path, spec.timeout_seconds, spec)
         )
         runner = f"{sandbox.rstrip('/')}/{RUNNER_FILENAME}"
         return (
@@ -377,7 +562,6 @@ class WindowsSandboxMixin:
 
     def create_sandbox_command(self, execution_id: str) -> str:
         ident = _safe_execution_id(execution_id)
-        temp = self.temp_directory().rstrip("/\\")
         script = (
             f"$sb = Join-Path $env:TEMP ('dp-exec.{ident}.' + [guid]::NewGuid().ToString('N').Substring(0,8)); "
             "New-Item -ItemType Directory -Force -Path $sb | Out-Null; "
