@@ -47,14 +47,17 @@ _ADDITIVE_COLUMNS: tuple[str, ...] = (
     "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS capabilities_json TEXT",
     "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS health_status VARCHAR(16) NOT NULL DEFAULT 'unknown'",
     "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS last_health_check TIMESTAMPTZ",
-    # ssh-executor: training engine label (always "python" since Spark/Ray
-    # were removed in 52b210f).
+    # ssh-executor: training engine label ("python" or "spark_ray").
     "ALTER TABLE IF EXISTS training_runs ADD COLUMN IF NOT EXISTS engine VARCHAR(16) NOT NULL DEFAULT 'python'",
     # ssh-executor: GPU slice per node and execution policy per batch.
     "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS allocated_gpu_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS allocated_gpu_memory_gb DOUBLE PRECISION NOT NULL DEFAULT 0",
     "ALTER TABLE IF EXISTS ssh_nodes ADD COLUMN IF NOT EXISTS gpu_runtime VARCHAR(32)",
     "ALTER TABLE IF EXISTS task_batches ADD COLUMN IF NOT EXISTS execution_policy VARCHAR(16) NOT NULL DEFAULT 'safe_background'",
+    # ssh-executor: optional Spark + Ray engine, custom and Spark MLlib models.
+    "ALTER TABLE IF EXISTS training_runs ADD COLUMN IF NOT EXISTS details_json TEXT",
+    "ALTER TABLE IF EXISTS training_runs ADD COLUMN IF NOT EXISTS model_code TEXT",
+    "ALTER TABLE IF EXISTS training_runs ADD COLUMN IF NOT EXISTS artifact BYTEA",
 )
 
 

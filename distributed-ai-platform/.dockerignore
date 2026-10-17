@@ -2,6 +2,7 @@
 # They only COPY shared/ and services/<name>/, so keep everything else out,
 # especially secrets and the large node_modules folders.
 .git
+.env
 config
 frontend
 distributed-compute-vscode

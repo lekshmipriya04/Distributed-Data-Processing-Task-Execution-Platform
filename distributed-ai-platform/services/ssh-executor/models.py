@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, String, Integer, Float, Text, ForeignKey, func
+from sqlalchemy import DateTime, String, Integer, Float, LargeBinary, Text, ForeignKey, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -284,6 +284,14 @@ class TrainingRun(Base):
     weights_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     history_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     shards_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # What actually ran: engine, data loading, Ray parameter-server stats, Spark
+    # model details (feature importances, grid search, labels).
+    details_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Source of a "custom" model (the user's model.py), run on the workers.
+    model_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Zipped Spark PipelineModel for "spark:*" models (deferred: not loaded
+    # unless the model is downloaded).
+    artifact: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True, deferred=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

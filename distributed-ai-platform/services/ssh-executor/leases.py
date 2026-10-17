@@ -17,7 +17,7 @@ from typing import Any, Generator, Iterable, Optional
 import uuid
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import get_settings

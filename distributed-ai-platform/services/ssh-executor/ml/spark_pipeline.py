@@ -1,97 +1,190 @@
-"""Apache Spark data sharding — MASTER ONLY.
+"""Apache Spark on the master: one shared session and dataset loading.
 
-Used by the "spark_ray" training engine. Splits an already-loaded dataset into
-compute-weighted shards using a Spark DataFrame so the partitioning runs across
-the master's cores. Worker nodes never see Spark; they still receive a
-stdlib-only Python script and one data shard over SSH.
-
-PySpark (and a JVM) is an optional dependency installed only on the master
-container (``pip install '.[spark_ray]'``). When it is not present — e.g. a dev
-box with no JDK — :func:`spark_available` returns False and the caller falls
-back to the pure-Python sharder, so the service always starts and runs.
+Used only by the "spark_ray" engine. pyspark is imported lazily so the
+service starts without it. Worker nodes never run Spark.
 """
 from __future__ import annotations
 
+import csv
+import json
+import os
+import sys
+import threading
+from typing import Any, Optional
+
 import structlog
+
+from config import get_settings
 
 logger = structlog.get_logger(__name__)
 
+_lock = threading.Lock()
+_session: Any = None
 
-def spark_available() -> bool:
-    """True when PySpark can be imported (master has the spark_ray extra)."""
-    try:
-        import pyspark  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-def _get_or_create_session(app_name: str = "ssh-executor-sharding"):
-    """A local[*] SparkSession pinned to the master. Small driver footprint so
-    it coexists with the API process; reused across runs."""
-    from pyspark.sql import SparkSession  # type: ignore
-
-    return (
-        SparkSession.builder.appName(app_name)
-        .master("local[*]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.driver.memory", "1g")
-        .config("spark.sql.shuffle.partitions", "8")
-        .getOrCreate()
-    )
+NUMERIC_TYPES = (
+    "ByteType", "ShortType", "IntegerType", "LongType",
+    "FloatType", "DoubleType", "DecimalType",
+)
 
 
-def spark_split_by_sizes(
-    rows: list[list[float]],
-    sizes: list[int],
-    *,
-    app_name: str = "ssh-executor-sharding",
-) -> list[list[list[float]]]:
-    """Deal ``rows`` into shards of exactly ``sizes`` rows each, via Spark.
+def _is_local(master: str) -> bool:
+    return master.startswith("local")
 
-    ``sizes`` is the per-shard row count the compute-weighted planner already
-    decided (``plan_weighted_shards``), so the returned shards stay aligned with
-    the node affinity list. The row-to-shard assignment is computed inside a
-    Spark job (the master's cores) using an interleaved weighted round-robin
-    equivalent to the pure-Python ``interleave_split``.
 
-    Raises if PySpark is unavailable — guard with :func:`spark_available`.
+def get_spark():
+    """The master's SparkSession, created on first use (takes a few seconds)."""
+    global _session
+    with _lock:
+        if _session is not None:
+            return _session
+        from pyspark.sql import SparkSession
+
+        settings = get_settings()
+        master = settings.spark_master_url
+        # Spark starts Python helper processes (e.g. to save a model) with
+        # "python3" from PATH unless told otherwise; a different minor version
+        # than this process makes it refuse to run.
+        os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+        os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
+        if _is_local(master):
+            # Local mode never needs Hadoop/YARN config; a broken one on the
+            # host would otherwise stop the JVM from starting.
+            for var in ("HADOOP_CONF_DIR", "YARN_CONF_DIR"):
+                if os.environ.pop(var, None) is not None:
+                    logger.info("spark_ignoring_env", variable=var)
+        builder = (
+            SparkSession.builder.appName("distributed-compute-master")
+            .master(master)
+            .config("spark.ui.enabled", "false")
+            .config("spark.driver.memory", settings.spark_driver_memory)
+            .config("spark.sql.shuffle.partitions", "8")
+            .config("spark.sql.session.timeZone", "UTC")
+        )
+        if _is_local(master):
+            builder = builder.config("spark.driver.bindAddress", "127.0.0.1").config(
+                "spark.driver.host", "127.0.0.1"
+            )
+        _session = builder.getOrCreate()
+        _session.sparkContext.setLogLevel("WARN")
+        logger.info("spark_started", master=master, version=_session.version)
+        return _session
+
+
+def stop_spark() -> None:
+    global _session
+    with _lock:
+        if _session is not None:
+            _session.stop()
+            _session = None
+            logger.info("spark_stopped")
+
+
+def _records_from_file(path: str, file_format: str) -> list[dict]:
+    """Parse CSV/JSON on the driver (used when Spark runs on a remote cluster,
+    whose executors cannot read the master's local temp file)."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        if file_format == "csv":
+            records = list(csv.DictReader(fh))
+        else:
+            text = fh.read()
+            records = []
+            for line in text.splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        records = []
+                        break
+            if not records:
+                loaded = json.loads(text)
+                records = loaded if isinstance(loaded, list) else []
+    out = []
+    for record in records:
+        row = {}
+        for key, value in record.items():
+            if isinstance(value, str):
+                try:
+                    value = float(value)
+                except ValueError:
+                    value = value if value != "" else None
+            row[key] = value
+        out.append(row)
+    return out
+
+
+def read_dataframe(path: str, file_format: str):
+    """Load a downloaded dataset file as a Spark DataFrame."""
+    spark = get_spark()
+    fmt = (file_format or "csv").lower()
+    if fmt == "jsonl":
+        fmt = "json"
+    if fmt not in ("csv", "json", "parquet"):
+        raise ValueError(f"Unsupported dataset format '{file_format}'")
+    if not _is_local(get_settings().spark_master_url):
+        if fmt == "parquet":
+            raise ValueError(
+                "Parquet datasets need local Spark (SPARK_MASTER_URL=local[*]); "
+                "a remote Spark cluster cannot read the master's temporary file."
+            )
+        records = _records_from_file(path, fmt)
+        if not records:
+            raise ValueError("Dataset is empty")
+        return spark.createDataFrame(records)
+    if fmt == "csv":
+        return spark.read.option("header", True).option("inferSchema", True).csv(path)
+    if fmt == "parquet":
+        return spark.read.parquet(path)
+    df = spark.read.json(path)
+    if df.columns == ["_corrupt_record"]:
+        df = spark.read.option("multiLine", True).json(path)
+    return df
+
+
+def numeric_columns(df, exclude: Optional[str] = None) -> list[str]:
+    return [
+        f.name for f in df.schema.fields
+        if type(f.dataType).__name__ in NUMERIC_TYPES and f.name != exclude
+    ]
+
+
+def select_features(df, target: str, feature_columns: list[str], *, need_target: bool = True) -> list[str]:
+    columns = set(df.columns)
+    if need_target and target not in columns:
+        raise ValueError(f"Target column '{target}' not found in dataset")
+    if feature_columns:
+        missing = [c for c in feature_columns if c not in columns]
+        if missing:
+            raise ValueError(f"Feature columns not found: {', '.join(missing)}")
+        return list(feature_columns)
+    features = numeric_columns(df, exclude=target)
+    if not features:
+        raise ValueError("No numeric feature columns available")
+    return features
+
+
+def dataframe_rows(df, target: str, feature_columns: list[str], max_rows: int, seed: int = 42):
+    """Numeric rows (features..., target) for worker training.
+
+    Casts to double, drops incomplete rows, and when the dataset is larger
+    than ``max_rows`` keeps a uniform random sample instead of the first rows.
     """
-    k = len(sizes)
-    n = len(rows)
-    if k == 0:
-        return []
-    if sum(sizes) != n:
-        raise ValueError("shard sizes must sum to the number of rows")
-    if n == 0:
-        return [[] for _ in range(k)]
+    from pyspark.sql import functions as F
 
-    # Precompute each row's shard on the driver-equivalent plan, then let Spark
-    # perform the grouping/collection in parallel. The assignment mirrors
-    # interleave_split so Spark and pure-Python paths produce identical shards.
-    assignment: list[int] = []
-    filled = [0] * k
-    for j in range(n):
-        best, best_gap = -1, None
-        for i, size in enumerate(sizes):
-            if filled[i] >= size:
-                continue
-            gap = size * (j + 1) / n - filled[i]
-            if best_gap is None or gap > best_gap + 1e-12:
-                best, best_gap = i, gap
-        assignment.append(best)
-        filled[best] += 1
-
-    spark = _get_or_create_session(app_name)
-    sc = spark.sparkContext
-    paired = sc.parallelize(list(zip(assignment, rows)))
-    grouped = paired.groupByKey().mapValues(list).collectAsMap()
-
-    shards: list[list[list[float]]] = [grouped.get(s, []) for s in range(k)]
-    logger.info(
-        "spark_sharded",
-        shards=k,
-        rows=n,
-        sizes=[len(s) for s in shards],
-    )
-    return shards
+    features = select_features(df, target, feature_columns)
+    names = [*features, target]
+    clean = df.select([F.col(f"`{c}`").cast("double").alias(c) for c in names]).dropna()
+    total = clean.count()
+    if total == 0:
+        raise ValueError("No valid numeric rows found in dataset")
+    sampled = total > max_rows
+    if sampled:
+        clean = clean.orderBy(F.rand(seed)).limit(max_rows)
+    rows = [[float(v) for v in row] for row in clean.collect()]
+    details = {
+        "rows_total": total,
+        "rows_used": len(rows),
+        "sampled": sampled,
+        "partitions": clean.rdd.getNumPartitions(),
+    }
+    return rows, features, details

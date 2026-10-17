@@ -10,10 +10,13 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
 import csv
+from dataclasses import dataclass, field
 import inspect
 import io
 import json
 import math
+import os
+import tempfile
 from typing import Optional
 import uuid
 
@@ -23,7 +26,7 @@ from onnx import TensorProto, helper
 from sqlalchemy import select
 import structlog
 
-from config import get_settings
+from config import SSHExecutorSettings, get_settings
 from database import get_db_manager
 from tasks import lease_heartbeat, run_across_nodes
 from leases import (
@@ -32,6 +35,9 @@ from leases import (
     release_allocations,
     reserve_allocations,
 )
+from ml import custom_model
+from ml.engines import PYTHON, SPARK_RAY, EngineUnavailable, require_engine
+from ml.params import average_params, combine_metrics
 from models import SSHNode, TrainingRun
 from runtimes import policy_nice
 from shared.common.auth import create_internal_token
@@ -291,23 +297,6 @@ def _train_cnn(weights: dict, rows: list, lr: float, epochs: int) -> dict:
     return {"w": params, "b": 0.0, "arch": arch, "n": n, "loss": total_loss / (n * reps)}
 
 
-def aggregate(results: list) -> Optional[dict]:
-    valid = [r for r in results if r and r.get("n", 0) > 0 and r.get("w")]
-    if not valid:
-        return None
-    total = sum(r["n"] for r in valid)
-    d = len(valid[0]["w"])
-    w = [0.0] * d
-    b = 0.0
-    for r in valid:
-        frac = r["n"] / total
-        rw = r["w"]
-        for j in range(d):
-            w[j] += frac * rw[j]
-        b += frac * float(r.get("b", 0.0))
-    return {"w": w, "b": b}
-
-
 def evaluate(model_type: str, weights: Optional[dict], rows: list) -> dict:
     if not weights or not weights.get("w") or not rows:
         return {}
@@ -363,13 +352,18 @@ SUPPORTED_MODELS = ("linear_regression", "logistic_regression", "cnn")
 REMOTE_SCRIPT_USES_GPU = False
 
 
-def generate_remote_script(model_type: str, lr: float, epochs: int) -> str:
-    if model_type not in SUPPORTED_MODELS:
-        raise ValueError(f"Unsupported model_type: {model_type}")
-    helpers = "\n\n".join(
+def builtin_helpers_source() -> str:
+    """Self-contained stdlib source of the built-in trainers (workers and Ray run it)."""
+    return "import math\n\n" + "\n\n".join(
         inspect.getsource(fn)
         for fn in (_predict_linear, _predict_logistic, train_core, _train_cnn)
     )
+
+
+def generate_remote_script(model_type: str, lr: float, epochs: int) -> str:
+    if model_type not in SUPPORTED_MODELS:
+        raise ValueError(f"Unsupported model_type: {model_type}")
+    helpers = builtin_helpers_source()
     if model_type == "cnn":
         train_call = "    out = _train_cnn(weights, rows, %r, %r)\n" % (float(lr), int(epochs))
     else:
@@ -530,30 +524,6 @@ def build_onnx_model(model_type: str, weights_json: str) -> bytes:
 # 3. TRAINING ORCHESTRATOR & FEDAVG (from training_orchestrator)
 # ==============================================================================
 
-def _split_rows(rows: list, sizes: list[int], engine: str) -> list[list]:
-    if engine == "spark_ray":
-        try:
-            from ml.spark_pipeline import spark_available, spark_split_by_sizes
-
-            if spark_available():
-                return spark_split_by_sizes(rows, sizes)
-            logger.info("spark_unavailable_using_pure_python")
-        except Exception as exc:
-            logger.warning("spark_shard_failed_falling_back", error=str(exc))
-    return interleave_split(rows, sizes)
-
-
-def _aggregate(results: list[dict], engine: str) -> Optional[dict]:
-    if engine == "spark_ray":
-        try:
-            from ml.ray_orchestrator import ray_fedavg
-
-            return ray_fedavg(results)
-        except Exception as exc:
-            logger.warning("ray_fedavg_failed_falling_back", error=str(exc))
-    return _fedavg(results)
-
-
 async def _update_run(run_id: uuid.UUID, **fields) -> None:
     db = get_db_manager()
     async with db.session() as session:
@@ -585,6 +555,10 @@ def _read_rows(
     if not dataset_id:
         raise ValueError("Dataset metadata does not contain an ID")
     file_format = (metadata.get("file_format") or "csv").lower()
+    if file_format not in ("csv", "json", "jsonl"):
+        raise ValueError(
+            f"{file_format} datasets need the Spark + Ray engine; the Python engine reads CSV and JSON"
+        )
     download_url = (
         f"{settings.storage_service_url}/api/v1/storage/datasets/{dataset_id}/download"
     )
@@ -676,13 +650,7 @@ async def _load_dataset_rows(
     master_engine: str = "python",
     owner_id: Optional[str] = None,
 ) -> tuple[list[list[float]], list[str]]:
-    metadata_url = f"{settings.storage_service_url}/api/v1/storage/datasets/{dataset_id}"
-    headers = _storage_headers(owner_id)
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.get(metadata_url, headers=headers)
-        resp.raise_for_status()
-        metadata = resp.json()
-
+    metadata = await _fetch_metadata(dataset_id, settings, owner_id)
     return await asyncio.to_thread(
         _read_rows, metadata, target_column, feature_columns, settings, owner_id
     )
@@ -700,22 +668,6 @@ def _run_local(model_type, lr, epochs, weights, shards, local_cores):
     workers = max(1, min(local_cores, len(jobs)))
     with ProcessPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(_local_worker, jobs))
-
-
-def _fedavg(results: list[dict]) -> Optional[dict]:
-    valid = [r for r in results if r and r.get("n", 0) > 0 and r.get("w")]
-    if not valid:
-        return None
-
-    total = sum(r["n"] for r in valid)
-    weights = [0.0] * len(valid[0]["w"])
-    bias = 0.0
-    for result in valid:
-        fraction = result["n"] / total
-        for idx, value in enumerate(result["w"]):
-            weights[idx] += fraction * value
-        bias += fraction * float(result.get("b", 0.0))
-    return {"w": weights, "b": bias}
 
 
 def node_score(
@@ -781,7 +733,6 @@ def plan_weighted_shards(
     job_uses_gpu: bool,
     w_gpu: float = 5.0,
     w_cpu: float = 1.0,
-    engine: str = "python",
 ) -> tuple[list[list], list]:
     if not nodes:
         return [], []
@@ -801,7 +752,7 @@ def plan_weighted_shards(
         for part in largest_remainder(count, [1.0] * slots):
             sizes.append(part)
             affinity.append(node.get("node_id"))
-    shards = _split_rows(rows, sizes, engine)
+    shards = interleave_split(rows, sizes)
     kept = [(s, a) for s, a in zip(shards, affinity) if s]
     return [s for s, _ in kept], [a for _, a in kept]
 
@@ -869,6 +820,149 @@ async def _online_nodes(owner_id: str, node_ids: list | None = None) -> list:
         return list((await session.execute(stmt)).scalars().all())
 
 
+# --- model families ------------------------------------------------------
+CUSTOM_MODEL = "custom"
+SPARK_PREFIX = "spark:"
+
+
+def model_family(model_type: str) -> str:
+    """"builtin" (stdlib trainers), "custom" (user model.py) or "spark" (MLlib)."""
+    if model_type in SUPPORTED_MODELS:
+        return "builtin"
+    if model_type == CUSTOM_MODEL:
+        return "custom"
+    if model_type.startswith(SPARK_PREFIX) and len(model_type) > len(SPARK_PREFIX):
+        return "spark"
+    raise ValueError(f"Unsupported model_type: {model_type}")
+
+
+def _builtin_pairs(results: list) -> list[tuple[dict, int]]:
+    """Built-in shard results -> (params, rows) pairs for average_params."""
+    pairs = []
+    for r in results:
+        if r and r.get("w"):
+            params = {k: r[k] for k in ("w", "b", "arch") if k in r}
+            pairs.append((params, int(r.get("n", 0) or 0)))
+    return pairs
+
+
+def aggregate(results: list) -> Optional[dict]:
+    """Row-weighted FedAvg of built-in shard results ({"w", "b", "n", ...})."""
+    return average_params(_builtin_pairs(results))
+
+
+def _short_error(exc: BaseException) -> str:
+    """One readable line, also for Py4J errors that wrap a Java stack trace."""
+    text = str(exc).strip()
+    for line in text.splitlines():
+        line = line.strip(": \t")
+        if ("Exception:" in line or "Error:" in line) and not line.startswith("at "):
+            return line[:500]
+    return (text.splitlines()[0] if text else type(exc).__name__)[:500]
+
+
+def _stderr_tail(result: Optional[dict], limit: int = 600) -> str:
+    text = ((result or {}).get("stderr") or "").strip()
+    return text[-limit:] if text else "no error output"
+
+
+@dataclass
+class _RunContext:
+    run_id: uuid.UUID
+    owner_id: str
+    model_type: str
+    mode: str
+    rounds: int
+    lr: float
+    epochs: int
+    local_cores: int
+    num_classes: int
+    engine: str
+    hyper: dict
+    settings: SSHExecutorSettings
+    execution_policy: str
+    rows: list = field(default_factory=list)
+    feature_names: list = field(default_factory=list)
+    shards: list = field(default_factory=list)
+    affinity: Optional[list] = None
+    allocations: list = field(default_factory=list)
+    details: dict = field(default_factory=dict)
+
+    @property
+    def nice(self) -> int:
+        return policy_nice(self.execution_policy, self.settings.task_nice)
+
+
+# --- dataset access ------------------------------------------------------
+async def _fetch_metadata(dataset_id, settings, owner_id: Optional[str]) -> dict:
+    url = f"{settings.storage_service_url}/api/v1/storage/datasets/{dataset_id}"
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.get(url, headers=_storage_headers(owner_id))
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _download_to_file(metadata: dict, settings, owner_id: Optional[str]) -> str:
+    """Stream a dataset to a temp file (for Spark, which reads files)."""
+    fmt = (metadata.get("file_format") or "csv").lower()
+    url = f"{settings.storage_service_url}/api/v1/storage/datasets/{metadata['id']}/download"
+    fd, path = tempfile.mkstemp(prefix="dp-dataset-", suffix=f".{fmt}")
+    try:
+        with os.fdopen(fd, "wb") as out, httpx.Client(timeout=600.0) as client:
+            with client.stream("GET", url, headers=_storage_headers(owner_id)) as resp:
+                resp.raise_for_status()
+                for chunk in resp.iter_bytes(1024 * 1024):
+                    out.write(chunk)
+    except BaseException:
+        _remove_quietly(path)
+        raise
+    return path
+
+
+def _remove_quietly(path: Optional[str]) -> None:
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+async def _load_rows_spark(ctx: _RunContext, dataset_id, target_column, feature_columns):
+    metadata = await _fetch_metadata(dataset_id, ctx.settings, ctx.owner_id)
+    path = await asyncio.to_thread(_download_to_file, metadata, ctx.settings, ctx.owner_id)
+    try:
+        def _read():
+            from ml.spark_pipeline import dataframe_rows, read_dataframe
+
+            df = read_dataframe(path, metadata.get("file_format") or "csv")
+            return dataframe_rows(
+                df, target_column, feature_columns, ctx.settings.max_train_rows,
+                seed=int(ctx.hyper.get("seed", 42)),
+            )
+        rows, features, data_details = await asyncio.to_thread(_read)
+    finally:
+        _remove_quietly(path)
+    ctx.details["data"] = {"loader": "spark", **data_details}
+    return rows, features
+
+
+async def export_rows(dataset_id, owner_id: str, hyper: dict) -> tuple[list, list]:
+    """The numeric rows a run trains on, read with the loader of its engine."""
+    settings = get_settings()
+    target = hyper.get("target_column", "")
+    features = hyper.get("feature_columns", []) or []
+    if (hyper.get("engine") or PYTHON) == SPARK_RAY:
+        await asyncio.to_thread(require_engine, SPARK_RAY)
+        ctx = _RunContext(
+            run_id=uuid.uuid4(), owner_id=owner_id, model_type="", mode="", rounds=0,
+            lr=0.0, epochs=0, local_cores=1, num_classes=0, engine=SPARK_RAY, hyper=hyper,
+            settings=settings, execution_policy="safe_background",
+        )
+        return await _load_rows_spark(ctx, dataset_id, target, features)
+    return await _load_dataset_rows(dataset_id, target, features, settings, 1, PYTHON, owner_id=owner_id)
+
+
+# --- entry point ---------------------------------------------------------
 async def run_training(run_id: uuid.UUID) -> None:
     settings = get_settings()
     db = get_db_manager()
@@ -885,16 +979,20 @@ async def run_training(run_id: uuid.UUID) -> None:
         model_type = run.model_type
         mode = run.mode
         rounds = run.rounds
+        model_code = getattr(run, "model_code", None)
         hyper = json.loads(run.hyperparams_json or "{}")
-        engine = hyper.get("engine", "python")
-    execution_policy = hyper.get("execution_policy") or "safe_background"
 
-    lr = float(hyper.get("learning_rate", 0.01))
-    epochs = int(hyper.get("epochs", 10))
-    local_cores = int(hyper.get("local_cores", 2))
+    engine = hyper.get("engine") or PYTHON
+    ctx = _RunContext(
+        run_id=run_id, owner_id=owner_id, model_type=model_type, mode=mode,
+        rounds=int(rounds), lr=float(hyper.get("learning_rate", 0.01)),
+        epochs=int(hyper.get("epochs", 10)), local_cores=int(hyper.get("local_cores", 2)),
+        num_classes=int(hyper.get("num_classes", 0) or 0), engine=engine, hyper=hyper,
+        settings=settings, execution_policy=hyper.get("execution_policy") or "safe_background",
+    )
+    ctx.details["engine"] = engine
     target_column = hyper.get("target_column", "")
     feature_columns = hyper.get("feature_columns", []) or []
-    num_classes = int(hyper.get("num_classes", 0) or 0)
     node_ids: list = []
     for _nid in (hyper.get("node_ids") or []):
         try:
@@ -903,6 +1001,25 @@ async def run_training(run_id: uuid.UUID) -> None:
             pass
 
     await _update_run(run_id, status="running")
+
+    try:
+        family = model_family(model_type)
+        if engine == SPARK_RAY:
+            await asyncio.to_thread(require_engine, SPARK_RAY)
+        if family == "spark" and engine != SPARK_RAY:
+            raise ValueError("Spark MLlib models need the Spark + Ray engine")
+        if family == "custom":
+            if mode != "multi":
+                raise ValueError("Custom models train on worker nodes; use mode 'multi'")
+            if not model_code:
+                raise ValueError("Custom model code is missing")
+    except (ValueError, EngineUnavailable) as exc:
+        await _update_run(run_id, status="failed", message=str(exc), details_json=json.dumps(ctx.details))
+        return
+
+    if family == "spark":
+        await _run_spark_model(ctx, dataset_id, target_column, feature_columns)
+        return
 
     nodes: list = []
     if mode == "multi":
@@ -914,80 +1031,85 @@ async def run_training(run_id: uuid.UUID) -> None:
             return
 
     try:
-        rows, feature_names = await _load_dataset_rows(
-            dataset_id, target_column, feature_columns, settings,
-            max(1, local_cores), engine, owner_id=owner_id,
-        )
+        if engine == SPARK_RAY:
+            rows, feature_names = await _load_rows_spark(ctx, dataset_id, target_column, feature_columns)
+        else:
+            rows, feature_names = await _load_dataset_rows(
+                dataset_id, target_column, feature_columns, settings,
+                max(1, ctx.local_cores), engine, owner_id=owner_id,
+            )
     except Exception as exc:
         logger.error("training_load_failed", run_id=str(run_id), error=str(exc))
-        await _update_run(run_id, status="failed", message=f"Dataset load failed: {exc}")
+        await _update_run(
+            run_id, status="failed", message=f"Dataset load failed: {_short_error(exc)}",
+            details_json=json.dumps(ctx.details),
+        )
         return
+    ctx.rows, ctx.feature_names = rows, feature_names
 
-    allocations: list = []
-    affinity: Optional[list] = None
     if mode == "multi":
-        allocations = await reserve_allocations(
+        ctx.allocations = await reserve_allocations(
             owner_id, nodes, job_id=str(run_id), cpu_per_task=1,
             ttl_seconds=settings.lease_ttl_seconds,
         )
-        if not allocations:
+        if not ctx.allocations:
             await _update_run(
                 run_id, status="failed",
                 message="No free capacity: every selected node is fully leased",
             )
             return
-        shards, affinity = plan_weighted_shards(
-            rows, allocation_shard_inputs(allocations),
-            job_uses_gpu=REMOTE_SCRIPT_USES_GPU,
+        uses_gpu = REMOTE_SCRIPT_USES_GPU if family == "builtin" else bool(hyper.get("uses_gpu"))
+        ctx.shards, ctx.affinity = plan_weighted_shards(
+            rows, allocation_shard_inputs(ctx.allocations),
+            job_uses_gpu=uses_gpu,
             w_gpu=settings.shard_weight_gpu, w_cpu=settings.shard_weight_cpu,
-            engine=engine,
         )
     else:
-        k = max(1, min(max(1, local_cores), len(rows)))
-        shards = [s for s in _split_rows(rows, largest_remainder(len(rows), [1.0] * k), engine) if s]
+        k = max(1, min(max(1, ctx.local_cores), len(rows)))
+        ctx.shards = [s for s in interleave_split(rows, largest_remainder(len(rows), [1.0] * k)) if s]
 
     try:
-        await _train_rounds(
-            run_id, model_type, mode, rounds, lr, epochs, local_cores,
-            num_classes, engine, rows, feature_names, shards, affinity,
-            owner_id, allocations, settings, execution_policy,
-        )
+        if family == "custom":
+            await _train_custom_rounds(ctx, model_code)
+        else:
+            await _train_rounds(ctx)
     finally:
-        await release_allocations(owner_id, allocations)
+        await release_allocations(owner_id, ctx.allocations)
 
 
-async def _train_rounds(
-    run_id, model_type, mode, rounds, lr, epochs, local_cores,
-    num_classes, engine, rows, feature_names, shards, affinity,
-    owner_id, allocations, settings, execution_policy,
-) -> None:
-    cnn_arch = _cnn_arch(rows, num_classes) if model_type == "cnn" else None
+# --- built-in models -----------------------------------------------------
+async def _train_rounds(ctx: _RunContext) -> None:
+    """Federated rounds for the built-in models (python or spark_ray engine)."""
+    settings = ctx.settings
+    model_type, rows, shards = ctx.model_type, ctx.rows, ctx.shards
+    cnn_arch = _cnn_arch(rows, ctx.num_classes) if model_type == "cnn" else None
     weights: Optional[dict] = None
     if cnn_arch is not None:
         weights = {"w": _cnn_init(cnn_arch), "b": 0.0, "arch": cnn_arch}
 
+    server = None
     history: list = []
     shard_meta: list = []
     try:
-        for rnd in range(rounds):
-            if mode == "multi":
-                code = generate_remote_script(model_type, lr, epochs)
+        if ctx.engine == SPARK_RAY:
+            from ml.ray_orchestrator import ParameterServer
+
+            server = await asyncio.to_thread(ParameterServer, weights)
+        for rnd in range(ctx.rounds):
+            if ctx.mode == "multi":
+                code = generate_remote_script(model_type, ctx.lr, ctx.epochs)
                 payloads = [json.dumps({"weights": weights, "rows": s}) for s in shards]
-                async with lease_heartbeat(owner_id, allocations, settings.lease_ttl_seconds):
+                async with lease_heartbeat(ctx.owner_id, ctx.allocations, settings.lease_ttl_seconds):
                     results = await run_across_nodes(
-                        allocations, code, payloads,
-                        nice=policy_nice(execution_policy, settings.task_nice),
+                        ctx.allocations, code, payloads,
+                        nice=ctx.nice,
                         timeout_seconds=settings.training_timeout_seconds,
-                        max_output_bytes=settings.max_output_bytes,
-                        affinity=affinity,
+                        max_output_bytes=settings.max_train_output_bytes,
+                        affinity=ctx.affinity,
                         sweep_minutes=settings.stale_sandbox_minutes,
                     )
-            else:
-                results = None
-
-            if results is not None:
                 shard_results = [parse_result((r or {}).get("stdout", "")) for r in results]
-                if rnd == rounds - 1:
+                if rnd == ctx.rounds - 1:
                     shard_meta = [
                         {
                             "shard": i,
@@ -999,23 +1121,34 @@ async def _train_rounds(
                         for i, r in enumerate(results)
                     ]
             else:
-                shard_results = await asyncio.to_thread(
-                    _run_local, model_type, lr, epochs, weights, shards, local_cores
-                )
-                if rnd == rounds - 1:
+                if ctx.engine == SPARK_RAY:
+                    from ml.ray_orchestrator import train_shards_parallel
+
+                    shard_results = await asyncio.to_thread(
+                        train_shards_parallel, builtin_helpers_source(), model_type,
+                        ctx.lr, ctx.epochs, weights, shards,
+                    )
+                    where = "ray"
+                else:
+                    shard_results = await asyncio.to_thread(
+                        _run_local, model_type, ctx.lr, ctx.epochs, weights, shards, ctx.local_cores
+                    )
+                    where = "local"
+                if rnd == ctx.rounds - 1:
                     shard_meta = [
-                        {"shard": i, "rows": len(shards[i]), "node_id": "local", "status": "completed"}
+                        {"shard": i, "rows": len(shards[i]), "node_id": where, "status": "completed"}
                         for i in range(len(shards))
                     ]
 
-            agg = await asyncio.to_thread(
-                _fedavg, [sr for sr in shard_results if sr]
-            )
+            pairs = _builtin_pairs(shard_results)
+            if server is not None:
+                agg = await asyncio.to_thread(server.apply, pairs)
+            else:
+                agg = await asyncio.to_thread(average_params, pairs)
             if agg is None:
                 await _update_run(
-                    run_id,
-                    status="failed",
-                    message="All shards failed to produce weights",
+                    ctx.run_id, status="failed", message="All shards failed to produce weights",
+                    details_json=json.dumps(ctx.details),
                 )
                 return
             weights = agg
@@ -1024,30 +1157,255 @@ async def _train_rounds(
             round_metrics = evaluate(model_type, weights, rows)
             history.append({"round": rnd + 1, "metrics": round_metrics})
             await _update_run(
-                run_id,
+                ctx.run_id,
                 metrics_json=json.dumps(round_metrics),
                 history_json=json.dumps(history),
             )
+        if server is not None:
+            ctx.details["ray"] = await asyncio.to_thread(server.stats)
     except Exception as exc:
-        logger.error("training_failed", run_id=str(run_id), error=str(exc))
-        await _update_run(run_id, status="failed", message=f"Training failed: {exc}")
+        logger.error("training_failed", run_id=str(ctx.run_id), error=str(exc))
+        await _update_run(
+            ctx.run_id, status="failed", message=f"Training failed: {_short_error(exc)}",
+            details_json=json.dumps(ctx.details),
+        )
         return
+    finally:
+        if server is not None:
+            await asyncio.to_thread(server.close)
 
     final_metrics = evaluate(model_type, weights, rows)
     await _update_run(
-        run_id,
+        ctx.run_id,
         status="completed",
         metrics_json=json.dumps(final_metrics),
-        weights_json=json.dumps({**(weights or {}), "feature_names": feature_names}),
+        weights_json=json.dumps({**(weights or {}), "feature_names": ctx.feature_names}),
         history_json=json.dumps(history),
         shards_json=json.dumps(shard_meta),
-        message=f"Trained on {len(rows)} rows across {len(shards)} shard(s) [{engine}]",
+        details_json=json.dumps(ctx.details),
+        message=f"Trained on {len(rows)} rows across {len(shards)} shard(s) [{ctx.engine}]",
     )
     logger.info(
-        "training_done",
-        run_id=str(run_id),
-        engine=engine,
-        mode=mode,
-        shards=len(shards),
-        rows=len(rows),
+        "training_done", run_id=str(ctx.run_id), engine=ctx.engine, mode=ctx.mode,
+        shards=len(shards), rows=len(rows),
     )
+
+
+# --- custom models -------------------------------------------------------
+async def _run_custom(ctx: _RunContext, model_code: Optional[str], payloads: list[str],
+                      affinity: Optional[list], timeout: Optional[int] = None) -> list[dict]:
+    files = custom_model.files(model_code or "")
+    async with lease_heartbeat(ctx.owner_id, ctx.allocations, ctx.settings.lease_ttl_seconds):
+        return await run_across_nodes(
+            ctx.allocations, custom_model.RUNNER_SOURCE, payloads,
+            nice=ctx.nice,
+            timeout_seconds=timeout or ctx.settings.training_timeout_seconds,
+            max_output_bytes=ctx.settings.max_train_output_bytes,
+            files_for=lambda _i: files,
+            affinity=affinity,
+            sweep_minutes=ctx.settings.stale_sandbox_minutes,
+        )
+
+
+def _node_label(ctx: _RunContext, node_id) -> str:
+    for alloc in ctx.allocations:
+        if alloc.node.id == node_id:
+            return getattr(alloc.node, "name", None) or str(node_id)
+    return str(node_id)
+
+
+async def _train_custom_rounds(ctx: _RunContext, model_code: Optional[str]) -> None:
+    """Federated rounds for a user model.py run on the worker nodes."""
+    settings = ctx.settings
+    model_params = ctx.hyper.get("model_params") or {}
+    base_config = {
+        **model_params,
+        "feature_names": ctx.feature_names,
+        "target_column": ctx.hyper.get("target_column", ""),
+        "learning_rate": ctx.lr,
+        "epochs": ctx.epochs,
+        "rounds": ctx.rounds,
+        "seed": int(ctx.hyper.get("seed", 42)),
+    }
+
+    async def fail(message: str) -> None:
+        await _update_run(ctx.run_id, status="failed", message=message, details_json=json.dumps(ctx.details))
+
+    server = None
+    history: list = []
+    try:
+        # 1. Every node can import the model and has train().
+        node_ids = []
+        for alloc in ctx.allocations:
+            if alloc.node.id not in node_ids:
+                node_ids.append(alloc.node.id)
+        checks = await _run_custom(
+            ctx, model_code, [custom_model.payload("check", config=base_config)] * len(node_ids),
+            node_ids, timeout=min(120, settings.training_timeout_seconds),
+        )
+        problems, has_evaluate, has_init = [], False, False
+        for nid, result in zip(node_ids, checks):
+            parsed = custom_model.parse_output((result or {}).get("stdout", ""))
+            if not parsed:
+                problems.append(f"{_node_label(ctx, nid)}: {_stderr_tail(result, 300)}")
+            elif not parsed.get("ok"):
+                problems.append(f"{_node_label(ctx, nid)}: model.py has no train() function")
+            else:
+                has_evaluate = bool(parsed.get("has_evaluate"))
+                has_init = bool(parsed.get("has_init"))
+        if problems:
+            await fail("Model check failed on " + "; ".join(problems))
+            return
+        ctx.details["custom"] = {"has_init": has_init, "has_evaluate": has_evaluate}
+
+        # 2. One shared starting point.
+        params = None
+        if has_init:
+            (init_result,) = await _run_custom(
+                ctx, model_code, [custom_model.payload("init", config=base_config)], None,
+                timeout=min(300, settings.training_timeout_seconds),
+            )
+            parsed = custom_model.parse_output((init_result or {}).get("stdout", ""))
+            if not parsed:
+                await fail(f"init() failed: {_stderr_tail(init_result)}")
+                return
+            params = parsed.get("params")
+
+        if ctx.engine == SPARK_RAY:
+            from ml.ray_orchestrator import ParameterServer
+
+            server = await asyncio.to_thread(ParameterServer, params)
+
+        # 3. Rounds. Each task first evaluates the incoming global model, so
+        #    metrics for round r arrive with round r+1 (no extra trip).
+        shard_meta: list = []
+        for rnd in range(1, ctx.rounds + 1):
+            config = {**base_config, "round": rnd}
+            payloads = [custom_model.payload("train", params=params, rows=s, config=config) for s in ctx.shards]
+            results = await _run_custom(ctx, model_code, payloads, ctx.affinity)
+            parsed = [custom_model.parse_output((r or {}).get("stdout", "")) for r in results]
+            pairs = [(p.get("params"), int(p.get("n", 0))) for p in parsed if p and p.get("params") is not None]
+            if not pairs:
+                first_failed = next((r for r, p in zip(results, parsed) if not p), results[0] if results else None)
+                await fail(f"Round {rnd}: every shard failed. Last error: {_stderr_tail(first_failed)}")
+                return
+            if rnd > 1 and has_evaluate:
+                metrics = combine_metrics([(p.get("metrics"), p.get("n", 0)) for p in parsed if p])
+                history.append({"round": rnd - 1, "metrics": metrics})
+            if server is not None:
+                params = await asyncio.to_thread(server.apply, pairs)
+            else:
+                params = await asyncio.to_thread(average_params, pairs)
+            shard_meta = [
+                {
+                    "shard": i,
+                    "rows": len(ctx.shards[i]),
+                    "node_id": str(r["node_id"]) if r and r.get("node_id") else None,
+                    "status": (r or {}).get("status") if p else "failed",
+                    "attempts": (r or {}).get("attempts"),
+                    **({} if p else {"error": _stderr_tail(r, 300)}),
+                }
+                for i, (r, p) in enumerate(zip(results, parsed))
+            ]
+            await _update_run(
+                ctx.run_id,
+                history_json=json.dumps(history),
+                metrics_json=json.dumps(history[-1]["metrics"]) if history else None,
+                shards_json=json.dumps(shard_meta),
+            )
+
+        # 4. Final metrics on the final model.
+        final_metrics: dict = {"n": len(ctx.rows)}
+        if has_evaluate:
+            payloads = [custom_model.payload("evaluate", params=params, rows=s, config=base_config) for s in ctx.shards]
+            results = await _run_custom(ctx, model_code, payloads, ctx.affinity)
+            parsed = [custom_model.parse_output((r or {}).get("stdout", "")) for r in results]
+            final_metrics = combine_metrics([(p.get("metrics"), p.get("n", 0)) for p in parsed if p]) or final_metrics
+            history.append({"round": ctx.rounds, "metrics": final_metrics})
+        if server is not None:
+            ctx.details["ray"] = await asyncio.to_thread(server.stats)
+    except Exception as exc:
+        logger.error("custom_training_failed", run_id=str(ctx.run_id), error=str(exc))
+        await fail(f"Training failed: {_short_error(exc)}")
+        return
+    finally:
+        if server is not None:
+            await asyncio.to_thread(server.close)
+
+    await _update_run(
+        ctx.run_id,
+        status="completed",
+        metrics_json=json.dumps(final_metrics),
+        weights_json=json.dumps({"params": params, "feature_names": ctx.feature_names}),
+        history_json=json.dumps(history),
+        shards_json=json.dumps(shard_meta),
+        details_json=json.dumps(ctx.details),
+        message=(
+            f"Trained a custom model on {len(ctx.rows)} rows across "
+            f"{len(ctx.shards)} shard(s) [{ctx.engine}]"
+        ),
+    )
+    logger.info("custom_training_done", run_id=str(ctx.run_id), engine=ctx.engine, shards=len(ctx.shards))
+
+
+# --- Spark MLlib models --------------------------------------------------
+async def _run_spark_model(ctx: _RunContext, dataset_id, target_column: str, feature_columns: list) -> None:
+    """Train any Spark MLlib estimator with Spark on the master (no SSH workers)."""
+    settings = ctx.settings
+    path = None
+    try:
+        metadata = await _fetch_metadata(dataset_id, settings, ctx.owner_id)
+        path = await asyncio.to_thread(_download_to_file, metadata, settings, ctx.owner_id)
+
+        def _fit():
+            from ml.spark_ml import train_spark_model
+            from ml.spark_pipeline import read_dataframe
+
+            df = read_dataframe(path, metadata.get("file_format") or "csv")
+            return train_spark_model(
+                df, ctx.model_type,
+                target=target_column,
+                feature_columns=feature_columns,
+                params=ctx.hyper.get("model_params") or {},
+                grid=ctx.hyper.get("param_grid") or {},
+                test_fraction=float(ctx.hyper.get("test_fraction", 0.2)),
+                max_rows=settings.max_spark_rows,
+                seed=int(ctx.hyper.get("seed", 42)),
+            )
+
+        metrics, spark_details, artifact = await asyncio.to_thread(_fit)
+    except Exception as exc:
+        logger.error("spark_training_failed", run_id=str(ctx.run_id), error=str(exc))
+        await _update_run(
+            ctx.run_id, status="failed", message=f"Spark training failed: {_short_error(exc)}",
+            details_json=json.dumps(ctx.details),
+        )
+        return
+    finally:
+        _remove_quietly(path)
+
+    if len(artifact) > settings.max_model_artifact_bytes:
+        await _update_run(
+            ctx.run_id, status="failed",
+            message=(
+                f"The trained model is {len(artifact) / 1e6:.1f} MB, above the "
+                f"{settings.max_model_artifact_bytes / 1e6:.0f} MB limit (MAX_MODEL_ARTIFACT_BYTES)"
+            ),
+        )
+        return
+    ctx.details["spark"] = spark_details
+    await _update_run(
+        ctx.run_id,
+        status="completed",
+        metrics_json=json.dumps(metrics),
+        history_json=json.dumps([{"round": 1, "metrics": metrics}]),
+        weights_json=json.dumps({"feature_names": spark_details["feature_names"], "model": spark_details["model"]}),
+        shards_json=json.dumps([]),
+        details_json=json.dumps(ctx.details),
+        artifact=artifact,
+        message=(
+            f"Trained Spark {spark_details['model']} on {spark_details['rows_train']} rows "
+            f"(tested on {spark_details['rows_test']}) [spark_ray]"
+        ),
+    )
+    logger.info("spark_training_done", run_id=str(ctx.run_id), model=spark_details["model"])

@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Optional
 
 from pydantic import Field
 
@@ -73,6 +74,25 @@ class SSHExecutorSettings(BaseServiceSettings):
     # job can really use the GPU (see training_orchestrator.plan_shard_sizes).
     shard_weight_gpu: float = Field(default=5.0, ge=0.0)
     shard_weight_cpu: float = Field(default=1.0, ge=0.0)
+    # Model parameters come back in task output, so training tasks get a larger
+    # output cap than ordinary batches.
+    max_train_output_bytes: int = Field(default=8 * 1024 * 1024, ge=1024)
+    # A trained Spark model is stored in the database as a zip.
+    max_model_artifact_bytes: int = Field(default=64 * 1024 * 1024, ge=1024)
+
+    # --- optional Spark + Ray engine (master only) -------------------------
+    # Installed only when the image is built with WITH_SPARK_RAY=true, or when
+    # the master's own Python already has pyspark, ray and a Java runtime.
+    # "local[*]" uses the master's cores; set a spark:// URL to use a cluster.
+    spark_master_url: str = Field(default="local[*]")
+    spark_driver_memory: str = Field(default="2g")
+    # Rows a Spark MLlib model may train on (it trains on the master, so it is
+    # not limited by max_train_rows, which bounds what is sent to workers).
+    max_spark_rows: int = Field(default=5_000_000, ge=1)
+    # Empty = start Ray on the master. Set to an existing cluster ("ray://...")
+    # to use it instead.
+    ray_address: str = Field(default="")
+    ray_num_cpus: Optional[int] = Field(default=None, ge=1)
 
     model_config = {"frozen": True}
 

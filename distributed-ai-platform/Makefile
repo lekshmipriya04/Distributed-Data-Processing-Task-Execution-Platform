@@ -1,4 +1,4 @@
-.PHONY: init up up-dev down reset clean build test test-unit lint lint-full format setup-hdfs frontend-build go-test
+.PHONY: init up up-dev down reset clean build enable-spark-ray disable-spark-ray test test-unit lint lint-full format setup-hdfs frontend-build go-test
 
 init:
 	pip install -e .[dev]
@@ -27,6 +27,18 @@ clean:
 
 build:
 	docker compose build
+
+# Optional Spark + Ray engine, on the master only (adds about 1 GB). The choice
+# is kept in .env, which docker compose reads on every later `make up`.
+enable-spark-ray:
+	@touch .env && grep -v '^WITH_SPARK_RAY=' .env > .env.tmp; echo 'WITH_SPARK_RAY=true' >> .env.tmp && mv .env.tmp .env
+	docker compose up -d --build ssh-executor
+	@echo "Spark + Ray is enabled on the master. Worker nodes are unchanged."
+
+disable-spark-ray:
+	@touch .env && grep -v '^WITH_SPARK_RAY=' .env > .env.tmp; echo 'WITH_SPARK_RAY=false' >> .env.tmp && mv .env.tmp .env
+	docker compose up -d --build ssh-executor
+	@echo "Spark + Ray is disabled; training uses pure Python."
 
 test:
 	pytest tests/unit/ -q

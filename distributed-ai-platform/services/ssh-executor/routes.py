@@ -8,6 +8,7 @@ Consolidated module combining:
 """
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict, deque
 import json
 import time
@@ -17,12 +18,13 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import desc, select
+from sqlalchemy.orm import undefer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import get_settings
 from database import get_db_manager
 from tasks import BatchService, dispatch_batch
-from leases import LeaseService, online_nodes, select_runtime_nodes, node_has_runtime
+from leases import LeaseService
 import leases as execution_manager
 from models import TrainingRun
 from node_service import NodeService, NodeServiceError
@@ -48,13 +50,17 @@ from schemas import (
     RuntimeInfo,
     RuntimeListResponse,
     TaskResponse,
+    EngineListResponse,
+    SparkModelListResponse,
     TrainRequest,
     TrainRunResponse,
 )
 from security import runtime_allowed, validate_execution_request
 from shared.common.auth import get_current_user
 from ssh import fingerprint
-from training import _load_dataset_rows, build_onnx_model, build_train_data, run_training
+from ml.custom_model import STARTER_TEMPLATE, validate_model_code
+from ml.engines import SPARK_RAY, EngineUnavailable, list_engines, require_engine
+from training import build_onnx_model, build_train_data, export_rows, model_family, run_training
 
 # ==============================================================================
 # 1. SHARED DEPENDENCIES & RATE LIMITING
@@ -493,12 +499,25 @@ async def get_batch_tasks(
 train_router = APIRouter()
 
 
+_MODEL_FORMATS = {"builtin": "onnx", "custom": "json", "spark": "spark-zip"}
+MAX_MODEL_PARAMS_BYTES = 64 * 1024
+
+
+def _family(model_type: str) -> Optional[str]:
+    try:
+        return model_family(model_type)
+    except ValueError:
+        return None
+
+
 def _train_run_response(run: TrainingRun) -> TrainRunResponse:
+    family = _family(run.model_type)
     return TrainRunResponse(
         id=run.id,
         owner_id=run.owner_id,
         dataset_id=run.dataset_id,
         model_type=run.model_type,
+        model_family=family,
         engine=getattr(run, "engine", None),
         mode=run.mode,
         rounds=run.rounds,
@@ -507,8 +526,90 @@ def _train_run_response(run: TrainingRun) -> TrainRunResponse:
         metrics=json.loads(run.metrics_json) if run.metrics_json else None,
         history=json.loads(run.history_json) if run.history_json else None,
         shards=json.loads(run.shards_json) if run.shards_json else None,
+        details=json.loads(run.details_json) if getattr(run, "details_json", None) else None,
+        model_format=_MODEL_FORMATS.get(family or ""),
         created_at=run.created_at,
     )
+
+
+@train_router.get("/engines", response_model=EngineListResponse)
+async def get_engines(refresh: bool = False, user: dict = Depends(get_current_user)):
+    """Which training engines this master can run. Nothing is installed here."""
+    items = await asyncio.to_thread(list_engines, refresh)
+    return EngineListResponse(items=items)
+
+
+@train_router.get("/engines/spark_ray/models", response_model=SparkModelListResponse)
+async def get_spark_models(refresh: bool = False, user: dict = Depends(get_current_user)):
+    """Every Spark MLlib estimator of the installed Spark version (starts Spark)."""
+    try:
+        await asyncio.to_thread(require_engine, SPARK_RAY)
+    except EngineUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    from ml.spark_ml import catalog
+
+    items = await asyncio.to_thread(catalog, refresh)
+    return SparkModelListResponse(items=sorted(items.values(), key=lambda m: (m["family"], m["name"])))
+
+
+@train_router.get("/models/custom/template")
+async def get_custom_model_template(user: dict = Depends(get_current_user)):
+    """A starter model.py showing the init/train/evaluate contract."""
+    return {"filename": "model.py", "code": STARTER_TEMPLATE}
+
+
+async def _validate_train_request(request: TrainRequest) -> str:
+    """Reject requests that cannot run, before anything is stored. Returns the family."""
+    settings = get_settings()
+    family = model_family(request.model_type)
+
+    def bad(detail: str) -> HTTPException:
+        return HTTPException(status_code=400, detail=detail)
+
+    if request.engine == SPARK_RAY:
+        try:
+            await asyncio.to_thread(require_engine, SPARK_RAY)
+        except EngineUnavailable as exc:
+            raise bad(str(exc)) from exc
+    if len(json.dumps(request.model_params)) + len(json.dumps(request.param_grid)) > MAX_MODEL_PARAMS_BYTES:
+        raise bad("model_params and param_grid are too large (64 KB max)")
+
+    if family == "custom":
+        if request.mode != "multi":
+            raise bad("Custom models train on worker nodes: use mode 'multi'")
+        if request.param_grid:
+            raise bad("param_grid applies to Spark models only")
+        code = request.model_code or ""
+        if len(code.encode("utf-8")) > settings.max_code_bytes:
+            raise bad(f"model_code is larger than {settings.max_code_bytes} bytes")
+        try:
+            validate_model_code(code)
+        except ValueError as exc:
+            raise bad(str(exc)) from exc
+    elif request.model_code:
+        raise bad("model_code is only used with model_type 'custom'")
+
+    if family == "builtin" and (request.model_params or request.param_grid):
+        raise bad("model_params and param_grid are not used by the built-in models")
+
+    if family == "spark":
+        if request.engine != SPARK_RAY:
+            raise bad("Spark MLlib models need engine 'spark_ray'")
+        from ml.spark_ml import model_info, validate_params
+
+        def _check() -> dict:
+            validate_params(request.model_type, request.model_params, request.param_grid)
+            return model_info(request.model_type)
+
+        try:
+            info = await asyncio.to_thread(_check)
+        except ValueError as exc:
+            raise bad(str(exc)) from exc
+        if info["needs_target"] and not request.target_column:
+            raise bad(f"{info['name']} needs a target_column")
+    elif not request.target_column:
+        raise bad("target_column is required")
+    return family
 
 
 @train_router.post(
@@ -523,6 +624,7 @@ async def start_training(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
+    await _validate_train_request(request)
     hyper = {
         "learning_rate": request.learning_rate,
         "epochs": request.epochs,
@@ -533,6 +635,11 @@ async def start_training(
         "num_classes": request.num_classes,
         "node_ids": [str(n) for n in request.node_ids],
         "execution_policy": request.execution_policy,
+        "model_params": request.model_params,
+        "param_grid": request.param_grid,
+        "test_fraction": request.test_fraction,
+        "uses_gpu": request.uses_gpu,
+        "seed": request.seed,
     }
     run = TrainingRun(
         owner_id=user.get("sub"),
@@ -542,6 +649,7 @@ async def start_training(
         engine=request.engine,
         rounds=request.rounds,
         hyperparams_json=json.dumps(hyper),
+        model_code=request.model_code if request.model_type == "custom" else None,
         status="pending",
     )
     session.add(run)
@@ -565,22 +673,23 @@ async def list_training_runs(
     return [_train_run_response(run) for run in result.scalars().all()]
 
 
+async def _owned_run(session: AsyncSession, run_id: UUID, owner_id: str, *, with_artifact: bool = False):
+    stmt = select(TrainingRun).where(TrainingRun.id == run_id, TrainingRun.owner_id == owner_id)
+    if with_artifact:
+        stmt = stmt.options(undefer(TrainingRun.artifact))
+    run = (await session.execute(stmt)).scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Training run not found")
+    return run
+
+
 @train_router.get("/train/{run_id}", response_model=TrainRunResponse)
 async def get_training_run(
     run_id: UUID,
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    run = (
-        await session.execute(
-            select(TrainingRun).where(
-                TrainingRun.id == run_id, TrainingRun.owner_id == user.get("sub")
-            )
-        )
-    ).scalar_one_or_none()
-    if not run:
-        raise HTTPException(status_code=404, detail="Training run not found")
-    return _train_run_response(run)
+    return _train_run_response(await _owned_run(session, run_id, user.get("sub")))
 
 
 @train_router.get("/train/{run_id}/model")
@@ -589,18 +698,29 @@ async def download_training_model(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    run = (
-        await session.execute(
-            select(TrainingRun).where(
-                TrainingRun.id == run_id, TrainingRun.owner_id == user.get("sub")
-            )
-        )
-    ).scalar_one_or_none()
-    if not run:
-        raise HTTPException(status_code=404, detail="Training run not found")
-    if run.status != "completed" or not run.weights_json:
+    """ONNX for built-in models, params.json for custom models, and a zipped
+    Spark PipelineModel (load with PipelineModel.load) for Spark models."""
+    run = await _owned_run(session, run_id, user.get("sub"), with_artifact=True)
+    if run.status != "completed":
         raise HTTPException(status_code=409, detail="Model is not available until training completes")
+    family = _family(run.model_type)
 
+    if family == "spark":
+        if not run.artifact:
+            raise HTTPException(status_code=409, detail="This run has no stored Spark model")
+        return Response(
+            content=run.artifact,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="spark-model-{run.id}.zip"'},
+        )
+    if not run.weights_json:
+        raise HTTPException(status_code=409, detail="This run has no stored model")
+    if family == "custom":
+        return Response(
+            content=run.weights_json,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="params-{run.id}.json"'},
+        )
     try:
         model_bytes = build_onnx_model(run.model_type, run.weights_json)
     except (ValueError, json.JSONDecodeError) as exc:
@@ -618,27 +738,10 @@ async def download_training_data(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    run = (
-        await session.execute(
-            select(TrainingRun).where(
-                TrainingRun.id == run_id, TrainingRun.owner_id == user.get("sub")
-            )
-        )
-    ).scalar_one_or_none()
-    if not run:
-        raise HTTPException(status_code=404, detail="Training run not found")
-
+    run = await _owned_run(session, run_id, user.get("sub"))
     hyper = json.loads(run.hyperparams_json or "{}")
-    shard_manifest = json.loads(run.shards_json or "[]")
     try:
-        rows, feature_names = await _load_dataset_rows(
-            run.dataset_id,
-            hyper.get("target_column", ""),
-            hyper.get("feature_columns", []) or [],
-            get_settings(),
-            max(1, len(shard_manifest)),
-            hyper.get("engine") or getattr(run, "engine", None) or "python",
-        )
+        rows, feature_names = await export_rows(run.dataset_id, run.owner_id, hyper)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not rebuild training data: {exc}")
 
@@ -660,15 +763,7 @@ async def delete_training_run(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    run = (
-        await session.execute(
-            select(TrainingRun).where(
-                TrainingRun.id == run_id, TrainingRun.owner_id == user.get("sub")
-            )
-        )
-    ).scalar_one_or_none()
-    if not run:
-        raise HTTPException(status_code=404, detail="Training run not found")
+    run = await _owned_run(session, run_id, user.get("sub"))
     await session.delete(run)
     await session.commit()
     return None

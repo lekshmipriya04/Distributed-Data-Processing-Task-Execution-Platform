@@ -251,22 +251,37 @@ class BatchTasksResponse(BaseModel):
 
 
 # --- distributed ML training ------------------------------------------------
-class TrainRequest(BaseModel):
-    """Train a model distributed over borrowed cores.
+TRAIN_MODEL_PATTERN = (
+    r"^(linear_regression|logistic_regression|cnn|custom|spark:[A-Za-z][A-Za-z0-9]{1,63})$"
+)
 
-    Workers only ever receive a stdlib-only Python script and a data shard
-    inside a throwaway sandbox — nothing is installed on the provider node.
-    The master fetches the dataset from the storage service and partitions it
-    into shards which are streamed over stdin to each worker via SSH.
+
+class TrainRequest(BaseModel):
+    """Train a model on the platform.
+
+    model_type:
+      * ``linear_regression`` | ``logistic_regression`` | ``cnn``: built-in
+        stdlib models, federated over the workers (or local cores).
+      * ``custom``: the user's ``model_code`` (a model.py with ``train()``),
+        federated over the workers. Needs ``mode="multi"``.
+      * ``spark:<Estimator>``: any Spark MLlib estimator from
+        ``GET /engines/spark_ray/models``, trained by Spark on the master.
+        Needs ``engine="spark_ray"``.
+
+    engine:
+      * ``python``: pure Python on the master (default, always available).
+      * ``spark_ray``: Spark loads the data (CSV/JSON/Parquet) and runs MLlib
+        models; Ray holds the global model and trains local shards. Master
+        only. Worker nodes never need anything installed.
     """
 
+    model_config = {"protected_namespaces": ()}
+
     dataset_id: UUID
-    model_type: str = Field(pattern="^(linear_regression|logistic_regression|cnn)$")
-    # "python": pure-stdlib sharding + FedAvg on the master (default).
-    # "spark_ray": Apache Spark data sharding + Ray FedAvg aggregation, both
-    # on the MASTER only. Worker nodes stay zero-install either way.
+    model_type: str = Field(pattern=TRAIN_MODEL_PATTERN)
     engine: str = Field(default="python", pattern="^(python|spark_ray)$")
-    target_column: str
+    # Optional only for clustering models, which have no target.
+    target_column: str = Field(default="", max_length=256)
     feature_columns: list[str] = Field(default_factory=list)
     mode: str = Field(default="multi", pattern="^(single|multi)$")
     local_cores: int = Field(default=2, ge=1)
@@ -278,13 +293,29 @@ class TrainRequest(BaseModel):
     execution_policy: str = Field(
         default="safe_background", pattern="^(safe_background|balanced|max_available)$"
     )
+    # custom: the model.py source. Size is capped by MAX_CODE_BYTES.
+    model_code: Optional[str] = None
+    # custom: merged into the config passed to init/train/evaluate.
+    # spark:*: estimator parameters, e.g. {"numTrees": 50}.
+    model_params: dict = Field(default_factory=dict)
+    # spark:*: values to try, e.g. {"maxDepth": [3, 5, 8]}; the best on a
+    # validation split (Spark TrainValidationSplit) is kept.
+    param_grid: dict[str, list] = Field(default_factory=dict)
+    # spark:*: share of rows held out to report test metrics.
+    test_fraction: float = Field(default=0.2, ge=0.05, le=0.5)
+    # custom: the model uses the GPU, so GPU nodes get bigger shards.
+    uses_gpu: bool = False
+    seed: int = Field(default=42, ge=0)
 
 
 class TrainRunResponse(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
     id: UUID
     owner_id: str
     dataset_id: UUID
     model_type: str
+    model_family: Optional[str] = None  # builtin | custom | spark
     engine: Optional[str] = None
     mode: str
     rounds: int
@@ -293,4 +324,44 @@ class TrainRunResponse(BaseModel):
     metrics: Optional[dict] = None
     history: Optional[list] = None
     shards: Optional[list] = None
+    # What actually ran: engine, data loader, Ray and Spark details.
+    details: Optional[dict] = None
+    # ONNX (built-in), params.json (custom) or a Spark model zip (spark:*).
+    model_format: Optional[str] = None
     created_at: datetime
+
+
+class EngineInfo(BaseModel):
+    id: str
+    name: str
+    available: bool
+    missing: list[str] = Field(default_factory=list)
+    versions: dict[str, Optional[str]] = Field(default_factory=dict)
+    spark_master: Optional[str] = None
+    ray_address: Optional[str] = None
+    hint: Optional[str] = None
+
+
+class EngineListResponse(BaseModel):
+    items: list[EngineInfo]
+
+
+class SparkModelParam(BaseModel):
+    name: str
+    type: str
+    default: Optional[object] = None
+    has_default: bool = True
+    required: bool = False
+    doc: str = ""
+
+
+class SparkModelInfo(BaseModel):
+    id: str
+    name: str
+    family: str
+    needs_target: bool
+    params: list[SparkModelParam]
+
+
+class SparkModelListResponse(BaseModel):
+    items: list[SparkModelInfo]

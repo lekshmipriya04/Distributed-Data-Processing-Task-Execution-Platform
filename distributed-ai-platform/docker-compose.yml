@@ -176,6 +176,14 @@ services:
     build:
       context: .
       dockerfile: services/ssh-executor/Dockerfile
+      # Optional Spark + Ray engine (master only). `make enable-spark-ray`
+      # sets WITH_SPARK_RAY=true in .env next to this file and rebuilds.
+      args:
+        WITH_SPARK_RAY: ${WITH_SPARK_RAY:-false}
+    image: distributed-compute/ssh-executor:${WITH_SPARK_RAY:-false}
+    # Ray keeps objects in shared memory; Docker's 64 MB default makes it
+    # fall back to slow disk.
+    shm_size: 2gb
     container_name: ssh-executor
     # SSH_CRED_KEY (at-rest encryption key for stored SSH credentials, see
     # crypto.py) and JWT_SECRET come from config/.env; there is no default.
@@ -207,6 +215,7 @@ services:
     environment:
       - LISTEN_ADDR=:8090
       - UPSTREAM_URL=http://ssh-executor:8011
+      - STORAGE_URL=http://storage-service:8001
     ports:
       - "${BIND_ADDR:-127.0.0.1}:8090:8090"
     networks:

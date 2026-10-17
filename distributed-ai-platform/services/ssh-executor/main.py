@@ -9,6 +9,7 @@ from routes import batches_router, nodes_router, train_router
 from config import get_settings
 from database import get_db_manager
 from leases import start_recovery_loop, stop_recovery_loop
+from ml.engines import list_engines, shutdown_engines
 from security import enforce_secrets
 from shared.common.error_handlers import generic_exception_handler, platform_exception_handler
 from shared.common.exceptions import PlatformException
@@ -33,9 +34,13 @@ async def lifespan(app: FastAPI):
     await db_manager.create_tables()
     # Lease expiry + stale batch/run recovery (frees capacity after crashes).
     recovery = start_recovery_loop()
+    # Log which engines this master can run (detection only; starts nothing).
+    list_engines()
     logger.info("ssh_executor_started")
     yield
     await stop_recovery_loop(recovery)
+    # Stop Spark/Ray if a run started them.
+    shutdown_engines()
     await db_manager.dispose()
     logger.info("ssh_executor_stopped")
 
