@@ -15,6 +15,7 @@ const placeholderJWTSecret = "change_me_in_production"
 type appConfig struct {
 	ListenAddr      string
 	UpstreamURL     string // empty -> in-memory MemStore (local dev only)
+	StorageURL      string // storage-service origin for /datasets; optional
 	UpstreamTimeout time.Duration
 	JWTSecret       string // empty -> DevValidator (local dev only)
 	Environment     string // development | staging | production
@@ -27,6 +28,7 @@ func (c appConfig) production() bool { return c.Environment == "production" }
 //	LISTEN_ADDR               listen address (default :8090; legacy EXTENSION_GATEWAY_ADDR)
 //	UPSTREAM_URL              ssh-executor origin, e.g. http://ssh-executor:8011
 //	UPSTREAM_TIMEOUT_SECONDS  per-call upstream timeout (default 15)
+//	STORAGE_URL               storage-service origin for /datasets, e.g. http://storage-service:8001
 //	JWT_SECRET                HS256 secret shared with the Python services
 //	JWT_ALGORITHM             must be HS256 if set
 //	ENVIRONMENT               development (default) | staging | production
@@ -36,6 +38,7 @@ func loadConfig(getenv func(string) string) (appConfig, error) {
 	cfg := appConfig{
 		ListenAddr:      strings.TrimSpace(getenv("LISTEN_ADDR")),
 		UpstreamURL:     strings.TrimSpace(getenv("UPSTREAM_URL")),
+		StorageURL:      strings.TrimSpace(getenv("STORAGE_URL")),
 		UpstreamTimeout: 15 * time.Second,
 		JWTSecret:       getenv("JWT_SECRET"),
 		Environment:     strings.ToLower(strings.TrimSpace(getenv("ENVIRONMENT"))),

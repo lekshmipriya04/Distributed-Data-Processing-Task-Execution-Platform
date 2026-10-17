@@ -27,8 +27,11 @@ type Config struct {
 	// single-user install can sign in with one click. main.go sets it only
 	// when ENVIRONMENT=development.
 	LocalToken LocalTokenIssuer
-	Logger     *slog.Logger
-	RequestID  func() string
+	// Proxy serves the training, engine and dataset routes; nil answers them
+	// with 501 (no upstream configured).
+	Proxy     *Proxy
+	Logger    *slog.Logger
+	RequestID func() string
 }
 
 // Server holds the router and dependencies.
@@ -72,6 +75,7 @@ func (s *Server) routes() {
 	if s.cfg.LocalToken != nil {
 		s.mux.HandleFunc("POST /auth/local-token", s.handleLocalToken)
 	}
+	s.proxyRoutes()
 }
 
 func (s *Server) handleLocalToken(w http.ResponseWriter, r *http.Request) {

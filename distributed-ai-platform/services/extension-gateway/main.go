@@ -46,6 +46,7 @@ func main() {
 		Store:      buildStore(cfg, logger),
 		Validate:   buildValidator(cfg, logger),
 		LocalToken: buildLocalToken(cfg, logger),
+		Proxy:      buildProxy(cfg, logger),
 		Logger:     logger,
 	})
 
@@ -104,6 +105,26 @@ func buildLocalToken(cfg appConfig, logger *slog.Logger) server.LocalTokenIssuer
 	}
 	logger.Info("local_sign_in_enabled", "subject", server.LocalSubject)
 	return server.NewLocalTokenIssuer([]byte(secret), server.LocalSubject, localTokenTTL, nil)
+}
+
+// buildProxy serves training, engines and datasets when ssh-executor is configured.
+func buildProxy(cfg appConfig, logger *slog.Logger) *server.Proxy {
+	if cfg.UpstreamURL == "" {
+		return nil
+	}
+	p, err := server.NewProxy(server.ProxyConfig{
+		SSHURL:     cfg.UpstreamURL,
+		StorageURL: cfg.StorageURL,
+		Logger:     logger,
+	})
+	if err != nil {
+		logger.Error("invalid_config", "err", err.Error())
+		os.Exit(1)
+	}
+	if cfg.StorageURL == "" {
+		logger.Warn("datasets_unavailable", "detail", "STORAGE_URL is not set: /datasets answers 501")
+	}
+	return p
 }
 
 func buildValidator(cfg appConfig, logger *slog.Logger) server.TokenValidator {
