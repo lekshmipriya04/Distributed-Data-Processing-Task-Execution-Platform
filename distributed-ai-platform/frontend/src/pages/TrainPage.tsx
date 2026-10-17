@@ -2,29 +2,50 @@ import { useEffect, useRef, useState } from 'react';
 import { Cpu, Server, Loader2, CheckCircle2, XCircle, Download, Plus, Trash2 } from 'lucide-react';
 import { DataUpload, type QuickSplitConfig } from '../components/data/DataUpload';
 import { Card, SectionTitle, PrimaryButton, SecondaryButton, NumberField, StatusBadge } from '../components/common/Primitives';
+import { SmartLogViewer } from '../components/common/SmartLogViewer';
+import { EngineSelector } from '../components/training/EngineSelector';
+import { BUILTIN_MODELS, ModelPicker, type ModelChoice } from '../components/training/ModelPicker';
+import { parseParams } from '../components/training/modelParams';
 import { useToast } from '../context/ToastContext';
 import { errorMessage } from '../api/client';
 import { isImageDataset } from '../api/storage';
 import { sshApi } from '../api/ssh';
-import type { ExecutionPolicy, TrainMode, TrainModelType, TrainRunResponse, NodeResponse, TrainEngine } from '../api/ssh';
+import type { ExecutionPolicy, TrainMode, TrainRequest, TrainRunResponse, NodeResponse, TrainEngine } from '../api/ssh';
 import { ExecutionPolicySelect } from '../components/common/ExecutionPolicySelect';
 import type { Dataset } from '../types';
 
 const EMPTY_SPLIT: QuickSplitConfig = { targetColumn: '', featureColumns: [] };
-
 const TERMINAL_TRAIN = ['completed', 'failed'];
+const NUM_INPUT =
+  'w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm';
 
-const MODEL_TYPES: { value: TrainModelType; label: string; blurb: string }[] = [
-  { value: 'logistic_regression', label: 'Logistic Regression', blurb: 'Binary / multi-class target · accuracy / F1' },
-  { value: 'linear_regression',   label: 'Linear Regression',   blurb: 'Numeric target · MSE / RMSE / R²' },
-  { value: 'cnn',                 label: 'Baseline CNN',         blurb: 'Flattened-pixel image dataset · accuracy / F1' },
-];
+const INITIAL_MODEL: ModelChoice = {
+  modelType: 'logistic_regression',
+  code: '',
+  paramsText: '',
+  params: parseParams(''),
+  testFraction: 0.2,
+  usesGpu: false,
+};
+
+const MODEL_FORMAT_LABEL: Record<string, string> = {
+  onnx: 'Model (ONNX)',
+  json: 'Model parameters (JSON)',
+  'spark-zip': 'Spark model (zip)',
+};
+
+function modelLabel(modelType: string) {
+  if (modelType.startsWith('spark:')) return `Spark ${modelType.slice(6)}`;
+  if (modelType === 'custom') return 'Custom model';
+  return BUILTIN_MODELS.find((m) => m.value === modelType)?.label ?? modelType;
+}
 
 export function TrainPage() {
   const { showError, showSuccess } = useToast();
 
-  const [modelType, setModelType] = useState<TrainModelType>('logistic_regression');
-  const [engine, setEngine] = useState<TrainEngine>('spark_ray');
+  const [engine, setEngine] = useState<TrainEngine>('python');
+  const [sparkAvailable, setSparkAvailable] = useState(false);
+  const [model, setModel] = useState<ModelChoice>(INITIAL_MODEL);
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [split, setSplit] = useState<QuickSplitConfig>(EMPTY_SPLIT);
   const [learningRate, setLearningRate] = useState(0.01);
@@ -59,25 +80,40 @@ export function TrainPage() {
   }, []);
 
   useEffect(() => {
-    if (!dataset) return;
-    // For CNN models on image datasets, switch automatically.
-    if (isImageDataset(dataset)) setModelType('cnn');
+    if (dataset && isImageDataset(dataset) && !model.modelType.startsWith('spark:') && model.modelType !== 'custom') {
+      setModel((m) => ({ ...m, modelType: 'cnn', spark: undefined }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataset?.id]);
 
+  const family = model.modelType.startsWith('spark:') ? 'spark' : model.modelType === 'custom' ? 'custom' : 'builtin';
+  useEffect(() => {
+    if (family === 'custom') setMode('multi');
+  }, [family]);
 
   const onlineNodes = nodes.filter((n) => n.status === 'online');
   const chosenNodes = onlineNodes.filter((n) => selectedNodeIds.includes(n.id));
-  const isMulti = mode === 'multi';
+  const usesWorkers = family !== 'spark' && mode === 'multi';
+  const needsTarget = family !== 'spark' || model.spark?.needs_target !== false;
   const toggleNode = (id: string) =>
     setSelectedNodeIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
 
-  const canSubmit =
-    !!dataset &&
-    split.featureColumns.length > 0 &&
-    !!split.targetColumn &&
-    (!isMulti || chosenNodes.length > 0) &&
-    (!run || TERMINAL_TRAIN.includes(run.status)) &&
-    !submitting;
+  const blocker = !dataset
+    ? 'Select a dataset to continue.'
+    : needsTarget && !split.targetColumn
+      ? 'Set the target column.'
+      : split.featureColumns.length === 0
+        ? 'Add at least one feature column.'
+        : family === 'spark' && !model.spark
+          ? 'Choose a Spark model.'
+          : family === 'custom' && !model.code.trim()
+            ? 'Write or load your model.py.'
+            : !model.params.ok
+              ? model.params.error
+              : usesWorkers && chosenNodes.length === 0
+                ? 'Select an online worker above.'
+                : null;
+  const canSubmit = !blocker && (!run || TERMINAL_TRAIN.includes(run.status)) && !submitting;
 
   const poll = (id: string) => {
     stopPolling();
@@ -91,25 +127,35 @@ export function TrainPage() {
   };
 
   const handleTrain = async () => {
-    if (!dataset) return;
+    if (!dataset || !model.params.ok) return;
     setSubmitting(true);
     setRun(null);
+    const body: TrainRequest = {
+      dataset_id: dataset.id,
+      model_type: model.modelType,
+      engine,
+      target_column: needsTarget ? split.targetColumn : '',
+      feature_columns: split.featureColumns,
+      mode: family === 'custom' ? 'multi' : mode,
+      local_cores: localCores,
+      learning_rate: learningRate,
+      epochs,
+      rounds: family === 'spark' ? 1 : rounds,
+      num_classes: model.modelType === 'cnn' ? numClasses : 0,
+      node_ids: usesWorkers ? chosenNodes.map((n) => n.id) : [],
+      execution_policy: executionPolicy,
+    };
+    if (family === 'custom') {
+      body.model_code = model.code;
+      body.model_params = model.params.fixed;
+      body.uses_gpu = model.usesGpu;
+    } else if (family === 'spark') {
+      body.model_params = model.params.fixed;
+      body.param_grid = model.params.grid;
+      body.test_fraction = model.testFraction;
+    }
     try {
-      const created = await sshApi.startTraining({
-        dataset_id: dataset.id,
-        model_type: modelType,
-        engine,
-        target_column: split.targetColumn,
-        feature_columns: split.featureColumns,
-        mode,
-        local_cores: localCores,
-        learning_rate: learningRate,
-        epochs,
-        rounds,
-        num_classes: modelType === 'cnn' ? numClasses : 0,
-        node_ids: isMulti ? chosenNodes.map((n) => n.id) : [],
-        execution_policy: executionPolicy,
-      });
+      const created = await sshApi.startTraining(body);
       setRun(created);
       poll(created.id);
     } catch (e) {
@@ -146,149 +192,101 @@ export function TrainPage() {
 
   return (
     <div className="w-full max-w-4xl mx-auto space-y-6">
-      {/* 1. Model */}
-      <Card>
-        <SectionTitle>Model type</SectionTitle>
-        <p className="text-xs text-slate-500 mb-3">
-          Workers receive only a stdlib-only Python script and a data shard — nothing is installed on them.
-        </p>
-        <div className="grid grid-cols-3 gap-3">
-          {MODEL_TYPES.map((m) => (
-            <button
-              key={m.value}
-              onClick={() => setModelType(m.value)}
-              className={`text-left px-4 py-3 rounded-xl border text-sm transition-all ${
-                modelType === m.value ? 'bg-blue-50 border-blue-500 text-blue-800 shadow-xs' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
-              }`}
-            >
-              <div className="font-semibold">{m.label}</div>
-              <div className="text-xs text-slate-500 mt-0.5">{m.blurb}</div>
-            </button>
-          ))}
-        </div>
-      </Card>
+      <EngineSelector value={engine} onChange={setEngine} onSparkAvailable={setSparkAvailable} />
 
-      {/* 3. Distributed Execution Engine */}
-      <Card>
-        <SectionTitle>Distributed Engine</SectionTitle>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-2">
-          {[
-            {
-              value: 'spark_ray' as const,
-              title: 'Apache Spark + Ray Pipeline',
-              tag: 'Course Stack',
-              desc: 'Master uses PySpark for dataset sharding & Ray actors for Federated Averaging (FedAvg). Workers stay 100% zero-install.',
-            },
-            {
-              value: 'python' as const,
-              title: 'Native Python Engine',
-              tag: 'Edge Mode',
-              desc: 'Pure-Python stdlib sharding and FedAvg on the master container without Spark or Ray dependencies.',
-            },
-          ].map((item) => (
-            <button
-              key={item.value}
-              type="button"
-              onClick={() => setEngine(item.value)}
-              className={`text-left p-4 rounded-xl border transition-all ${
-                engine === item.value
-                  ? 'bg-blue-50/70 border-blue-500 shadow-xs ring-1 ring-blue-500/20'
-                  : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50'
-              }`}
-            >
-              <div className="flex items-center justify-between mb-1.5">
-                <span className={`font-semibold text-sm ${engine === item.value ? 'text-blue-900' : 'text-slate-800'}`}>
-                  {item.title}
-                </span>
-                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                  engine === item.value ? 'bg-blue-200 text-blue-800' : 'bg-slate-100 text-slate-600'
-                }`}>
-                  {item.tag}
-                </span>
-              </div>
-              <p className="text-xs text-slate-500 leading-relaxed">{item.desc}</p>
-            </button>
-          ))}
-        </div>
-      </Card>
+      <ModelPicker value={model} onChange={setModel} sparkAvailable={sparkAvailable} engine={engine} />
 
-      {/* 4. Compute: master cores or selected workers */}
-      <Card>
-        <SectionTitle>Compute</SectionTitle>
-        <div className="flex gap-3 mb-5">
-          {([
-            { value: 'multi', label: 'Workers (SSH)', icon: <Server size={18} /> },
-            { value: 'single', label: 'Master only', icon: <Cpu size={18} /> },
-          ] as const).map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => setMode(opt.value)}
-              className={`flex-1 flex items-center gap-2 justify-center px-4 py-3 rounded-xl border text-sm font-medium transition-all ${
-                mode === opt.value
-                  ? 'bg-blue-50 border-blue-500 text-blue-700 shadow-xs'
-                  : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
-              }`}
-            >
-              <span className={mode === opt.value ? 'text-blue-600' : 'text-slate-400'}>{opt.icon}</span> {opt.label}
-            </button>
-          ))}
-        </div>
-
-        {isMulti ? (
-          <div>
-            <p className="text-xs text-slate-500 mb-3">
-              Each selected worker gets one shard per allocated core. Workers only need SSH and Python 3; nothing is installed on them.
-            </p>
-            {nodes.length === 0 ? (
-              <p className="text-sm text-slate-500">No workers registered. Add one on the <span className="font-medium">SSH Connection</span> page.</p>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {nodes.map((n) => {
-                  const online = n.status === 'online';
-                  const active = online && selectedNodeIds.includes(n.id);
-                  return (
-                    <button
-                      key={n.id}
-                      type="button"
-                      disabled={!online}
-                      onClick={() => toggleNode(n.id)}
-                      className={`text-left px-3.5 py-2.5 rounded-lg border text-sm transition-all ${
-                        active ? 'bg-blue-50 border-blue-500 text-blue-800'
-                        : online ? 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'
-                        : 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium">{n.name}</span>
-                        <StatusBadge status={n.status} />
-                      </div>
-                      <div className="text-xs text-slate-500 mt-0.5">
-                        {n.host}:{n.port} · {n.allocated_cpu} cores{n.allocated_gpu_memory_gb ? ` · ${n.allocated_gpu_memory_gb}GB GPU slice` : ''}{n.gpu_model ? ` (${n.gpu_model})` : ''}{n.python_version ? ` · Python ${n.python_version}` : ''}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-            <div className="mt-3 text-xs text-slate-600">
-              {chosenNodes.length} selected · {chosenNodes.reduce((sum, n) => sum + Math.max(1, n.allocated_cpu), 0)} shards
-              {onlineNodes.length === 0 && nodes.length > 0 && <span className="text-rose-600"> · no worker is online</span>}
-            </div>
+      {family === 'spark' ? (
+        <Card>
+          <SectionTitle>Compute</SectionTitle>
+          <p className="text-sm text-slate-600">
+            {model.spark?.name ?? 'Spark models'} train with Spark on the master
+            {engine === 'spark_ray' ? ' (using all of its cores, or your Spark cluster if one is configured)' : ''}. Worker nodes are not used.
+          </p>
+        </Card>
+      ) : (
+        <Card>
+          <SectionTitle>Compute</SectionTitle>
+          <div className="flex gap-3 mb-5">
+            {([
+              { value: 'multi', label: 'Workers (SSH)', icon: <Server size={18} /> },
+              { value: 'single', label: engine === 'spark_ray' ? 'Master (Ray tasks)' : 'Master only', icon: <Cpu size={18} /> },
+            ] as const).map((opt) => {
+              const disabled = opt.value === 'single' && family === 'custom';
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  disabled={disabled}
+                  title={disabled ? 'Your own model runs on worker nodes, never on the master' : undefined}
+                  onClick={() => setMode(opt.value)}
+                  className={`flex-1 flex items-center gap-2 justify-center px-4 py-3 rounded-xl border text-sm font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+                    mode === opt.value
+                      ? 'bg-blue-50 border-blue-500 text-blue-700'
+                      : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                  }`}
+                >
+                  <span className={mode === opt.value ? 'text-blue-600' : 'text-slate-400'}>{opt.icon}</span> {opt.label}
+                </button>
+              );
+            })}
           </div>
-        ) : (
-          <label className="text-sm block">
-            <span className="text-xs text-slate-500 font-medium block mb-1">Cores on the master</span>
-            <NumberField value={localCores} min={1} max={64} step={1} onChange={setLocalCores}
-              className="w-40 bg-white rounded-lg px-3 py-2 text-slate-900 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
-          </label>
-        )}
-        <div className="mt-4 max-w-xs">
-          <ExecutionPolicySelect value={executionPolicy} onChange={setExecutionPolicy} />
-        </div>
-      </Card>
 
-      {/* 4. Dataset upload + column config */}
+          {mode === 'multi' ? (
+            <div>
+              <p className="text-xs text-slate-500 mb-3">
+                Each selected worker gets one shard per allocated core. Workers only need SSH and Python 3; nothing is installed on them.
+              </p>
+              {nodes.length === 0 ? (
+                <p className="text-sm text-slate-500">No workers registered. Add one on the <span className="font-medium">SSH Connection</span> page.</p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {nodes.map((n) => {
+                    const online = n.status === 'online';
+                    const active = online && selectedNodeIds.includes(n.id);
+                    return (
+                      <button
+                        key={n.id}
+                        type="button"
+                        disabled={!online}
+                        onClick={() => toggleNode(n.id)}
+                        className={`text-left px-3.5 py-2.5 rounded-lg border text-sm transition-all ${
+                          active ? 'bg-blue-50 border-blue-500 text-blue-800'
+                          : online ? 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'
+                          : 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium">{n.name}</span>
+                          <StatusBadge status={n.status} />
+                        </div>
+                        <div className="text-xs text-slate-500 mt-0.5">
+                          {n.host}:{n.port} · {n.allocated_cpu} cores{n.allocated_gpu_memory_gb ? ` · ${n.allocated_gpu_memory_gb}GB GPU slice` : ''}{n.gpu_model ? ` (${n.gpu_model})` : ''}{n.python_version ? ` · Python ${n.python_version}` : ''}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="mt-3 text-xs text-slate-600">
+                {chosenNodes.length} selected · {chosenNodes.reduce((sum, n) => sum + Math.max(1, n.allocated_cpu), 0)} shards
+                {onlineNodes.length === 0 && nodes.length > 0 && <span className="text-rose-600"> · no worker is online</span>}
+              </div>
+            </div>
+          ) : (
+            <label className="text-sm block">
+              <span className="text-xs text-slate-500 font-medium block mb-1">
+                {engine === 'spark_ray' ? 'Shards (Ray trains them in parallel on the master)' : 'Cores on the master'}
+              </span>
+              <NumberField value={localCores} min={1} max={64} step={1} onChange={setLocalCores} className="w-40 bg-white rounded-lg px-3 py-2 text-slate-900 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
+            </label>
+          )}
+          <div className="mt-4 max-w-xs">
+            <ExecutionPolicySelect value={executionPolicy} onChange={setExecutionPolicy} />
+          </div>
+        </Card>
+      )}
+
       <DataUpload
         selectedDataset={dataset}
         onSelectDataset={setDataset}
@@ -296,34 +294,31 @@ export function TrainPage() {
         onQuickSplitChange={setSplit}
       />
 
-      {/* 5. Hyperparameters */}
-      <Card>
-        <SectionTitle>Hyperparameters</SectionTitle>
-        <div className="grid grid-cols-3 gap-3">
-          <label className="text-sm">
-            <span className="text-xs text-slate-500 font-medium block mb-1">Learning rate</span>
-            <NumberField value={learningRate} min={0.0001} step={0.001} onChange={setLearningRate}
-              className="w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
-          </label>
-          <label className="text-sm">
-            <span className="text-xs text-slate-500 font-medium block mb-1">Epochs / shard</span>
-            <NumberField value={epochs} min={1} max={1000} step={1} onChange={setEpochs}
-              className="w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
-          </label>
-          <label className="text-sm">
-            <span className="text-xs text-slate-500 font-medium block mb-1">Averaging rounds</span>
-            <NumberField value={rounds} min={1} max={50} step={1} onChange={setRounds}
-              className="w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
-          </label>
-        </div>
-        {modelType === 'cnn' && (
-          <label className="text-sm block mt-3 max-w-[220px]">
-            <span className="text-xs text-slate-500 font-medium block mb-1">Number of classes <span className="text-slate-400">(0 = auto)</span></span>
-            <NumberField value={numClasses} min={0} max={1000} step={1} onChange={setNumClasses}
-              className="w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
-          </label>
-        )}
-      </Card>
+      {family !== 'spark' && (
+        <Card>
+          <SectionTitle>Hyperparameters</SectionTitle>
+          <div className="grid grid-cols-3 gap-3">
+            <label className="text-sm">
+              <span className="text-xs text-slate-500 font-medium block mb-1">Learning rate</span>
+              <NumberField value={learningRate} min={0.0001} step={0.001} onChange={setLearningRate} className={NUM_INPUT} />
+            </label>
+            <label className="text-sm">
+              <span className="text-xs text-slate-500 font-medium block mb-1">Epochs / shard</span>
+              <NumberField value={epochs} min={1} max={1000} step={1} onChange={setEpochs} className={NUM_INPUT} />
+            </label>
+            <label className="text-sm">
+              <span className="text-xs text-slate-500 font-medium block mb-1">Averaging rounds</span>
+              <NumberField value={rounds} min={1} max={50} step={1} onChange={setRounds} className={NUM_INPUT} />
+            </label>
+          </div>
+          {model.modelType === 'cnn' && (
+            <label className="text-sm block mt-3 max-w-[220px]">
+              <span className="text-xs text-slate-500 font-medium block mb-1">Number of classes <span className="text-slate-400">(0 = auto)</span></span>
+              <NumberField value={numClasses} min={0} max={1000} step={1} onChange={setNumClasses} className={NUM_INPUT} />
+            </label>
+          )}
+        </Card>
+      )}
 
       {run && <TrainingResult run={run} nodes={nodes} />}
 
@@ -331,11 +326,13 @@ export function TrainPage() {
         <div className="flex flex-wrap justify-end gap-2">
           {run.status === 'completed' && (
             <>
-              <SecondaryButton onClick={() => download(() => sshApi.downloadTrainingData(run.id), 'training data')} disabled={busy}>
-                <Download size={16} /> Training data (JSON)
-              </SecondaryButton>
+              {run.model_family !== 'spark' && (
+                <SecondaryButton onClick={() => download(() => sshApi.downloadTrainingData(run.id), 'training data')} disabled={busy}>
+                  <Download size={16} /> Training data (JSON)
+                </SecondaryButton>
+              )}
               <SecondaryButton onClick={() => download(() => sshApi.downloadTrainingModel(run.id), 'model')} disabled={busy}>
-                <Download size={16} /> Model (ONNX)
+                <Download size={16} /> {MODEL_FORMAT_LABEL[run.model_format ?? 'onnx'] ?? 'Model'}
               </SecondaryButton>
             </>
           )}
@@ -344,17 +341,19 @@ export function TrainPage() {
         </div>
       )}
 
-      {/* 6. Start — hidden once a run exists; "New training" brings it back. */}
       {!run && (
         <Card>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-sm text-slate-600 font-medium flex items-center gap-2">
               <Cpu size={15} className="text-slate-400" />
-              {!dataset && 'Select a dataset to continue.'}
-              {dataset && !split.targetColumn && 'Set the target column.'}
-              {dataset && split.targetColumn && split.featureColumns.length === 0 && 'Add at least one feature column.'}
-              {isMulti && chosenNodes.length === 0 && dataset && <span className="text-rose-600">Select an online worker above.</span>}
-              {canSubmit && <span className="text-emerald-600 font-semibold">Ready to train ({isMulti ? `${chosenNodes.length} worker(s)` : "master"}).</span>}
+              {blocker ? (
+                <span className={usesWorkers && chosenNodes.length === 0 && dataset ? 'text-rose-600' : ''}>{blocker}</span>
+              ) : (
+                <span className="text-emerald-600 font-semibold">
+                  Ready to train {modelLabel(model.modelType)} [{engine}]
+                  {family === 'spark' ? ' with Spark on the master.' : usesWorkers ? ` on ${chosenNodes.length} worker(s).` : ' on the master.'}
+                </span>
+              )}
             </div>
             <PrimaryButton onClick={handleTrain} disabled={!canSubmit}>
               {submitting ? 'Starting…' : 'Start Training'}
@@ -366,18 +365,21 @@ export function TrainPage() {
   );
 }
 
+function fmt(v: unknown): string {
+  return typeof v === 'number' ? (Number.isInteger(v) ? String(v) : v.toFixed(4)) : String(v);
+}
+
 function TrainingResult({ run, nodes }: { run: TrainRunResponse; nodes: NodeResponse[] }) {
   const nodeName = (id?: string | null) => {
     if (!id) return '—';
-    if (id === 'local') return 'local cores';
+    if (id === 'local') return 'master cores';
+    if (id === 'ray') return 'Ray on the master';
     return nodes.find((n) => n.id === id)?.name ?? `${id.slice(0, 8)}…`;
   };
-  const metricEntries = run.metrics ? Object.entries(run.metrics) : [];
-  const modelLabel: Record<string, string> = {
-    linear_regression: 'Linear Regression',
-    logistic_regression: 'Logistic Regression',
-    cnn: 'Baseline CNN',
-  };
+  const metricEntries = run.metrics ? Object.entries(run.metrics).filter(([k, v]) => k !== 'n' && typeof v === 'number') : [];
+  const details = run.details ?? {};
+  const spark = details.spark;
+  const failedShards = (run.shards ?? []).filter((s) => s.error);
   return (
     <Card>
       <div className="flex items-center gap-2 mb-4">
@@ -385,21 +387,55 @@ function TrainingResult({ run, nodes }: { run: TrainRunResponse; nodes: NodeResp
         {run.status === 'failed' && <XCircle size={18} className="text-rose-600" />}
         {run.status !== 'completed' && run.status !== 'failed' && <Loader2 size={18} className="text-blue-600 animate-spin" />}
         <SectionTitle>
-          Training {run.status}{run.engine ? ` · ${run.engine}` : ''}
-          {run.model_type ? ` · ${modelLabel[run.model_type] ?? run.model_type}` : ''}
+          Training {run.status} · {modelLabel(run.model_type)}{run.engine ? ` · ${run.engine}` : ''}
         </SectionTitle>
       </div>
-      {run.message && <p className="text-sm text-slate-600 mb-4">{run.message}</p>}
+
+      {run.status === 'failed' && run.message ? (
+        <div className="mb-4 -mx-6 border-y border-slate-200">
+          <SmartLogViewer stderr={run.message} exitCode={1} status="failed" label="Why the run failed" />
+        </div>
+      ) : (
+        run.message && <p className="text-sm text-slate-600 mb-4">{run.message}</p>
+      )}
+
       {metricEntries.length > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-          {metricEntries.filter(([k]) => k !== 'n').map(([k, v]) => (
+          {metricEntries.map(([k, v]) => (
             <div key={k} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5">
               <div className="text-xs text-slate-500 uppercase tracking-wide">{k}</div>
-              <div className="text-lg font-bold text-slate-900">{Number(v).toFixed(4)}</div>
+              <div className="text-lg font-bold text-slate-900 tabular-nums">{Number(v).toFixed(4)}</div>
             </div>
           ))}
         </div>
       )}
+
+      {(details.data || details.ray || spark) && (
+        <div className="mb-5 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
+          {details.data && (
+            <div className="flex justify-between gap-3"><span className="text-slate-500">Data</span>
+              <span className="text-slate-800 text-right">{fmt(details.data.rows_used)} of {fmt(details.data.rows_total)} rows via {details.data.loader}{details.data.sampled ? ' (random sample)' : ''}</span></div>
+          )}
+          {details.ray && (
+            <div className="flex justify-between gap-3"><span className="text-slate-500">Ray parameter server</span>
+              <span className="text-slate-800">{fmt(details.ray.version)} updates</span></div>
+          )}
+          {spark && (
+            <div className="flex justify-between gap-3"><span className="text-slate-500">Spark rows</span>
+              <span className="text-slate-800">{fmt(spark.rows_train)} train · {fmt(spark.rows_test)} test</span></div>
+          )}
+          {spark?.grid_search && (
+            <div className="flex justify-between gap-3"><span className="text-slate-500">Grid search</span>
+              <span className="text-slate-800">{spark.grid_search.candidates.length} candidates by {spark.grid_search.metric}</span></div>
+          )}
+          {spark?.feature_importances && (
+            <div className="sm:col-span-2 flex justify-between gap-3"><span className="text-slate-500">Top features</span>
+              <span className="text-slate-800 text-right">{Object.entries(spark.feature_importances as Record<string, number>).slice(0, 5).map(([k, v]) => `${k} ${v.toFixed(3)}`).join(' · ')}</span></div>
+          )}
+          {spark?.usage && <p className="sm:col-span-2 text-xs text-slate-500 mt-1">{spark.usage}</p>}
+        </div>
+      )}
+
       {run.shards && run.shards.length > 0 && (
         <div>
           <div className="text-xs font-medium text-slate-500 mb-2">Shards</div>
@@ -416,6 +452,12 @@ function TrainingResult({ run, nodes }: { run: TrainRunResponse; nodes: NodeResp
               </div>
             ))}
           </div>
+          {failedShards.map((s) => (
+            <div key={`err-${s.shard}`} className="mt-3 border border-slate-200 rounded-lg overflow-hidden">
+              <div className="px-4 py-2 bg-slate-50 text-sm font-medium text-slate-700">Shard {s.shard} on {nodeName(s.node_id)}</div>
+              <SmartLogViewer stderr={s.error} exitCode={1} status="failed" />
+            </div>
+          ))}
         </div>
       )}
     </Card>

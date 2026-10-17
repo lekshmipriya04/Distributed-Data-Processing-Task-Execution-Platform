@@ -246,8 +246,10 @@ export interface BatchTasksResponse {
 }
 
 // --- distributed ML training -------------------------------------------------
-export type TrainModelType = 'linear_regression' | 'logistic_regression' | 'cnn';
-/** Master-side engine. Workers always execute a stdlib-only Python script. */
+export type BuiltinModelType = 'linear_regression' | 'logistic_regression' | 'cnn';
+/** Built-in, "custom" (your model.py on the workers) or "spark:<Estimator>" (Spark MLlib on the master). */
+export type TrainModelType = BuiltinModelType | 'custom' | `spark:${string}`;
+/** Master-side engine. Workers never need anything installed. */
 export type TrainEngine = 'python' | 'spark_ray';
 export type TrainMode = 'single' | 'multi';
 
@@ -265,6 +267,39 @@ export interface TrainRequest {
   num_classes: number;
   node_ids: string[];
   execution_policy?: ExecutionPolicy;
+  model_code?: string;
+  model_params?: Record<string, unknown>;
+  param_grid?: Record<string, unknown[]>;
+  test_fraction?: number;
+  uses_gpu?: boolean;
+}
+
+export interface EngineInfo {
+  id: TrainEngine;
+  name: string;
+  available: boolean;
+  missing: string[];
+  versions: Record<string, string | null>;
+  spark_master?: string | null;
+  ray_address?: string | null;
+  hint?: string | null;
+}
+
+export interface SparkModelParam {
+  name: string;
+  type: string;
+  default: unknown;
+  has_default: boolean;
+  required: boolean;
+  doc: string;
+}
+
+export interface SparkModelInfo {
+  id: `spark:${string}`;
+  name: string;
+  family: 'classification' | 'regression' | 'clustering';
+  needs_target: boolean;
+  params: SparkModelParam[];
 }
 
 export interface TrainShardInfo {
@@ -273,6 +308,8 @@ export interface TrainShardInfo {
   node_id?: string | null;
   status?: string | null;
   attempts?: number | null;
+  /** Custom models: the worker's error output when this shard failed. */
+  error?: string | null;
 }
 
 export interface TrainRunResponse {
@@ -288,6 +325,10 @@ export interface TrainRunResponse {
   metrics?: Record<string, number> | null;
   history?: { round: number; metrics: Record<string, number> }[] | null;
   shards?: TrainShardInfo[] | null;
+  model_family?: 'builtin' | 'custom' | 'spark' | null;
+  /** What actually ran: engine, data loader, Ray and Spark details. */
+  details?: Record<string, any> | null;
+  model_format?: 'onnx' | 'json' | 'spark-zip' | null;
   created_at: string;
 }
 
@@ -356,7 +397,15 @@ export const sshApi = {
 
   getTrainingRun: (id: string) => apiRequest<TrainRunResponse>(`${BASE}/train/${id}`),
 
-  downloadTrainingModel: (id: string) => downloadFile(`${BASE}/train/${id}/model`, `model-${id}.onnx`),
+  downloadTrainingModel: (id: string) => downloadFile(`${BASE}/train/${id}/model`, `model-${id}`),
+
+  listEngines: (refresh = false) =>
+    apiRequest<{ items: EngineInfo[] }>(`${BASE}/engines${refresh ? '?refresh=true' : ''}`),
+
+  customModelTemplate: () => apiRequest<{ filename: string; code: string }>(`${BASE}/models/custom/template`),
+
+  /** Every Spark MLlib model on the master (starts Spark the first time). */
+  listSparkModels: () => apiRequest<{ items: SparkModelInfo[] }>(`${BASE}/engines/spark_ray/models`),
 
   downloadTrainingData: (id: string) => downloadFile(`${BASE}/train/${id}/data`, `train_data-${id}.json`),
 

@@ -170,10 +170,12 @@ export async function downloadFile(path: string, filename: string): Promise<void
   const res = await fetch(path, { headers: getAuthHeaders() });
   if (!res.ok) throw await errorFromResponse(res);
   const blob = await res.blob();
+  // Prefer the server's name: its extension depends on what was produced.
+  const served = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1];
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = filename;
+  link.download = served ?? filename;
   link.style.display = 'none';
   document.body.appendChild(link);
   link.click();

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Code2, Play, Server, Cpu, Square, History, RefreshCw, Loader2, Clock } from 'lucide-react';
+import { Code2, Play, Server, Cpu, Square, History, RefreshCw, Loader2 } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 import { Card, SectionTitle, PrimaryButton, SecondaryButton, StatusBadge, NumberField } from '../components/common/Primitives';
 import { ApiError, errorMessage } from '../api/client';
 import { ExecutionPolicySelect } from '../components/common/ExecutionPolicySelect';
+import { SmartLogViewer } from '../components/common/SmartLogViewer';
 import type { ExecutionPolicy } from '../api/ssh';
 import {
   sshApi,
@@ -22,14 +23,6 @@ const INPUT_CLS =
   'w-full border border-slate-300 rounded-lg px-3 py-2 bg-white outline-none focus:ring-2 focus:ring-blue-500 text-sm';
 
 const isTerminal = (status: string) => TERMINAL_BATCH_STATUSES.includes(status);
-
-function formatDuration(ms?: number | null) {
-  if (ms == null) return '—';
-  if (ms < 1000) return `${ms} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(2)} s`;
-  const m = Math.floor(ms / 60_000);
-  return `${m}m ${Math.round((ms % 60_000) / 1000)}s`;
-}
 
 export function TaskExecutorPage() {
   const { showSuccess, showError } = useToast();
@@ -266,20 +259,43 @@ export function TaskExecutorPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <label className="text-sm">
-              <span className="text-xs text-slate-500 font-medium block mb-1">Language</span>
-              <select className={INPUT_CLS} value={runtimeId} onChange={(e) => changeRuntime(e.target.value)}>
-                {runtimes.length === 0 && <option value="">Loading…</option>}
-                {runtimes.map((r) => (
-                  <option key={r.id} value={r.id} disabled={!runtimeAvailable(r)}>
-                    {r.name}
-                    {!runtimeAvailable(r) ? ' — not found on your workers' : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="sm:col-span-2">
+              <span className="text-xs text-slate-500 font-medium block mb-2">Language</span>
+              {runtimes.length === 0 ? (
+                <span className="text-sm text-slate-400">Loading…</span>
+              ) : (
+                <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Language">
+                  {[...runtimes]
+                    .sort((a, b) => Number(runtimeAvailable(b)) - Number(runtimeAvailable(a)))
+                    .map((r) => {
+                      const available = runtimeAvailable(r);
+                      const active = r.id === runtimeId;
+                      return (
+                        <button
+                          key={r.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          disabled={!available}
+                          onClick={() => changeRuntime(r.id)}
+                          title={available ? `${r.name}${r.id === 'custom' ? '' : ` · ${r.available_node_ids.length} worker(s)`}` : `${r.name} was not found on your workers`}
+                          className={`rounded-full border px-3 py-1 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                            active
+                              ? 'border-blue-600 bg-blue-600 text-white shadow-sm'
+                              : available
+                                ? 'border-slate-300 bg-white text-slate-700 hover:border-blue-400 hover:text-blue-700'
+                                : 'border-dashed border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
+                          }`}
+                        >
+                          {r.name}
+                        </button>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
             {runtime && (
-              <div className="text-xs text-slate-500 self-end pb-2">
+              <div className="text-xs text-slate-500 sm:col-span-2">
                 {runtime.kind === 'compiled' && 'Compiled inside the sandbox before running. '}
                 {runtime.kind === 'custom' && 'Runs your own command with the same confinement as built-in languages. '}
                 {!runtime.windows_supported && 'Not available on Windows workers. '}
@@ -472,26 +488,16 @@ export function TaskExecutorPage() {
                     {t.attempts > 1 ? ` (attempt ${t.attempts})` : ''}
                     <span className="text-slate-400 font-normal"> · {nodeName(t.node_id)}</span>
                   </span>
-                  <span className="flex items-center gap-3 text-xs text-slate-500">
-                    <span className="flex items-center gap-1">
-                      <Clock size={12} /> {formatDuration(t.duration_ms)}
-                    </span>
-                    {t.exit_code !== null && (
-                      <span className={t.exit_code === 0 ? 'text-emerald-700' : 'text-rose-700'}>exit {t.exit_code}</span>
-                    )}
-                    <StatusBadge status={t.status} />
-                  </span>
+                  <StatusBadge status={t.status} />
                 </div>
-                {t.stdout && (
-                  <pre className="bg-[#0f172a] text-emerald-400 text-xs font-mono p-3 overflow-auto whitespace-pre-wrap max-h-40">
-                    {t.stdout}
-                  </pre>
-                )}
-                {t.stderr && (
-                  <pre className="bg-[#1e1b2e] text-rose-300 text-xs font-mono p-3 overflow-auto whitespace-pre-wrap max-h-40 border-t border-slate-700">
-                    {t.stderr}
-                  </pre>
-                )}
+                <SmartLogViewer
+                  stdout={t.stdout}
+                  stderr={t.stderr}
+                  exitCode={t.exit_code}
+                  status={t.status}
+                  durationMs={t.duration_ms}
+                  label={batch.batch.runtime}
+                />
               </div>
             ))}
           </div>

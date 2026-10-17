@@ -1,0 +1,11 @@
+// Captured from real python3, g++ (clang), node, javac and ruby on the dev host;
+// paths rewritten to look like a worker sandbox. Go and Rust samples follow
+// their compilers' documented formats (not installed on the dev host).
+export const PY_ERR = "Traceback (most recent call last):\n  File \"/home/worker/sandbox/t.py\", line 3, in <module>\n    f()\n    ~^^\n  File \"/home/worker/sandbox/t.py\", line 2, in f\n    return 1/0\n           ~^~\nZeroDivisionError: division by zero\n";
+export const CPP_ERR = "m.cpp:2:12: error: expected ';' at end of declaration\n    2 |   int x = 1\n      |            ^\n      |            ;\n1 error generated.\n";
+export const CPPCOLOR_ERR = "\u001b[1mm.cpp:2:12: \u001b[0m\u001b[0;1;31merror: \u001b[0m\u001b[1mexpected ';' at end of declaration\u001b[0m\n    2 |   \u001b[0;34mint\u001b[0m x = \u001b[0;32m1\u001b[0m\n      | \u001b[0;1;32m           ^\n\u001b[0m      | \u001b[0;32m           ;\n\u001b[0m1 error generated.\n";
+export const JS_ERR = "/home/worker/sandbox/t.js:2\n  return missing + 1;\n  ^\n\nReferenceError: missing is not defined\n    at go (/home/worker/sandbox/t.js:2:3)\n    at Object.<anonymous> (/home/worker/sandbox/t.js:4:1)\n    at Module._compile (node:internal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47\n\nNode.js v26.5.0\n";
+export const JAVA_ERR = "Main.java:3: error: ';' expected\n    int x = 1\n             ^\n1 error\n";
+export const RB_ERR = "t.rb:2:in 'Object#f': undefined method 'upcase' for nil (NoMethodError)\n\n  nil.upcase\n     ^^^^^^^\n\tfrom t.rb:4:in '<main>'\n";
+export const GO_ERR = "# command-line-arguments\n./main.go:3:2: declared and not used: x\n";
+export const RUST_ERR = "error[E0308]: mismatched types\n --> main.rs:2:18\n  |\n2 |     let x: i32 = \"a\";\n  |            ---   ^^^ expected `i32`, found `&str`\n\nerror: aborting due to 1 previous error\n";
