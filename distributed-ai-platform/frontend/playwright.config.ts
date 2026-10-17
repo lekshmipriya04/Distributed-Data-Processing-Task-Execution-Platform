@@ -27,5 +27,7 @@ export default defineConfig({
     { name: 'webkit', testMatch: /browsers\.spec\.ts/, use: { ...devices['Desktop Safari'] } },
     { name: 'mobile-android', testMatch: /browsers\.spec\.ts/, use: { ...devices['Pixel 7'] } },
     { name: 'mobile-ios', testMatch: /browsers\.spec\.ts/, use: { ...devices['iPhone 14'] } },
+    // README screenshots (npx playwright test --project=docs); not a test run.
+    { name: 'docs', testMatch: /capture-docs\.spec\.ts/, use: { ...devices['Desktop Chrome'] } },
   ],
 });

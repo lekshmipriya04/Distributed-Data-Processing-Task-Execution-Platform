@@ -11,7 +11,8 @@
     "test": "vitest run",
     "e2e:serve": "node e2e/serve.mjs",
     "e2e:stop": "node e2e/serve.mjs --stop",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test --project=flows-chromium --project=chromium --project=firefox --project=webkit --project=mobile-android --project=mobile-ios",
+    "docs:screenshots": "playwright test --project=docs"
   },
   "dependencies": {
     "ansi-to-react": "6.2.6",

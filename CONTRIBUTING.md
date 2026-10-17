@@ -35,6 +35,16 @@ cd frontend && npm run e2e:serve && npm run test:e2e
 The extension's end-to-end tests also need two extra gateways; the `e2e` job
 in `.github/workflows/ci.yml` shows the exact commands.
 
+## Screenshots in the guides
+
+The images in the extension and dashboard READMEs are taken by scripts, so
+they can be re-created after UI changes (platform running with `make up-dev`):
+
+```bash
+cd distributed-ai-platform/distributed-compute-vscode && npm run docs:screenshots
+cd distributed-ai-platform/frontend && npm run e2e:serve && npm run docs:screenshots
+```
+
 ## Pull requests
 
 - Keep each PR to one change, with a clear description of what and why.

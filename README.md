@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/lekshmipriya04/Distributed-Data-Processing-Task-Execution-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/lekshmipriya04/Distributed-Data-Processing-Task-Execution-Platform/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-informational)
+![Platform 0.1.0](https://img.shields.io/badge/platform-0.1.0-informational)
+[![VS Code extension](https://img.shields.io/visual-studio-marketplace/v/aaron43210.distributed-compute?label=VS%20Code%20extension)](https://marketplace.visualstudio.com/items?itemName=aaron43210.distributed-compute)
 
 **Run code and train models on the computers you already have, over plain
 SSH.** Lend a few cores of a lab machine, an old laptop or a server, then run
@@ -13,7 +14,7 @@ Workers need only `sshd` and `python3`. **Nothing is installed on them.** You
 type a worker's password once; the platform installs a restricted key, forgets
 the password, and removes the key when you remove the worker.
 
-![The web dashboard: a run of four tasks on two workers, one failed](distributed-ai-platform/docs/images/task-executor.png)
+![VS Code running a file as 8 parallel tasks on two workers, with live output](distributed-ai-platform/distributed-compute-vscode/media/readme/13-live-output.png)
 
 ## What you can do
 
@@ -34,16 +35,19 @@ the password, and removes the key when you remove the worker.
 
 | | |
 |---|---|
-| ![Workers](distributed-ai-platform/docs/images/workers.png) | ![Training](distributed-ai-platform/docs/images/training.png) |
-| Workers with their lent slice, health and languages | A model trained on four shards across two workers |
+| ![Workers](distributed-ai-platform/frontend/docs/images/05-workers.png) | ![Training](distributed-ai-platform/frontend/docs/images/15-training-result.png) |
+| The dashboard: workers with their slice, health and languages | A model trained across two workers |
+| ![Results](distributed-ai-platform/frontend/docs/images/09-results.png) | ![Phone](distributed-ai-platform/frontend/docs/images/16-phone.png) |
+| Each task's output, failures pulled out | On a phone |
 
 ## Quick start
 
 You need [Docker](https://www.docker.com/products/docker-desktop/) (Docker
 Desktop on Windows and macOS, Docker Engine or Desktop on Linux).
 
-**From VS Code, with no terminal:** install the **Distributed Compute**
-extension and click **Set Up Now** when it asks. It starts Docker if needed,
+**From VS Code, with no terminal:** install the
+[**Distributed Compute** extension](https://marketplace.visualstudio.com/items?itemName=aaron43210.distributed-compute)
+and click **Set Up Now** when it asks. It starts Docker if needed,
 downloads the platform, starts it and connects. Then click **Add Compute
 Node**.
 
@@ -56,7 +60,9 @@ make up          # first start builds the images: several minutes
 ```
 
 Open the dashboard at **http://localhost:3001**, go to **SSH Connection** and
-add a worker. Because the platform runs inside Docker:
+add a worker. The [dashboard guide](distributed-ai-platform/frontend/README.md)
+and the [extension guide](distributed-ai-platform/distributed-compute-vscode/README.md)
+walk through every step with screenshots. Because the platform runs inside Docker:
 
 | Worker | Address to enter |
 |---|---|
@@ -119,6 +125,10 @@ Web dashboard :3001 ─► api-gateway :8000 ─────┼─► ssh-execut
   Spark MLlib model with grid search, Parquet data, and Ray for the parameter
   server and parallel local shards. Existing clusters can be used via
   `SPARK_MASTER_URL` and `RAY_ADDRESS`.
+
+**Step-by-step guides with screenshots:**
+[VS Code extension](distributed-ai-platform/distributed-compute-vscode/README.md) ·
+[web dashboard](distributed-ai-platform/frontend/README.md)
 
 More: [architecture](distributed-ai-platform/docs/architecture.md) ·
 [ports and protocols](distributed-ai-platform/docs/connections.md) ·

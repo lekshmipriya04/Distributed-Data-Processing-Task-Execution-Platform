@@ -1,18 +1,26 @@
-# Deployment plan: Distributed Compute 0.1.0
+# Deployment plan: Distributed Compute
 
-Release runbook for version 0.1.0 of everything: the platform (Python
-services, Go gateway, Docker setup), the web dashboard, and the VS Code
-extension (`aaron43210.distributed-compute`). Steps are in order; each has a
+Release runbook for the platform and web dashboard **0.1.0** (Python
+services, Go gateway, Docker setup, dashboard) and the VS Code extension
+**1.0.1** (`aaron43210.distributed-compute`). Steps are in order; each has a
 check that says it worked.
+
+**Versions.** The extension is versioned separately because 1.0.0 is already
+on the Marketplace, which only accepts higher numbers. Each extension release
+names the platform release it was tested with (`PLATFORM_RELEASE` in
+`distributed-compute-vscode/src/models/platform.ts`, now `0.1.0`); that is the
+tag the extension downloads for new users.
 
 ## 1. Where things stand
 
 | Area | Verified on | How |
 |---|---|---|
-| Extension unit tests (82) | macOS | `npm test` |
+| Extension unit tests (84) | macOS | `npm test` |
 | Extension in a real VS Code 1.142 | macOS | `npm run test:vscode`, offline and against gateways on ports 8091 and 8092 |
+| Every step of the extension README, driven in a real VS Code | macOS + Docker | `npm run docs:screenshots` (also re-creates the 20 README images) |
+| Every step of the dashboard README, in the production image | macOS + Docker | `npm run docs:screenshots` in `frontend/` (16 images) |
 | Multi-user end to end (19 tests) | macOS + Docker | `npm run test:e2e`: 3 users on ports 8090/8091/8092, 2 SSH test workers |
-| `.vsix` installs as `aaron43210.distributed-compute@0.1.0` | macOS | `code --install-extension` into a clean profile |
+| `.vsix` packages as `aaron43210.distributed-compute@1.0.1`, README image links point into the repository | macOS | `npm run package` |
 | Gateway builds for linux, darwin, windows (amd64, arm64) | macOS cross-compile | `go build` with `GOOS`/`GOARCH` |
 | Python services (133 tests), ruff, mypy | macOS | `pytest`, `make lint` |
 | Dashboard unit tests (29), ESLint, build | macOS | `npm test`, `npm run lint`, `npm run build` |
@@ -62,12 +70,11 @@ automatic).
    (Linux, macOS, Windows each), `go`, `e2e`. This is the first run of the OS
    matrices and the `e2e` job; fix anything they find before going further.
    Then protect `main` (Settings → Branches) so these checks are required.
-2. **Create the Marketplace publisher** `aaron43210` (must equal `publisher`
-   in `package.json`) at <https://marketplace.visualstudio.com/manage>, signed
-   in with the Microsoft account that will own it.
-3. **Create a publishing token.** In Azure DevOps, create a Personal Access
-   Token with organization *All accessible organizations* and scope
-   *Marketplace → Manage*. Store it as the repository secret `VSCE_PAT`.
+2. **Marketplace publisher** `aaron43210`: done (1.0.0 was published with
+   it on 2026-10-17).
+3. **Publishing token.** Use the Azure DevOps Personal Access Token (scope
+   *Marketplace → Manage*) that published 1.0.0, or create a new one. Store it
+   as the repository secret `VSCE_PAT`; never commit it.
 4. **Optional: Open VSX** (VSCodium, Cursor, Windsurf, Gitpod users). Create
    the namespace `aaron43210` at <https://open-vsx.org>, get a token, store it
    as `OVSX_PAT`.
@@ -83,29 +90,33 @@ automatic).
 
 ## 3. Release
 
-1. **Tag the platform and the extension together.** The extension downloads
-   the platform tag matching its own version (`v0.1.0`), so this tag is what
-   new users get. Without it they get the default branch.
+1. **Tag the platform release.** The extension downloads the platform
+   release it was tested with (`v0.1.0`), so this tag is what new users get.
+   Without it they get the default branch.
    ```bash
    git tag -a v0.1.0 -m "Distributed Compute 0.1.0"
    git push origin v0.1.0
    ```
    Check: `git ls-remote --tags origin v0.1.0` shows the tag.
 2. **Build the `.vsix` from the tag**, or take the `distributed-compute-vsix`
-   artifact from that commit's CI run.
+   artifact from that commit's CI run. Always use `npm run package`: it points
+   the README's images and links at
+   `…/raw/main/distributed-ai-platform/distributed-compute-vscode/`, so the
+   images must already be on `main` (step 2.1).
    ```bash
    cd distributed-ai-platform/distributed-compute-vscode
-   npm ci && npx vsce package --out distributed-compute-0.1.0.vsix
+   npm ci && npm run package -- --out distributed-compute-1.0.1.vsix
    ```
 3. **Publish.**
    ```bash
-   npx vsce publish --packagePath distributed-compute-0.1.0.vsix -p "$VSCE_PAT"
-   npx ovsx publish distributed-compute-0.1.0.vsix -p "$OVSX_PAT"   # optional
+   npx vsce publish --packagePath distributed-compute-1.0.1.vsix -p "$VSCE_PAT"
+   npx ovsx publish distributed-compute-1.0.1.vsix -p "$OVSX_PAT"   # optional
    ```
-   Check: the listing appears within minutes at
-   `https://marketplace.visualstudio.com/items?itemName=aaron43210.distributed-compute`.
-4. **GitHub Release** for `v0.1.0`: attach the `.vsix`, paste the 0.1.0
-   section of `CHANGELOG.md`, add the screenshots from `docs/images/`, and list
+   Check: within minutes the listing at
+   `https://marketplace.visualstudio.com/items?itemName=aaron43210.distributed-compute`
+   shows version 1.0.1 and every screenshot loads.
+4. **GitHub Release** for `v0.1.0`: attach the extension's 1.0.1 `.vsix`, paste the 1.0.1
+   section of the extension's `CHANGELOG.md`, add screenshots from `frontend/docs/images/` and the extension's `media/readme/`, and list
    the known limits from section 7.
 
 ## 4. After release: smoke test on each OS
