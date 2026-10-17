@@ -11,9 +11,12 @@ import { joinUrl, validateMasterUrl } from '../api/urls';
 import { isPlatformCompose } from '../models/training';
 import {
   DOCKER_DOWNLOAD_URL,
-  PLATFORM_REPO,
   PLATFORM_SUBDIR,
+  cloneArgs,
+  platformTag,
+  composeInvocation,
   dockerLaunchCommand,
+  dockerStartHint,
   dockerStateFrom,
   startupAction,
   type DockerState,
@@ -27,6 +30,8 @@ const DISMISSED_KEY = 'distributedCompute.setupDismissed';
 export interface RunResult {
   exitCode: number;
   spawnFailed: boolean;
+  /** The command's combined output, kept only for quiet runs (short probes). */
+  output: string;
 }
 
 /** Run a command, forwarding its output to the Distributed Compute log. */
@@ -47,11 +52,13 @@ export function runProcess(
       child = spawn(cmd, args, { cwd, env: process.env });
     } catch (err) {
       logger.error(`could not start ${cmd}`, { message: (err as Error).message });
-      resolve({ exitCode: -1, spawnFailed: true });
+      resolve({ exitCode: -1, spawnFailed: true, output: '' });
       return;
     }
+    let output = '';
     const forward = (chunk: Buffer) => {
       if (quiet) {
+        output = (output + chunk.toString('utf8')).slice(-8192);
         return;
       }
       for (const line of chunk.toString('utf8').split(/\r?\n/)) {
@@ -75,13 +82,39 @@ export function runProcess(
       if (!quiet) {
         logger.info(`${cmd} exited with code ${code}`);
       }
-      resolve({ exitCode: code ?? -1, spawnFailed });
+      resolve({ exitCode: code ?? -1, spawnFailed, output });
     });
   });
 }
 
-export function runDocker(deps: CommandDeps, cwd: string, args: string[], token: vscode.CancellationToken): Promise<number> {
-  return runProcess(deps.logger, 'docker', args, cwd, token).then((r) => r.exitCode);
+let composeV2: boolean | undefined;
+
+/**
+ * Run docker. "compose ..." uses Compose v2 when present, else the older
+ * standalone docker-compose (still the default on some Linux distributions).
+ */
+export async function runDocker(deps: CommandDeps, cwd: string, args: string[], token: vscode.CancellationToken): Promise<number> {
+  if (args[0] !== 'compose') {
+    return (await runProcess(deps.logger, 'docker', args, cwd, token)).exitCode;
+  }
+  if (composeV2 === undefined) {
+    const probe = await runProcess(deps.logger, 'docker', ['compose', 'version'], undefined, undefined, true);
+    composeV2 = probe.exitCode === 0;
+  }
+  const run = composeInvocation(composeV2, args.slice(1));
+  return (await runProcess(deps.logger, run.cmd, run.args, cwd, token)).exitCode;
+}
+
+/** Start a program and leave it running (Docker Desktop on Windows). */
+function launchDetached(logger: Logger, cmd: string, args: string[]): void {
+  logger.info(`$ ${cmd} ${args.join(' ')}  (detached)`);
+  try {
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+    child.on('error', (err) => logger.warn(`could not start ${cmd}`, { message: err.message }));
+    child.unref();
+  } catch (err) {
+    logger.warn(`could not start ${cmd}`, { message: (err as Error).message });
+  }
 }
 
 async function dockerState(logger: Logger): Promise<DockerState> {
@@ -111,9 +144,15 @@ async function ensureDocker(
   if (state === 'running') {
     return true;
   }
+  if (state === 'no-permission') {
+    void vscode.window.showErrorMessage(dockerStartHint(process.platform, state));
+    return false;
+  }
   progress.report({ message: 'Starting Docker…' });
-  const launch = dockerLaunchCommand(process.platform);
-  if (launch) {
+  const launch = dockerLaunchCommand(process.platform, process.env);
+  if (launch?.detached) {
+    launchDetached(deps.logger, launch.cmd, launch.args);
+  } else if (launch) {
     await runProcess(deps.logger, launch.cmd, launch.args, undefined, token);
   }
   const deadline = Date.now() + 3 * 60 * 1000;
@@ -123,9 +162,12 @@ async function ensureDocker(
     if (state === 'running') {
       return true;
     }
+    if (state === 'no-permission') {
+      break;
+    }
   }
   if (!token.isCancellationRequested) {
-    void vscode.window.showErrorMessage('Docker did not start. Open Docker Desktop yourself, then run "Set Up Platform" again.');
+    void vscode.window.showErrorMessage(`Docker did not start. ${dockerStartHint(process.platform, state)}`);
   }
   return false;
 }
@@ -227,7 +269,18 @@ async function obtainPlatformFolder(
     () => undefined,
   );
   await vscode.workspace.fs.createDirectory(deps.context.globalStorageUri);
-  const result = await runProcess(deps.logger, 'git', ['clone', '--depth', '1', PLATFORM_REPO, target], undefined, token);
+  // The platform release made for this extension version; the default branch
+  // only when that tag does not exist (development builds).
+  const version = String(deps.context.extension.packageJSON.version ?? '');
+  let result = await runProcess(deps.logger, 'git', cloneArgs(version, target), undefined, token);
+  if (!result.spawnFailed && result.exitCode !== 0 && !token.isCancellationRequested) {
+    deps.logger.warn(`no platform tag ${platformTag(version)}; downloading the default branch instead`);
+    await vscode.workspace.fs.delete(vscode.Uri.file(target), { recursive: true, useTrash: false }).then(
+      () => undefined,
+      () => undefined,
+    );
+    result = await runProcess(deps.logger, 'git', cloneArgs(undefined, target), undefined, token);
+  }
   if (result.spawnFailed) {
     void vscode.window.showErrorMessage(
       'Git is needed to download the platform. Install Git, or download the repository yourself and choose "I already have it".',
@@ -388,26 +441,31 @@ export async function runStartup(deps: CommandDeps): Promise<void> {
     case 'start':
       await setUpPlatform(deps);
       return;
-    case 'offer-setup': {
-      const choice = await vscode.window.showInformationMessage(
-        'Run the Distributed Compute platform on this computer? One click: Docker builds and starts it, and VS Code connects.',
-        'Set Up Now',
-        'Use Another Master',
-        "Don't Ask Again",
-      );
-      if (choice === 'Set Up Now') {
-        await setUpPlatform(deps);
-      } else if (choice === 'Use Another Master') {
-        await vscode.commands.executeCommand('distributedCompute.configureMaster');
-      } else if (choice === "Don't Ask Again") {
-        await deps.context.globalState.update(DISMISSED_KEY, true);
-      }
+    case 'offer-setup':
+      // Not awaited: startup is done once the offer is shown; the answer may
+      // come much later, or never.
+      void offerSetup(deps);
       return;
-    }
     case 'none':
       if (settings.autoConnect) {
         await deps.connection.connect();
         deps.refreshAll();
       }
+  }
+}
+
+async function offerSetup(deps: CommandDeps): Promise<void> {
+  const choice = await vscode.window.showInformationMessage(
+    'Run the Distributed Compute platform on this computer? One click: Docker builds and starts it, and VS Code connects.',
+    'Set Up Now',
+    'Use Another Master',
+    "Don't Ask Again",
+  );
+  if (choice === 'Set Up Now') {
+    await setUpPlatform(deps);
+  } else if (choice === 'Use Another Master') {
+    await vscode.commands.executeCommand('distributedCompute.configureMaster');
+  } else if (choice === "Don't Ask Again") {
+    await deps.context.globalState.update(DISMISSED_KEY, true);
   }
 }

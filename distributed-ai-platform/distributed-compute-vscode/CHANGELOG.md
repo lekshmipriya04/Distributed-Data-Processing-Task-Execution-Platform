@@ -3,13 +3,10 @@
 All notable changes to the Distributed Compute extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.0.0]
+## [0.1.0] - 2026-10-17
 
-### Fixed
-- Executions that finished with errors, or were pending or cancelling, showed
-  the wrong state; the backend's states are now recognized.
-- A worker that could not be reached, or refused access, now shows the reason
-  instead of a generic error.
+First public release. Works on Windows, macOS and Linux (VS Code 1.90+);
+the platform itself runs in Docker.
 
 ### Added
 - Everything from the editor, no dashboard needed: **Add Compute Node** (host

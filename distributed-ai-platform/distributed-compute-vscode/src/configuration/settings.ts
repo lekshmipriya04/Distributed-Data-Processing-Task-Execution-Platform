@@ -11,6 +11,7 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 const SECTION = 'distributedCompute';
 const MIN_REFRESH_SECONDS = 5;
 export const DEFAULT_MASTER_URL = 'http://localhost:8090';
+export const DEFAULT_DASHBOARD_URL = 'http://localhost:3001';
 
 function cfg(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration(SECTION);
@@ -31,6 +32,8 @@ export interface Settings {
   platformPath: string;
   /** Start the local platform when VS Code opens, once it has been set up. */
   autoStartPlatform: boolean;
+  /** The web dashboard (docker compose serves it on FRONTEND_PORT, 3001). */
+  dashboardUrl: string;
 }
 
 export interface TrainingDefaults {
@@ -87,6 +90,7 @@ export function readSettings(): Settings {
     },
     platformPath: (c.get<string>('platformPath', '') ?? '').trim(),
     autoStartPlatform: c.get<boolean>('autoStartPlatform', true),
+    dashboardUrl: (c.get<string>('dashboardUrl', DEFAULT_DASHBOARD_URL) ?? '').trim() || DEFAULT_DASHBOARD_URL,
   };
 }
 

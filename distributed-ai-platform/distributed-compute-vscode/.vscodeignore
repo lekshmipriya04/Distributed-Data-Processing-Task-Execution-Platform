@@ -14,5 +14,8 @@ vitest.config.ts
 !dist/**
 dist/**/*.map
 docs/**
+e2e/**
+vitest.e2e.config.ts
+.vscode-test/**
 **/tsconfig.json
 **/.DS_Store

@@ -20,6 +20,7 @@ authorized-keys line.
 - [Architecture](distributed-ai-platform/docs/architecture.md)
 - [Connections, ports and protocols](distributed-ai-platform/docs/connections.md)
 - [API contract](distributed-ai-platform/docs/API_CONTRACT.md)
+- [Deployment plan (0.1.0)](distributed-ai-platform/docs/DEPLOYMENT.md)
 - [Project overview](distributed-ai-platform/project.md)
 
 ![Platform architecture](distributed-ai-platform/docs/architecture-overview.svg)
@@ -28,12 +29,12 @@ authorized-keys line.
 
 | Component | Port | What it does |
 |---|---:|---|
-| Web dashboard (`frontend/`) | 3000 | `/ssh` workers, `/execute` Task Executor, `/train` training (nginx; proxies `/api` to api-gateway) |
+| Web dashboard (`frontend/`) | 3001 | `/ssh` workers, `/execute` Task Executor, `/train` training (nginx; proxies `/api` to api-gateway) |
 | api-gateway | 8000 | Proxies `/api/v1/storage/*` and `/api/v1/ssh/*` |
 | storage-service | 8001 | Owner-scoped datasets (CSV/JSON, image ZIP → pixel CSV), bytes in HDFS, metadata in Postgres |
 | ssh-executor | 8011 | Onboarding, capability and runtime detection, sandboxed batches, leases, training, ONNX export |
 | extension-gateway (Go) | 8090 | API for the VS Code extension; forwards to ssh-executor with the user's JWT |
-| PostgreSQL 15 | 5432 | Metadata and state |
+| PostgreSQL 15 | 5433 (host) | Metadata and state |
 | HDFS (1 NameNode + 3 DataNodes) | 9000, 9870 | Dataset bytes |
 | `ssh-provider`, `ssh-provider-2` | 2222 (internal) | Throwaway test workers, `--profile dev` only |
 
@@ -113,7 +114,7 @@ make up            # or: make up-dev (adds two test SSH workers)
 folders are created on every start, so there is nothing else to run.
 
 Add workers with **Add Compute Node** in VS Code, or in the dashboard at
-http://localhost:3000 under **SSH Connection**. The master runs in Docker, so add this computer as
+http://localhost:3001 under **SSH Connection**. The master runs in Docker, so add this computer as
 `host.docker.internal`, not `localhost`.
 
 **Sign-in.** The platform is built to run on your own machine. With the

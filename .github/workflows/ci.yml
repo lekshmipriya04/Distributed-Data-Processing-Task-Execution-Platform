@@ -88,8 +88,14 @@ jobs:
         npm test
         npm run build
 
+  # The extension on every desktop OS: unit tests, the packaged .vsix, and a
+  # real VS Code that loads it (offline smoke test).
   extension:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: distributed-ai-platform/distributed-compute-vscode
@@ -99,16 +105,91 @@ jobs:
     - name: Set up Node
       uses: actions/setup-node@v4
       with:
-        node-version: "20"
+        node-version: "22"
         cache: "npm"
         cache-dependency-path: distributed-ai-platform/distributed-compute-vscode/package-lock.json
 
-    - name: Install, lint, test and build
+    - name: Install, lint, test and package
       run: |
         npm ci
         npm run lint
         npm test
-        npm run build:prod
+        npx vsce package --out distributed-compute.vsix
+
+    - name: Smoke test in VS Code (Linux)
+      if: runner.os == 'Linux'
+      run: xvfb-run -a npm run test:vscode
+
+    - name: Smoke test in VS Code (macOS, Windows)
+      if: runner.os != 'Linux'
+      run: npm run test:vscode
+
+    - name: Keep the .vsix
+      if: runner.os == 'Linux'
+      uses: actions/upload-artifact@v4
+      with:
+        name: distributed-compute-vsix
+        path: distributed-ai-platform/distributed-compute-vscode/distributed-compute.vsix
+
+  # The whole platform in Docker with the two test SSH workers, three users on
+  # three gateway ports, and VS Code driving a real run.
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [extension, go, python]
+    defaults:
+      run:
+        working-directory: distributed-ai-platform
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+        cache: "npm"
+        cache-dependency-path: distributed-ai-platform/distributed-compute-vscode/package-lock.json
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: distributed-ai-platform/services/extension-gateway/go.mod
+        cache: false
+
+    - name: Start the platform and the test workers
+      run: |
+        cp config/.env.example config/.env
+        docker compose --profile dev up -d --build --wait --wait-timeout 600
+        # The test workers install python3 on first start.
+        for w in ssh-provider ssh-provider-2; do
+          for i in $(seq 1 60); do docker exec $w python3 --version && break; sleep 5; done
+        done
+
+    - name: Start two more gateways (ports 8091, 8092)
+      working-directory: distributed-ai-platform/services/extension-gateway
+      run: |
+        go build -o "$RUNNER_TEMP/egw" .
+        for p in 8091 8092; do
+          LISTEN_ADDR=127.0.0.1:$p UPSTREAM_URL=http://127.0.0.1:8011 STORAGE_URL=http://127.0.0.1:8001 \
+            JWT_SECRET=change_me_in_production ENVIRONMENT=development \
+            nohup "$RUNNER_TEMP/egw" > "$RUNNER_TEMP/egw-$p.log" 2>&1 &
+        done
+        for p in 8091 8092; do
+          for i in $(seq 1 30); do curl -fs "http://127.0.0.1:$p/health" && break; sleep 1; done
+        done
+
+    - name: Multi-user end-to-end tests
+      working-directory: distributed-ai-platform/distributed-compute-vscode
+      run: |
+        npm ci
+        npm run test:e2e
+
+    - name: VS Code against the gateway on port 8091
+      working-directory: distributed-ai-platform/distributed-compute-vscode
+      run: DC_E2E_URL=http://127.0.0.1:8091 xvfb-run -a npm run test:vscode
+
+    - name: Logs on failure
+      if: failure()
+      run: |
+        docker compose logs --tail 200 ssh-executor extension-gateway storage-service
+        cat "$RUNNER_TEMP"/egw-*.log || true
 
   go:
     runs-on: ubuntu-latest
@@ -124,7 +205,9 @@ jobs:
         go-version-file: distributed-ai-platform/services/extension-gateway/go.mod
         cache: false
 
-    - name: Vet and test
+    - name: Vet, test and build for every OS
       run: |
         go vet ./...
         go test ./...
+        for os in linux darwin windows; do GOOS=$os GOARCH=amd64 go build -o /dev/null . ; done
+        GOOS=darwin GOARCH=arm64 go build -o /dev/null .

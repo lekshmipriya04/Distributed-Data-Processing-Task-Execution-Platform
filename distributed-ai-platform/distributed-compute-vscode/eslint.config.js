@@ -4,7 +4,7 @@ const tseslint = require('typescript-eslint');
 
 module.exports = tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**', 'esbuild.js', 'eslint.config.js'],
+    ignores: ['dist/**', 'node_modules/**', '.vscode-test/**', 'e2e/vscode/**', 'esbuild.js', 'eslint.config.js'],
   },
   ...tseslint.configs.recommended,
   {

@@ -2,7 +2,7 @@
   "name": "distributed-compute",
   "displayName": "Distributed Compute",
   "description": "Run code and train models on your own machines over SSH, entirely from VS Code: one-click local setup, add and manage workers, run any language in parallel with live output, and train built-in, custom or Spark models.",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "publisher": "aaron43210",
   "author": "AARON R, M R LEKSHMI PRIYA, ALEENA VJ",
   "contributors": [
@@ -238,6 +238,11 @@
             "default": true,
             "description": "After the platform has been set up on this computer, start its Docker containers (and Docker Desktop, if needed) when VS Code opens, then connect."
           },
+          "distributedCompute.dashboardUrl": {
+            "type": "string",
+            "default": "http://localhost:3001",
+            "description": "Address of the web dashboard, opened by \"Open Dashboard\". docker compose serves it on FRONTEND_PORT (3001 by default)."
+          },
           "distributedCompute.platformPath": {
             "type": "string",
             "default": "",
@@ -305,12 +310,15 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p ./",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:vscode": "npm run compile && node ./e2e/vscode/run.js",
     "vscode:prepublish": "npm run build:prod",
     "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "^2.26.0",
     "esbuild": "^0.21.0",
     "eslint": "^9.0.0",

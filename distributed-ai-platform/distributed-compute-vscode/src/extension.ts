@@ -20,7 +20,14 @@ let output: vscode.OutputChannel;
 let statusBar: vscode.StatusBarItem;
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
-export function activate(context: vscode.ExtensionContext): void {
+/** Returned from activate(); read by the VS Code smoke test (e2e/vscode). */
+export interface DistributedComputeApi {
+  connectionState(): string;
+  /** Resolves after the startup check (connect / start / offer setup) ran. */
+  startup: Promise<void>;
+}
+
+export function activate(context: vscode.ExtensionContext): DistributedComputeApi {
   output = vscode.window.createOutputChannel('Distributed Compute');
   context.subscriptions.push(output);
 
@@ -94,9 +101,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Connect to a running local platform, start it if it was set up before,
   // or offer the one-click setup; remote masters follow autoConnect.
-  void runStartup(deps).catch((err) => logger.error('startup failed', { message: (err as Error).message }));
+  const startup = runStartup(deps).catch((err) => logger.error('startup failed', { message: (err as Error).message }));
 
   logger.info('Distributed Compute extension activated.');
+  return { connectionState: () => connection.snapshot().state, startup };
 }
 
 function renderStatusBar(state: string, detail: string | undefined): void {

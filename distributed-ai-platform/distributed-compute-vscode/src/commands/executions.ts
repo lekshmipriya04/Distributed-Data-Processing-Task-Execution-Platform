@@ -14,6 +14,7 @@ import {
   resultFileName,
   type ExecutionTasks,
 } from '../models/onboarding';
+import { normalizeLineEndings } from '../models/platform';
 import type { CommandDeps } from './register';
 
 export const LOG_SCHEME = 'distributed-logs';
@@ -314,7 +315,7 @@ export async function runInParallel(deps: CommandDeps, logs: ExecutionLogProvide
     return;
   }
   const editor = vscode.window.activeTextEditor;
-  const code = editor?.document.getText() ?? '';
+  const code = normalizeLineEndings(editor?.document.getText() ?? '');
   if (!editor || code.trim() === '') {
     void vscode.window.showWarningMessage('Open the file to run first.');
     return;

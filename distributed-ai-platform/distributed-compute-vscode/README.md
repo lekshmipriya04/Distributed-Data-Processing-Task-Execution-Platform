@@ -108,13 +108,26 @@ npm install
 npm run compile      # typecheck + esbuild bundle
 npm run watch        # rebuild on change
 npm run lint
-npm test             # vitest
+npm test             # unit tests (vitest)
+npm run test:vscode  # real VS Code loads the extension (offline smoke test)
 npm run package      # vsce package (Marketplace artifact)
 ```
 
 Press F5 to launch the Extension Development Host. Point `masterUrl` at a local
 backend or a mock server — never run the test suite against a real cluster or
 with production credentials.
+
+**End-to-end tests** need the platform with its two test workers
+(`make up-dev`) and two extra gateways on ports 8091 and 8092 (see the `e2e`
+job in `.github/workflows/ci.yml`). They act as three users on three ports and
+cover sign-in, isolation between users, onboarding, every node action,
+parallel runs on two workers, failures, retry, cancel, timeouts, training and
+removal:
+
+```bash
+npm run test:e2e
+DC_E2E_URL=http://127.0.0.1:8091 npm run test:vscode   # VS Code runs a file for real
+```
 
 ## Authors
 

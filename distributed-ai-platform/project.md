@@ -140,7 +140,7 @@ age, shard weights and `max_train_rows`.
 # make up creates config/.env from config/.env.example on first use;
 # set real secrets there for non-local use.
 make up            # or: make up-dev   (adds two throwaway SSH providers)
-                   # dashboard: http://localhost:3000
+                   # dashboard: http://localhost:3001
 python generate_token.py --sub alice    # token for production mode / REST clients
 
 pytest tests -q                         # Python unit tests

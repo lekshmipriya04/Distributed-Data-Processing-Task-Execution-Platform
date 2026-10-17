@@ -258,7 +258,7 @@ services:
         condition: service_healthy
 
   # Web dashboard: nginx serves the built SPA and proxies /api + /health to
-  # api-gateway on the same origin. Open http://localhost:3000.
+  # api-gateway on the same origin. Open http://localhost:3001 (FRONTEND_PORT).
   frontend:
     build:
       context: frontend

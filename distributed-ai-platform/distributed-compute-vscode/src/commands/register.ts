@@ -14,6 +14,7 @@ import { gpuPresetGb, hasGpu, type ComputeNode, type NodeSliceRequest } from '..
 import { buildDefault, validateConfig } from '../configuration/projectConfig';
 import { disableSparkRay, enableSparkRay } from './engines';
 import { setUpPlatform, stopPlatform } from './platform';
+import { normalizeLineEndings } from '../models/platform';
 import { addNode, refreshNodeCapabilities, removeNode, rotateNodeKey, setDraining, testNode } from './nodes';
 import {
   ExecutionLogProvider,
@@ -51,7 +52,7 @@ export function registerCommands(deps: CommandDeps): void {
 
   reg('distributedCompute.setUpPlatform', () => setUpPlatform(deps));
   reg('distributedCompute.stopPlatform', () => stopPlatform(deps));
-  reg('distributedCompute.openDashboard', () => vscode.env.openExternal(vscode.Uri.parse('http://localhost:3000')));
+  reg('distributedCompute.openDashboard', () => vscode.env.openExternal(vscode.Uri.parse(readSettings().dashboardUrl)));
   reg('distributedCompute.connect', () => doConnect(deps));
   reg('distributedCompute.disconnect', () => {
     deps.connection.disconnect();
@@ -437,7 +438,7 @@ async function runActiveFile(
     void vscode.window.showWarningMessage(`A ${runtime} submission is already in progress.`);
     return;
   }
-  const code = editor.document.getText();
+  const code = normalizeLineEndings(editor.document.getText());
   if (code.trim() === '') {
     void vscode.window.showWarningMessage('The active file is empty.');
     return;
