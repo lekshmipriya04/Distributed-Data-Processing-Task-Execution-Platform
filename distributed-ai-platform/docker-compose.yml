@@ -22,7 +22,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-platform_db}
     # Bound to loopback so the database is not reachable from the LAN.
     ports:
-      - "127.0.0.1:5432:5432"
+      - "${POSTGRES_PORT:-127.0.0.1:5433}:5432"
     networks:
       - platform-net
     volumes:
@@ -40,6 +40,7 @@ services:
   namenode:
     image: apache/hadoop:3
     container_name: namenode
+    user: root
     environment:
       - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
     command: >
@@ -65,8 +66,10 @@ services:
   hdfs-init:
     image: apache/hadoop:3
     container_name: hdfs-init
+    user: root
     environment:
       - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+      - HADOOP_USER_NAME=root
     command: >
       bash -c "hdfs dfsadmin -safemode wait &&
       hdfs dfs -mkdir -p /platform/raw /platform/processed /platform/models /platform/logs &&
@@ -261,7 +264,7 @@ services:
       context: frontend
     container_name: frontend
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:3000:80"
+      - "${BIND_ADDR:-127.0.0.1}:${FRONTEND_PORT:-3001}:80"
     networks:
       - platform-net
     restart: unless-stopped
