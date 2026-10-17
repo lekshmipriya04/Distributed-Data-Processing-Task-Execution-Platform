@@ -35,7 +35,7 @@ import {
 } from '../api/ssh';
 
 const INPUT_CLS =
-  'w-full border border-slate-300 rounded-lg p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 bg-white';
+  'w-full border border-slate-300 rounded-lg p-2 text-sm outline-hidden focus:ring-2 focus:ring-blue-500 bg-white';
 
 type Step = 'form' | 'confirm' | 'manual' | 'detected';
 type Notice = { tone: 'error' | 'warning'; title: string; body: string } | null;
@@ -124,7 +124,7 @@ function GpuSliceControl({
               const v = parseFloat(e.target.value);
               onChange(Number.isFinite(v) ? Math.max(0, Math.min(total, v)) : 0);
             }}
-            className="w-16 border border-slate-300 rounded px-1 py-0.5"
+            className="w-16 border border-slate-300 rounded-sm px-1 py-0.5"
           />
           GB
         </label>

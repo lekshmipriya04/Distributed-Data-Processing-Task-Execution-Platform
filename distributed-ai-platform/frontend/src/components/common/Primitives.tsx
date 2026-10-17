@@ -26,7 +26,7 @@ export function StatusBadge({ status }: { status: JobStatus | string }) {
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
-    <div className={`bg-white border border-slate-200/80 rounded-2xl p-6 shadow-sm ${className}`}>
+    <div className={`bg-white border border-slate-200/80 rounded-2xl p-6 shadow-xs ${className}`}>
       {children}
     </div>
   );
@@ -52,7 +52,7 @@ export function PrimaryButton({
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 transition-colors rounded-lg text-white font-medium text-sm shadow-sm hover:shadow disabled:opacity-40 disabled:cursor-not-allowed"
+      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 transition-colors rounded-lg text-white font-medium text-sm shadow-xs hover:shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
     >
       {children}
     </button>
@@ -161,7 +161,7 @@ export function TagInput({
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         placeholder={placeholder ?? 'type or paste a comma-separated list'}
-        className="flex-1 min-w-[120px] bg-transparent outline-none text-slate-900 text-sm placeholder:text-slate-400"
+        className="flex-1 min-w-[120px] bg-transparent outline-hidden text-slate-900 text-sm placeholder:text-slate-400"
       />
     </div>
   );

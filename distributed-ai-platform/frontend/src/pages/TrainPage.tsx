@@ -17,7 +17,7 @@ import type { Dataset } from '../types';
 const EMPTY_SPLIT: QuickSplitConfig = { targetColumn: '', featureColumns: [] };
 const TERMINAL_TRAIN = ['completed', 'failed'];
 const NUM_INPUT =
-  'w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm';
+  'w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-hidden text-sm';
 
 const INITIAL_MODEL: ModelChoice = {
   modelType: 'logistic_regression',
@@ -278,7 +278,7 @@ export function TrainPage() {
               <span className="text-xs text-slate-500 font-medium block mb-1">
                 {engine === 'spark_ray' ? 'Shards (Ray trains them in parallel on the master)' : 'Cores on the master'}
               </span>
-              <NumberField value={localCores} min={1} max={64} step={1} onChange={setLocalCores} className="w-40 bg-white rounded-lg px-3 py-2 text-slate-900 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm" />
+              <NumberField value={localCores} min={1} max={64} step={1} onChange={setLocalCores} className="w-40 bg-white rounded-lg px-3 py-2 text-slate-900 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-hidden text-sm" />
             </label>
           )}
           <div className="mt-4 max-w-xs">

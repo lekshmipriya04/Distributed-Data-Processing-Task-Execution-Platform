@@ -53,3 +53,27 @@ def assert_secure_secrets(
             + "; ".join(problems)
             + ". Set long random values in config/.env."
         )
+
+
+# The database password shipped in config/.env.example and docker-compose.yml.
+INSECURE_DATABASE_PASSWORDS = frozenset({"", "platform_secret", "postgres", "password"})
+
+
+def assert_secure_database_url(environment: Union[str, Enum], database_url: str) -> None:
+    """Outside development, refuse the example database password.
+
+    The value is never echoed. Unlike the signing secrets, no minimum length
+    is imposed: the password is chosen by whoever runs PostgreSQL.
+    """
+    env = environment.value if isinstance(environment, Enum) else str(environment)
+    if env.strip().lower() == "development":
+        return
+    from urllib.parse import urlsplit
+
+    password = urlsplit(database_url).password or ""
+    if password in INSECURE_DATABASE_PASSWORDS:
+        raise RuntimeError(
+            f"Refusing to start with ENVIRONMENT={env}: the database password in "
+            "DATABASE_URL is empty or the example value. Set POSTGRES_PASSWORD and "
+            "DATABASE_URL in config/.env to a long random password."
+        )

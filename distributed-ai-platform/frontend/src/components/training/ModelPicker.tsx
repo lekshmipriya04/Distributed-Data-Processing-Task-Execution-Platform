@@ -35,7 +35,7 @@ const FAMILY_LABEL: Record<SparkModelInfo['family'], string> = {
 };
 
 const INPUT =
-  'w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm';
+  'w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-hidden text-sm';
 
 export function ModelPicker({ value, onChange, sparkAvailable, engine }: Props) {
   const [sparkModels, setSparkModels] = useState<SparkModelInfo[]>([]);
@@ -181,7 +181,7 @@ export function ModelPicker({ value, onChange, sparkAvailable, engine }: Props) 
             spellCheck={false}
             rows={14}
             aria-label="Model code"
-            className="w-full font-mono text-xs leading-relaxed bg-[#1e1e1e] text-slate-100 rounded-lg p-3 outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full font-mono text-xs leading-relaxed bg-[#1e1e1e] text-slate-100 rounded-lg p-3 outline-hidden focus:ring-2 focus:ring-blue-500"
           />
           <p className="text-xs text-slate-500">
             Define <code className="font-mono">train(params, rows, config)</code>, and optionally <code className="font-mono">init(config)</code> and{' '}

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { KeyRound, LogOut, UserRound } from 'lucide-react';
 import { AUTH_REQUIRED_EVENT, clearToken, errorMessage, getToken, isExpired, setToken, tokenInfo } from '../../api/client';
 import { sshApi } from '../../api/ssh';
@@ -94,10 +95,12 @@ export function AccountMenu() {
         data-testid="account-button"
       >
         <UserRound size={15} />
-        <span className="max-w-[10rem] truncate">{info ? (expired ? `${info.sub} (expired)` : info.sub) : 'Local user'}</span>
+        <span className="max-w-40 truncate">{info ? (expired ? `${info.sub} (expired)` : info.sub) : 'Local user'}</span>
       </button>
 
-      {open && (
+      {/* Portal: the sticky header's backdrop blur would otherwise become the
+          containing block of this fixed overlay and clip it. */}
+      {open && createPortal(
         <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="account-title">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md border border-slate-200 shadow-xl">
             <h3 id="account-title" className="text-lg font-semibold text-slate-900 mb-1 flex items-center gap-2">
@@ -112,7 +115,7 @@ export function AccountMenu() {
             ) : (
               <p className="text-sm text-slate-600 mb-4">
                 You are the local user. On a shared or production server, paste the token your administrator created with{' '}
-                <code className="font-mono text-xs bg-slate-100 rounded px-1">python generate_token.py --sub &lt;name&gt;</code>.
+                <code className="font-mono text-xs bg-slate-100 rounded-sm px-1">python generate_token.py --sub &lt;name&gt;</code>.
               </p>
             )}
             <label className="text-sm block">
@@ -129,7 +132,7 @@ export function AccountMenu() {
                 autoComplete="off"
                 aria-label="Token"
                 placeholder="eyJhbGciOiJIUzI1NiIs…"
-                className="w-full font-mono text-xs border border-slate-300 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full font-mono text-xs border border-slate-300 rounded-lg px-3 py-2 outline-hidden focus:ring-2 focus:ring-blue-500"
               />
             </label>
             {error && (
@@ -151,7 +154,8 @@ export function AccountMenu() {
               </PrimaryButton>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

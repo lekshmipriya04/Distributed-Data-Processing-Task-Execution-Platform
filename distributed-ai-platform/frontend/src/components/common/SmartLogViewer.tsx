@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import Ansi from 'ansi-to-react';
+import { AnsiText } from './ansi';
 import { AlertTriangle, Check, Clock, Copy, Search, TimerOff } from 'lucide-react';
 import { extractKeyError, filterLines, stripAnsi, type KeyError } from './logParsing';
 
@@ -57,7 +57,7 @@ function CopyButton({ text, label }: { text: string; label: string }) {
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
     >
       {state === 'done' ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
       {state === 'done' ? 'Copied' : state === 'failed' ? 'Copy failed' : label}
@@ -139,7 +139,7 @@ export function SmartLogViewer({ stdout, stderr, exitCode, status, durationMs, l
               </span>
             )}
           </div>
-          <p className="mt-1 font-mono text-sm text-rose-900 break-words">{keyError.message}</p>
+          <p className="mt-1 font-mono text-sm text-rose-900 wrap-break-word">{keyError.message}</p>
         </div>
       )}
 
@@ -155,7 +155,7 @@ export function SmartLogViewer({ stdout, stderr, exitCode, status, durationMs, l
               disabled={t.disabled}
               onClick={() => setTab(t.id)}
               className={`rounded px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40 ${
-                tab === t.id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                tab === t.id ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               {t.label}
@@ -169,7 +169,7 @@ export function SmartLogViewer({ stdout, stderr, exitCode, status, durationMs, l
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Filter lines"
             aria-label="Filter log lines"
-            className="w-44 rounded-md border border-slate-300 bg-white py-1 pl-7 pr-2 text-xs outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-44 rounded-md border border-slate-300 bg-white py-1 pl-7 pr-2 text-xs outline-hidden focus:ring-2 focus:ring-blue-500"
           />
         </label>
         {query && <span className="text-xs text-slate-500 tabular-nums">{shownLines} matching</span>}
@@ -185,8 +185,8 @@ export function SmartLogViewer({ stdout, stderr, exitCode, status, durationMs, l
               {tab === 'all' && sections.length > 1 && (
                 <div className="mb-1 mt-2 first:mt-0 text-[10px] uppercase tracking-wider text-slate-500">{s.kind}</div>
               )}
-              <pre className="whitespace-pre-wrap break-words">
-                <Ansi>{s.lines.join('\n')}</Ansi>
+              <pre className="whitespace-pre-wrap wrap-break-word">
+                <AnsiText>{s.lines.join('\n')}</AnsiText>
               </pre>
             </div>
           ))

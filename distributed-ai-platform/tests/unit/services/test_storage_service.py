@@ -276,3 +276,17 @@ def test_routes_honour_on_behalf_of_for_internal_tokens(api):
     client.get(f"/api/v1/storage/datasets/{uuid.uuid4()}", headers=headers)
     client.get(f"/api/v1/storage/datasets/{uuid.uuid4()}/download", headers=headers)
     assert fake.calls == [("get", "bob"), ("download", "bob")]
+
+
+def test_production_refuses_the_example_database_password():
+    from shared.common.security import assert_secure_database_url
+
+    example = "postgresql://platform:platform_secret@postgres:5432/platform_db"
+    assert_secure_database_url("development", example)  # allowed locally
+    for env in ("production", "staging"):
+        with pytest.raises(RuntimeError) as err:
+            assert_secure_database_url(env, example)
+        assert "platform_secret" not in str(err.value)  # never echoed
+        with pytest.raises(RuntimeError):
+            assert_secure_database_url(env, "postgresql://platform@postgres/platform_db")
+    assert_secure_database_url("production", "postgresql://platform:Xk2v9QpLr7wE4tYz@postgres/platform_db")

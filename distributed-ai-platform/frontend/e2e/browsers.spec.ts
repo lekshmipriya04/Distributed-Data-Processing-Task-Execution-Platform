@@ -89,6 +89,12 @@ test('asks for sign-in when the server requires it', async ({ page }) => {
   await page.goto('/ssh');
   const dialog = page.getByRole('dialog');
   await expect(dialog).toContainText('This server requires sign-in');
+  // The dialog is fully on screen, above everything, wherever it opens from.
+  const box = await dialog.locator('h3').boundingBox();
+  expect(box?.y ?? -1).toBeGreaterThan(0);
+  const viewport = page.viewportSize();
+  const panel = await dialog.locator('> div').boundingBox();
+  expect((panel?.y ?? 0) + (panel?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
 });

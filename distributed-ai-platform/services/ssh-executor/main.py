@@ -13,6 +13,7 @@ from ml.engines import list_engines, shutdown_engines
 from security import enforce_secrets
 from shared.common.error_handlers import generic_exception_handler, platform_exception_handler
 from shared.common.exceptions import PlatformException
+from shared.common.security import assert_secure_database_url
 from shared.common.logging_config import configure_logging
 from shared.common.middleware import LoggingMiddleware, MetricsMiddleware, RequestIDMiddleware
 
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
     )
     # Refuse to run with placeholder secrets outside development.
     enforce_secrets(settings)
+    assert_secure_database_url(settings.environment, settings.database_url)
     db_manager = get_db_manager()
     await db_manager.initialize()
     await db_manager.create_tables()

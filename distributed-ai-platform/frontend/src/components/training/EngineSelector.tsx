@@ -80,7 +80,7 @@ export function EngineSelector({ value, onChange, onSparkAvailable }: Props) {
               aria-checked={active}
               disabled={!available}
               onClick={() => onChange(id)}
-              className={`text-left p-4 rounded-xl border transition-all focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+              className={`text-left p-4 rounded-xl border transition-all focus:outline-hidden focus:ring-2 focus:ring-blue-500 ${
                 active
                   ? 'bg-blue-50/70 border-blue-500 ring-1 ring-blue-500/20'
                   : available
@@ -109,7 +109,7 @@ export function EngineSelector({ value, onChange, onSparkAvailable }: Props) {
         <p className="mt-3 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
           Spark + Ray is optional (about 1 GB on the master; missing: {spark.missing.join(', ')}). To add it, run{' '}
           <span className="font-medium">Distributed Compute: Enable Spark + Ray Engine</span> in VS Code, or{' '}
-          <code className="font-mono bg-white border border-slate-200 rounded px-1">make enable-spark-ray</code> in the platform folder, then press
+          <code className="font-mono bg-white border border-slate-200 rounded-sm px-1">make enable-spark-ray</code> in the platform folder, then press
           Check again.
         </p>
       )}

@@ -46,7 +46,7 @@ function Layout() {
 
   return (
     <div className="flex flex-col md:flex-row h-screen bg-slate-50 text-slate-800 font-sans selection:bg-blue-500/20">
-      <aside className="hidden md:flex w-64 shrink-0 bg-white border-r border-slate-200 p-6 flex-col shadow-sm z-10">
+      <aside className="hidden md:flex w-64 shrink-0 bg-white border-r border-slate-200 p-6 flex-col shadow-xs z-10">
         <Brand />
         <nav className="flex-1 space-y-2" aria-label="Main">
           {NAV.map((item) => (
@@ -142,7 +142,7 @@ function NavItem({ icon, label, to, active }: { icon: React.ReactNode; label: st
       to={to}
       className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group ${
         active
-          ? 'bg-blue-50 text-blue-600 font-semibold shadow-sm border border-blue-100'
+          ? 'bg-blue-50 text-blue-600 font-semibold shadow-xs border border-blue-100'
           : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
       }`}
     >

@@ -21,7 +21,7 @@ import {
 
 const FILENAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
 const INPUT_CLS =
-  'w-full border border-slate-300 rounded-lg px-3 py-2 bg-white outline-none focus:ring-2 focus:ring-blue-500 text-sm';
+  'w-full border border-slate-300 rounded-lg px-3 py-2 bg-white outline-hidden focus:ring-2 focus:ring-blue-500 text-sm';
 
 const isTerminal = (status: string) => TERMINAL_BATCH_STATUSES.includes(status);
 
@@ -298,9 +298,9 @@ export function TaskExecutorPage() {
                           disabled={!available}
                           onClick={() => changeRuntime(r.id)}
                           title={available ? `${r.name}${r.id === 'custom' ? '' : ` · ${r.available_node_ids.length} worker(s)`}` : `${r.name} was not found on your workers`}
-                          className={`rounded-full border px-3 py-1 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                          className={`rounded-full border px-3 py-1 text-sm transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-500 ${
                             active
-                              ? 'border-blue-600 bg-blue-600 text-white shadow-sm'
+                              ? 'border-blue-600 bg-blue-600 text-white shadow-xs'
                               : available
                                 ? 'border-slate-300 bg-white text-slate-700 hover:border-blue-400 hover:text-blue-700'
                                 : 'border-dashed border-slate-200 bg-slate-50 text-slate-500 cursor-not-allowed'
@@ -422,7 +422,7 @@ export function TaskExecutorPage() {
             </label>
             <textarea
               id="exec-code"
-              className="w-full border border-slate-300 rounded-lg p-3 bg-slate-50 font-mono text-sm h-64 outline-none focus:ring-2 focus:ring-blue-500 shadow-inner"
+              className="w-full border border-slate-300 rounded-lg p-3 bg-slate-50 font-mono text-sm h-64 outline-hidden focus:ring-2 focus:ring-blue-500 shadow-inner"
               value={code}
               spellCheck={false}
               onChange={(e) => setCode(e.target.value)}
@@ -434,7 +434,7 @@ export function TaskExecutorPage() {
             </label>
             <textarea
               id="exec-inputs"
-              className="w-full border border-slate-300 rounded-lg p-3 font-mono text-sm h-64 outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full border border-slate-300 rounded-lg p-3 font-mono text-sm h-64 outline-hidden focus:ring-2 focus:ring-blue-500"
               value={inputsText}
               spellCheck={false}
               onChange={(e) => setInputsText(e.target.value)}

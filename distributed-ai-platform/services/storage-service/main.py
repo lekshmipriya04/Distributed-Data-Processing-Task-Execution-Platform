@@ -12,7 +12,7 @@ from shared.common.error_handlers import generic_exception_handler, platform_exc
 from shared.common.exceptions import PlatformException
 from shared.common.logging_config import configure_logging
 from shared.common.middleware import LoggingMiddleware, MetricsMiddleware, RequestIDMiddleware
-from shared.common.security import assert_secure_secrets
+from shared.common.security import assert_secure_database_url, assert_secure_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ async def lifespan(app: FastAPI):
     settings = get_storage_settings()
     configure_logging(level=settings.log_level, service_name=settings.service_name, environment=settings.environment.value)
     assert_secure_secrets(settings.environment, JWT_SECRET=settings.jwt_secret)
+    assert_secure_database_url(settings.environment, settings.database_url)
 
     db_manager = get_db_manager()
     await db_manager.initialize()

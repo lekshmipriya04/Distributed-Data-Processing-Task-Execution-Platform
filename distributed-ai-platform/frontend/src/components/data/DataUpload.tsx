@@ -45,7 +45,7 @@ function saveColumnCache(cache: Record<string, string[]>) {
 }
 
 const INPUT_CLS =
-  'w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm';
+  'w-full bg-white rounded-lg px-3 py-2 border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-hidden text-sm';
 
 export function DataUpload({
   selectedDataset,
