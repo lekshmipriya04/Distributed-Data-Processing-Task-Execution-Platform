@@ -2,12 +2,15 @@
   "name": "distributed-compute",
   "displayName": "Distributed Compute",
   "description": "Developer control interface for the Distributed Data Processing & Task Execution Platform — manage compute nodes, submit any-language executions to your own workers, and monitor them without leaving VS Code.",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "publisher": "REPLACE_WITH_PUBLISHER",
   "license": "SEE LICENSE IN LICENSE",
   "repository": { "type": "git", "url": "https://example.com/REPLACE/distributed-compute-vscode" },
+  "bugs": { "url": "https://example.com/REPLACE/distributed-compute-vscode/issues" },
+  "homepage": "https://example.com/REPLACE/distributed-compute-vscode#readme",
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Other", "Machine Learning", "Visualization"],
+  "keywords": ["distributed", "compute", "ssh", "remote execution", "machine learning"],
   "icon": "media/icons/distributed-compute.png",
   "activationEvents": [
     "onStartupFinished",
@@ -80,6 +83,20 @@
       { "fileMatch": "distributed.json", "url": "./schemas/distributed.schema.json" }
     ],
     "menus": {
+      "commandPalette": [
+        { "command": "distributedCompute.addNode", "when": "false" },
+        { "command": "distributedCompute.testNode", "when": "false" },
+        { "command": "distributedCompute.drainNode", "when": "false" },
+        { "command": "distributedCompute.resumeNode", "when": "false" },
+        { "command": "distributedCompute.removeNode", "when": "false" },
+        { "command": "distributedCompute.viewNode", "when": "false" },
+        { "command": "distributedCompute.configureSlice", "when": "false" },
+        { "command": "distributedCompute.submitTraining", "when": "false" },
+        { "command": "distributedCompute.viewLogs", "when": "false" },
+        { "command": "distributedCompute.cancelExecution", "when": "false" },
+        { "command": "distributedCompute.retryExecution", "when": "false" },
+        { "command": "distributedCompute.retrieveResults", "when": "false" }
+      ],
       "view/title": [
         { "command": "distributedCompute.refreshNodes", "when": "view == distributedCompute.nodes", "group": "navigation" },
         { "command": "distributedCompute.addNode", "when": "view == distributedCompute.nodes", "group": "navigation" },
@@ -104,8 +121,9 @@
     }
   },
   "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "compile": "npm run typecheck && node ./esbuild.js",
-    "build:prod": "npm run typecheck && node ./esbuild.js --production",
+    "build:prod": "npm run clean && npm run typecheck && node ./esbuild.js --production",
     "watch": "node ./esbuild.js --watch",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p ./",
