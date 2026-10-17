@@ -2,8 +2,8 @@
 //
 // Wires the connection manager, SecretStorage-backed token store, typed gateway
 // client, the tree views (Compute Nodes, Jobs, Executions, Training Runs), the status
-// bar, and all commands. Nothing contacts a backend until the user configures a
-// master URL and connects, so activation is always clean and offline-safe.
+// bar, and all commands. On start it only probes a local master's /health; it
+// starts Docker containers only for a platform the user set up here before.
 
 import * as vscode from 'vscode';
 import { ConnectionManager } from './connection/connectionManager';
@@ -13,7 +13,8 @@ import { readSettings } from './configuration/settings';
 import { NodeTreeProvider } from './providers/nodeTreeProvider';
 import { ExecutionTreeProvider } from './providers/executionTreeProvider';
 import { TrainingTreeProvider } from './providers/trainingTreeProvider';
-import { registerCommands } from './commands/register';
+import { registerCommands, type CommandDeps } from './commands/register';
+import { runStartup } from './commands/platform';
 
 let output: vscode.OutputChannel;
 let statusBar: vscode.StatusBarItem;
@@ -70,11 +71,13 @@ export function activate(context: vscode.ExtensionContext): void {
       } else {
         renderStatusBar(snap.state, undefined);
       }
+      void vscode.commands.executeCommand('setContext', 'distributedCompute.connected', snap.state === 'connected');
       refreshAll();
     }),
   );
 
-  registerCommands({ context, connection, tokens, logger, refreshAll });
+  const deps: CommandDeps = { context, connection, tokens, logger, refreshAll };
+  registerCommands(deps);
 
   // React to settings changes: log level, refresh interval.
   context.subscriptions.push(
@@ -89,9 +92,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   restartPolling(connection, refreshAll, logger);
 
-  if (readSettings().autoConnect) {
-    void vscode.commands.executeCommand('distributedCompute.connect');
-  }
+  // Connect to a running local platform, start it if it was set up before,
+  // or offer the one-click setup; remote masters follow autoConnect.
+  void runStartup(deps).catch((err) => logger.error('startup failed', { message: (err as Error).message }));
 
   logger.info('Distributed Compute extension activated.');
 }
@@ -104,7 +107,7 @@ function renderStatusBar(state: string, detail: string | undefined): void {
     statusBar.text = '$(loading~spin) DCP: Connecting…';
   } else {
     statusBar.text = '$(debug-disconnect) DCP: Disconnected';
-    statusBar.tooltip = 'Distributed Compute — click to connect';
+    statusBar.tooltip = 'Distributed Compute — not connected';
   }
 }
 

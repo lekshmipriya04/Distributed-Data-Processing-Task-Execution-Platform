@@ -96,16 +96,24 @@ existing cluster.
 
 Requires Docker.
 
+**From VS Code (no terminal):** install the extension and click **Set Up
+Platform on This Computer** when it asks. It starts Docker if needed,
+downloads the platform, starts it and connects. From then on, opening VS Code
+starts it by itself.
+
+**From a terminal:**
+
 ```bash
 cd distributed-ai-platform
-cp config/.env.example config/.env
 make up            # or: make up-dev (adds two test SSH workers)
-make setup-hdfs    # once, after the first start
 ```
 
-Open the dashboard at http://localhost:3000. In VS Code, install the
-extension and run **Distributed Compute: Connect to Master**; it connects to
-`http://localhost:8090` and signs in by itself.
+`make up` creates `config/.env` from the example on first use, and HDFS
+folders are created on every start, so there is nothing else to run.
+
+Open the dashboard at http://localhost:3000 and add workers under **SSH
+Connection**. The master runs in Docker, so add this computer as
+`host.docker.internal`, not `localhost`.
 
 **Sign-in.** The platform is built to run on your own machine. With the
 default `ENVIRONMENT=development`, the dashboard needs no login, and the VS

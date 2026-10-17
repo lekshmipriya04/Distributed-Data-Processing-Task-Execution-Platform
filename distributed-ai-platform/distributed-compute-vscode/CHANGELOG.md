@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [1.0.0]
 
 ### Added
+- One-click local setup: **Set Up Platform on This Computer** checks and starts
+  Docker, finds or downloads the platform, creates `config/.env`, starts the
+  containers and connects. It is offered on first start, in the Compute Nodes
+  view and in a Get Started walkthrough. Later starts are automatic
+  (`autoStartPlatform`). Also **Stop Platform on This Computer** and **Open
+  Dashboard**.
 - One-click sign-in: connecting to a master on this machine or your LAN in
   development mode gets a token automatically. An expired token is replaced on
   the next connect.

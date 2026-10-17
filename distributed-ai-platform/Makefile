@@ -3,11 +3,15 @@
 init:
 	pip install -e .[dev]
 
-up:
+# config/.env is created from the example on first use (local defaults).
+config/.env:
+	cp config/.env.example config/.env
+
+up: config/.env
 	docker compose up -d
 
 # Also starts the two throwaway SSH provider containers (profile "dev").
-up-dev:
+up-dev: config/.env
 	docker compose --profile dev up -d
 
 # Stops everything and keeps your data (database, datasets, registered nodes).
@@ -59,6 +63,7 @@ lint-full:
 format:
 	ruff format services/ shared/ tests/
 
+# Not needed any more: the hdfs-init service does this on every start.
 setup-hdfs:
 	bash scripts/setup_hdfs.sh
 

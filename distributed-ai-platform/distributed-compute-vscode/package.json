@@ -41,6 +41,48 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "distributedCompute.nodes",
+        "contents": "Not connected to a master.\n[$(rocket) Set Up Platform on This Computer](command:distributedCompute.setUpPlatform)\nDocker builds and starts everything, then VS Code connects. Nothing to type.\n[Connect to Another Master](command:distributedCompute.configureMaster)",
+        "when": "!distributedCompute.connected"
+      },
+      {
+        "view": "distributedCompute.nodes",
+        "contents": "No worker machines yet. Add one in the dashboard: it needs only SSH and Python.\n[Open Dashboard](command:distributedCompute.openDashboard)",
+        "when": "distributedCompute.connected"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "distributedCompute.getStarted",
+        "title": "Get Started with Distributed Compute",
+        "description": "Run code and train models on your own machines, in three clicks.",
+        "steps": [
+          {
+            "id": "setUp",
+            "title": "Start the platform",
+            "description": "One click. VS Code checks Docker (and starts Docker Desktop), downloads the platform if needed, starts it and connects.\n[Set Up Platform](command:distributedCompute.setUpPlatform)",
+            "media": { "markdown": "media/walkthrough/setup.md" },
+            "completionEvents": ["onContext:distributedCompute.connected"]
+          },
+          {
+            "id": "addWorker",
+            "title": "Add a worker machine",
+            "description": "In the dashboard, open SSH Connection and connect a machine with its SSH password, once.\n[Open Dashboard](command:distributedCompute.openDashboard)",
+            "media": { "markdown": "media/walkthrough/workers.md" },
+            "completionEvents": ["onCommand:distributedCompute.openDashboard"]
+          },
+          {
+            "id": "run",
+            "title": "Run code or train a model",
+            "description": "Open any file and run it on your workers, or train a model.\n[Run File](command:distributedCompute.runWithRuntime)\n[Train a Model](command:distributedCompute.submitTraining)",
+            "media": { "markdown": "media/walkthrough/run.md" },
+            "completionEvents": ["onCommand:distributedCompute.runWithRuntime", "onCommand:distributedCompute.submitTraining"]
+          }
+        ]
+      }
+    ],
     "views": {
       "distributedCompute": [
         { "id": "distributedCompute.nodes", "name": "Compute Nodes" },
@@ -50,6 +92,9 @@
       ]
     },
     "commands": [
+      { "command": "distributedCompute.setUpPlatform", "title": "Distributed Compute: Set Up Platform on This Computer", "icon": "$(rocket)" },
+      { "command": "distributedCompute.stopPlatform", "title": "Distributed Compute: Stop Platform on This Computer" },
+      { "command": "distributedCompute.openDashboard", "title": "Distributed Compute: Open Dashboard" },
       { "command": "distributedCompute.connect", "title": "Distributed Compute: Connect to Master" },
       { "command": "distributedCompute.disconnect", "title": "Distributed Compute: Disconnect from Master" },
       { "command": "distributedCompute.configureMaster", "title": "Distributed Compute: Configure Master URL" },
@@ -185,6 +230,11 @@
             "default": 0.01,
             "exclusiveMinimum": 0,
             "description": "Learning rate for built-in and custom models."
+          },
+          "distributedCompute.autoStartPlatform": {
+            "type": "boolean",
+            "default": true,
+            "description": "After the platform has been set up on this computer, start its Docker containers (and Docker Desktop, if needed) when VS Code opens, then connect."
           },
           "distributedCompute.platformPath": {
             "type": "string",

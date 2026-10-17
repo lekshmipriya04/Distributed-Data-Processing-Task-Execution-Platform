@@ -15,6 +15,7 @@ import type { Runtime } from '../models/execution';
 import { gpuPresetGb, hasGpu, type ComputeNode, type NodeSliceRequest } from '../models/node';
 import { buildDefault, validateConfig } from '../configuration/projectConfig';
 import { disableSparkRay, enableSparkRay } from './engines';
+import { setUpPlatform, stopPlatform } from './platform';
 import {
   deleteRun,
   downloadModel,
@@ -40,6 +41,9 @@ export function registerCommands(deps: CommandDeps): void {
     context.subscriptions.push(vscode.commands.registerCommand(id, fn));
   };
 
+  reg('distributedCompute.setUpPlatform', () => setUpPlatform(deps));
+  reg('distributedCompute.stopPlatform', () => stopPlatform(deps));
+  reg('distributedCompute.openDashboard', () => vscode.env.openExternal(vscode.Uri.parse('http://localhost:3000')));
   reg('distributedCompute.connect', () => doConnect(deps));
   reg('distributedCompute.disconnect', () => {
     deps.connection.disconnect();
@@ -204,6 +208,7 @@ async function showConnectionStatus(deps: CommandDeps): Promise<void> {
   const snap = deps.connection.snapshot();
   const connected = snap.state === 'connected';
   const actions = [
+    connected ? 'Open Dashboard' : 'Start Platform on This Computer',
     connected ? 'View Cluster Status' : 'Connect to Master',
     'View Jobs',
     'Refresh Platform State',
@@ -214,6 +219,10 @@ async function showConnectionStatus(deps: CommandDeps): Promise<void> {
     title: `Distributed Compute — ${snap.state}${snap.lastError ? ` (${snap.lastError})` : ''}`,
   });
   switch (pick) {
+    case 'Start Platform on This Computer':
+      return void vscode.commands.executeCommand('distributedCompute.setUpPlatform');
+    case 'Open Dashboard':
+      return void vscode.commands.executeCommand('distributedCompute.openDashboard');
     case 'Connect to Master':
       return void vscode.commands.executeCommand('distributedCompute.connect');
     case 'View Cluster Status':

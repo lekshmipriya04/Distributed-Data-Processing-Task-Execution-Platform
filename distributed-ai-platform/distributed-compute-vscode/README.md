@@ -52,20 +52,40 @@ keys, never decides placement or allocates resources, never disables TLS, and
 never auto-connects to anyone's cluster. The backend remains the authority and
 security boundary.
 
+## Get started
+
+Install the extension. It offers **Set Up Platform on This Computer**, also
+available from the Compute Nodes view and the Get Started walkthrough. That
+one click:
+
+1. checks Docker, and starts Docker Desktop if it is stopped;
+2. finds the platform in your workspace, or downloads it once;
+3. creates its settings with local defaults;
+4. builds and starts the containers (several minutes the first time);
+5. connects. There is no token to paste.
+
+After that, opening VS Code starts the platform and connects by itself
+(setting `autoStartPlatform`). **Stop Platform on This Computer** stops it and
+keeps your data. Add worker machines in the dashboard (**Open Dashboard**).
+
+The only requirement is [Docker Desktop](https://www.docker.com/products/docker-desktop/),
+plus Git if the extension has to download the platform.
+
 ## Configure
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `distributedCompute.masterUrl` | `http://localhost:8090` | Gateway base URL (https remote; http local or LAN only). |
-| `distributedCompute.autoConnect` | `false` | Connect on activation. |
+| `distributedCompute.autoConnect` | `false` | Connect to a remote master on activation (a local one is connected automatically). |
+| `distributedCompute.autoStartPlatform` | `true` | Once set up here, start the local platform when VS Code opens. |
 | `distributedCompute.refreshIntervalSeconds` | `15` | Poll interval (floor 5s). |
 | `distributedCompute.defaultRuntime` | `python` | Runtime id for new executions (any id from `GET /runtimes`). |
 | `distributedCompute.defaultTimeoutSeconds` | `600` | Default execution timeout. |
 | `distributedCompute.showNotifications` | `true` | Job lifecycle notifications. |
 | `distributedCompute.logLevel` | `info` | Diagnostics output verbosity. |
 
-**Master on this machine** (started with `docker compose`): run
-**Distributed Compute: Connect to Master**. That's it.
+**Master on this machine:** see Get started above. If you start it yourself
+with `make up`, the extension connects on its own.
 
 **Master elsewhere:** run **Configure Master URL**, then **Configure
 Authentication** to paste a token (local sign-in only works for a master on

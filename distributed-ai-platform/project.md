@@ -137,7 +137,8 @@ age, shard weights and `max_train_rows`.
 ## 8. Running and testing
 
 ```bash
-cp config/.env.example config/.env      # set real secrets for non-local use
+# make up creates config/.env from config/.env.example on first use;
+# set real secrets there for non-local use.
 make up            # or: make up-dev   (adds two throwaway SSH providers)
                    # dashboard: http://localhost:3000
 python generate_token.py --sub alice    # token for production mode / REST clients

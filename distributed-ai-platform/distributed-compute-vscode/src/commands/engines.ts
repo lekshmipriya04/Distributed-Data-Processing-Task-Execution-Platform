@@ -1,12 +1,12 @@
 // The optional Spark + Ray engine on the master: detect it, and install it
 // into the local master container only when the user asks.
 
-import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { readSettings, updatePlatformPath } from '../configuration/settings';
+import { readSettings } from '../configuration/settings';
 import type { GatewayApi } from '../api/gateway';
-import { engineDecision, isPlatformCompose, masterIsOnThisMachine, upsertEnvLine, type EngineInfo } from '../models/training';
+import { engineDecision, masterIsOnThisMachine, upsertEnvLine, type EngineInfo } from '../models/training';
+import { platformFolder, runDocker } from './platform';
 import type { CommandDeps } from './register';
 
 export async function sparkRayInfo(gw: GatewayApi, refresh = false): Promise<EngineInfo | undefined> {
@@ -89,7 +89,7 @@ export async function disableSparkRay(deps: CommandDeps): Promise<void> {
 
 /** Write WITH_SPARK_RAY to the platform's .env and rebuild the master. */
 async function setSparkRay(deps: CommandDeps, gw: GatewayApi, enabled: boolean): Promise<boolean> {
-  const folder = await platformFolder();
+  const folder = await platformFolder(deps);
   if (!folder) {
     return false;
   }
@@ -133,45 +133,6 @@ async function setSparkRay(deps: CommandDeps, gw: GatewayApi, enabled: boolean):
   return true;
 }
 
-function runDocker(
-  deps: CommandDeps,
-  cwd: string,
-  args: string[],
-  token: vscode.CancellationToken,
-): Promise<number> {
-  return new Promise((resolve) => {
-    deps.logger.info(`$ docker ${args.join(' ')}  (in ${cwd})`);
-    let child;
-    try {
-      child = spawn('docker', args, { cwd, env: process.env });
-    } catch (err) {
-      deps.logger.error('could not start docker', { message: (err as Error).message });
-      resolve(-1);
-      return;
-    }
-    const forward = (chunk: Buffer) => {
-      for (const line of chunk.toString('utf8').split(/\r?\n/)) {
-        if (line.trim() !== '') {
-          deps.logger.info(`[docker] ${line}`);
-        }
-      }
-    };
-    child.stdout?.on('data', forward);
-    child.stderr?.on('data', forward);
-    const cancel = token.onCancellationRequested(() => child.kill());
-    child.on('error', (err) => {
-      deps.logger.error('docker is not available on this machine', { message: err.message });
-      cancel.dispose();
-      resolve(-1);
-    });
-    child.on('close', (code) => {
-      cancel.dispose();
-      deps.logger.info(`docker exited with code ${code}`);
-      resolve(code ?? -1);
-    });
-  });
-}
-
 async function waitForEngine(gw: GatewayApi, enabled: boolean, token: vscode.CancellationToken): Promise<boolean> {
   const deadline = Date.now() + 3 * 60 * 1000;
   while (Date.now() < deadline && !token.isCancellationRequested) {
@@ -186,47 +147,4 @@ async function waitForEngine(gw: GatewayApi, enabled: boolean, token: vscode.Can
     await new Promise((r) => setTimeout(r, 3000));
   }
   return false;
-}
-
-/** The folder holding the platform's docker-compose.yml. */
-async function platformFolder(): Promise<string | undefined> {
-  const configured = readSettings().platformPath;
-  if (configured && (await isPlatformFolder(configured))) {
-    return configured;
-  }
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    for (const candidate of [folder.uri.fsPath, path.join(folder.uri.fsPath, 'distributed-ai-platform')]) {
-      if (await isPlatformFolder(candidate)) {
-        await updatePlatformPath(candidate);
-        return candidate;
-      }
-    }
-  }
-  const picked = await vscode.window.showOpenDialog({
-    canSelectFolders: true,
-    canSelectFiles: false,
-    openLabel: 'Use this folder',
-    title: "Select the platform folder (the one with the platform's docker-compose.yml)",
-  });
-  const chosen = picked?.[0]?.fsPath;
-  if (!chosen) {
-    return undefined;
-  }
-  if (!(await isPlatformFolder(chosen))) {
-    void vscode.window.showErrorMessage(
-      "That folder has no docker-compose.yml for this platform. Pick the 'distributed-ai-platform' folder.",
-    );
-    return undefined;
-  }
-  await updatePlatformPath(chosen);
-  return chosen;
-}
-
-async function isPlatformFolder(folder: string): Promise<boolean> {
-  try {
-    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(path.join(folder, 'docker-compose.yml')));
-    return isPlatformCompose(Buffer.from(bytes).toString('utf8'));
-  } catch {
-    return false;
-  }
 }

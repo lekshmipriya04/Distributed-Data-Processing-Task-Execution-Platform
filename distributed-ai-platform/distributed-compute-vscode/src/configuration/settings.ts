@@ -29,6 +29,8 @@ export interface Settings {
   training: TrainingDefaults;
   /** Folder with the platform's docker-compose.yml ("" = find it). */
   platformPath: string;
+  /** Start the local platform when VS Code opens, once it has been set up. */
+  autoStartPlatform: boolean;
 }
 
 export interface TrainingDefaults {
@@ -84,6 +86,7 @@ export function readSettings(): Settings {
       learningRate: positiveNumber(c.get<number>('training.defaultLearningRate', 0.01), 0.01),
     },
     platformPath: (c.get<string>('platformPath', '') ?? '').trim(),
+    autoStartPlatform: c.get<boolean>('autoStartPlatform', true),
   };
 }
 

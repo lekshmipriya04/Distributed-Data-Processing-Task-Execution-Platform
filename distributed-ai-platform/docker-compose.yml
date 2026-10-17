@@ -60,6 +60,27 @@ services:
       retries: 10
       start_period: 30s
 
+  # One-shot: creates the HDFS folders the platform uses, then exits. Runs on
+  # every start and is idempotent, so no manual `make setup-hdfs` is needed.
+  hdfs-init:
+    image: apache/hadoop:3
+    container_name: hdfs-init
+    environment:
+      - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+    command: >
+      bash -c "hdfs dfsadmin -safemode wait &&
+      hdfs dfs -mkdir -p /platform/raw /platform/processed /platform/models /platform/logs &&
+      hdfs dfs -chmod -R 777 /platform"
+    volumes:
+      - ./infrastructure/docker/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./infrastructure/docker/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+    networks:
+      - platform-net
+    restart: "no"
+    depends_on:
+      namenode:
+        condition: service_healthy
+
   datanode-1:
     image: apache/hadoop:3
     container_name: datanode-1
@@ -171,6 +192,8 @@ services:
         condition: service_healthy
       namenode:
         condition: service_healthy
+      hdfs-init:
+        condition: service_completed_successfully
 
   ssh-executor:
     build:
@@ -186,6 +209,10 @@ services:
     # fall back to slow disk.
     shm_size: 2gb
     container_name: ssh-executor
+    # Lets a worker on this same computer be added as host.docker.internal
+    # (built into Docker Desktop; this line adds it on Linux Docker Engine).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # SSH_CRED_KEY (at-rest encryption key for stored SSH credentials, see
     # crypto.py) and JWT_SECRET come from config/.env; there is no default.
     env_file:
