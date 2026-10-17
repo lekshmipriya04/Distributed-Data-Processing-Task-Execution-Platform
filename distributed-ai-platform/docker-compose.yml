@@ -181,6 +181,7 @@ services:
       args:
         WITH_SPARK_RAY: ${WITH_SPARK_RAY:-false}
     image: distributed-compute/ssh-executor:${WITH_SPARK_RAY:-false}
+    pull_policy: build
     # Ray keeps objects in shared memory; Docker's 64 MB default makes it
     # fall back to slow disk.
     shm_size: 2gb
