@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import { readSettings } from '../configuration/settings';
 import type { GatewayApi } from '../api/gateway';
 import { ApiError } from '../models/http';
-import { isTerminal, type Execution, type ExecutionStatus, type RuntimeInfo } from '../models/execution';
+import { isRunnableScheme, isTerminal, type Execution, type ExecutionStatus, type RuntimeInfo } from '../models/execution';
 import {
   formatTaskLog,
   parseInputLines,
@@ -141,7 +141,8 @@ export async function viewLogs(deps: CommandDeps, logs: ExecutionLogProvider, ar
   logs.set(uri, first.text);
   const doc = await vscode.workspace.openTextDocument(uri);
   await vscode.languages.setTextDocumentLanguage(doc, 'log');
-  await vscode.window.showTextDocument(doc, { preview: false });
+  // Beside the code, without taking focus, so the file stays the active one.
+  await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside, preserveFocus: true });
   if (!first.done) {
     void logs.follow(uri, load).then(() => deps.refreshAll());
   }
@@ -306,6 +307,18 @@ async function resultsFolder(): Promise<vscode.Uri | undefined> {
 // --- run in parallel ---------------------------------------------------------
 
 /**
+ * The editor holding the code to run: the active one if it is a file (or an
+ * unsaved editor), else a visible one that is. Never an output view.
+ */
+export function runnableEditor(): vscode.TextEditor | undefined {
+  const active = vscode.window.activeTextEditor;
+  if (active && isRunnableScheme(active.document.uri.scheme)) {
+    return active;
+  }
+  return vscode.window.visibleTextEditors.find((e) => isRunnableScheme(e.document.uri.scheme));
+}
+
+/**
  * Run the active file as many tasks at once: one per input line, list item or
  * copy, spread over the nodes you pick (all online ones by default).
  */
@@ -314,7 +327,7 @@ export async function runInParallel(deps: CommandDeps, logs: ExecutionLogProvide
   if (!gw) {
     return;
   }
-  const editor = vscode.window.activeTextEditor;
+  const editor = runnableEditor();
   const code = normalizeLineEndings(editor?.document.getText() ?? '');
   if (!editor || code.trim() === '') {
     void vscode.window.showWarningMessage('Open the file to run first.');

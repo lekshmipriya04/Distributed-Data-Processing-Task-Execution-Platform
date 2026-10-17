@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { GatewayApi } from '../api/gateway';
 import { ApiClient } from '../api/client';
-import { isTerminal } from '../models/execution';
+import { executionLabel, isRunnableScheme, isTerminal } from '../models/execution';
 import { httpStatusToError } from '../utilities/errors';
 
 function api(body: unknown, status = 200) {
@@ -93,5 +93,38 @@ describe('error messages', () => {
     expect(httpStatusToError(502, undefined, 'Connection refused by 10.0.0.5:22').message).toBe('Connection refused by 10.0.0.5:22');
     expect(httpStatusToError(400, undefined, 'The worker refused the password').message).toBe('The worker refused the password');
     expect(httpStatusToError(401, undefined, 'whatever').kind).toBe('auth');
+  });
+});
+
+describe('what may be run', () => {
+  it('only files and unsaved editors, never output views', () => {
+    expect(isRunnableScheme('file')).toBe(true);
+    expect(isRunnableScheme('untitled')).toBe(true);
+    expect(isRunnableScheme('distributed-logs')).toBe(false);
+    expect(isRunnableScheme('output')).toBe(false);
+    expect(executionLabel({ runtime: 'python', total: 8 })).toBe('python · 8 tasks');
+    expect(executionLabel({ runtime: 'bash', total: 1 })).toBe('bash · 1 task');
+  });
+});
+
+describe('readable labels', () => {
+  it('summarises the cluster, statuses, cores and versions', async () => {
+    const { clusterSummary, statusText } = await import('../models/execution.js');
+    const { coresLent } = await import('../models/node.js');
+    const { versionNumber, detectionSummary } = await import('../models/onboarding.js');
+    expect(clusterSummary(2, 2, 0)).toBe('2/2 nodes online · no jobs running');
+    expect(clusterSummary(1, 1, 3)).toBe('1/1 node online · 3 jobs running');
+    expect(statusText('completed_with_errors')).toBe('completed with errors');
+    expect(coresLent({ cpuAllocatable: 2, cpuTotal: 12 })).toBe('2 of 12 cores');
+    expect(versionNumber('Python 3.14.8')).toBe('3.14.8');
+    expect(versionNumber('GNU bash, version 5.2.21(1)-release')).toBe('5.2.21');
+    expect(versionNumber('shell')).toBe('shell');
+    const { runtimeWithVersion } = await import('../models/onboarding.js');
+    expect(runtimeWithVersion('sh', 'shell')).toBe('sh');
+    expect(runtimeWithVersion('rust', 'nightly')).toBe('rust nightly');
+    expect(runtimeWithVersion('bash', 'GNU bash, version 5.3.9')).toBe('bash 5.3.9');
+    expect(detectionSummary({ detected_cpu: 4, detected_memory_gb: 8, gpu_count: 0, runtimes: { python: 'Python 3.12.1' } })).toBe(
+      '4 cores · 8 GB RAM · no GPU · python 3.12.1',
+    );
   });
 });

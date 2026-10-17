@@ -519,7 +519,7 @@ export function TaskExecutorPage() {
               <div key={t.id} className="border border-slate-200 rounded-lg overflow-hidden">
                 <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-slate-50">
                   <span className="text-sm font-medium text-slate-700">
-                    Task #{t.seq}
+                    Task {t.seq + 1}
                     {t.attempts > 1 ? ` (attempt ${t.attempts})` : ''}
                     <span className="text-slate-500 font-normal"> · {nodeName(t.node_id)}</span>
                   </span>

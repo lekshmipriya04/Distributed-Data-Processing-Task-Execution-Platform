@@ -3,7 +3,49 @@
 All notable changes to the Distributed Compute extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.0] - 2026-10-17
+## [1.0.1] - 2026-10-17
+
+### Added
+- **Run File in Parallel…** and **Run Python File** in the editor's Run
+  (play button) menu.
+
+### Changed
+- The extension no longer depends on the web dashboard: **Open Dashboard**
+  and the `dashboardUrl` setting are gone; the status menu offers **Add
+  Compute Node** instead.
+- The platform download uses the platform release this extension was tested
+  with (`v0.1.0`) instead of whatever the default branch holds.
+- Clearer views: runs are named "python · 8 tasks" instead of by ID, workers
+  show "online · 2 of 12 cores", statuses read "completed with errors", and
+  the status bar shows "2/2 nodes online · no jobs running" and stays current.
+- Empty views show what to do next, with buttons (Set Up Platform, Add
+  Compute Node, Run File in Parallel, Submit Training Job).
+- Commands use a category, so menus show short names ("Run Python File").
+- Removed the unused `enableCodeLens` setting.
+
+### Fixed
+- Windows: Docker Desktop is started correctly when it is not running.
+- Linux: a "permission denied" from Docker explains how to join the `docker`
+  group instead of waiting three minutes; systems with only `docker-compose`
+  (Compose v1) work.
+- Files saved with Windows line endings no longer break shell scripts on
+  Linux workers.
+- Start-up no longer waits for an answer to the "set up the platform?"
+  notification.
+- Running a file right after another run no longer sends the previous run's
+  output to the workers: output opens beside the code without taking focus,
+  and only files (or unsaved editors) are ever run.
+- The status bar counts stayed at their values from connecting.
+- The Run (play button) entry showed its full title instead of an icon.
+- Detected languages no longer repeat their name ("python Python 3.14.8").
+
+### Security
+- Restricted Mode (untrusted workspaces) is supported: the master URL and
+  platform folder from workspace settings are ignored, and a
+  `docker-compose.yml` inside the workspace is never run. `platformPath` can
+  only be set per machine.
+
+## [1.0.0] - 2026-10-17
 
 First public release. Works on Windows, macOS and Linux (VS Code 1.90+);
 the platform itself runs in Docker.

@@ -11,6 +11,7 @@ import { joinUrl, validateMasterUrl } from '../api/urls';
 import { isPlatformCompose } from '../models/training';
 import {
   DOCKER_DOWNLOAD_URL,
+  PLATFORM_RELEASE,
   PLATFORM_SUBDIR,
   cloneArgs,
   platformTag,
@@ -192,8 +193,12 @@ export async function knownPlatformFolder(deps?: CommandDeps): Promise<string | 
     return configured;
   }
   const candidates: string[] = [];
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    candidates.push(folder.uri.fsPath, path.join(folder.uri.fsPath, PLATFORM_SUBDIR));
+  // A docker-compose.yml in an untrusted workspace is never run: it could
+  // build and start anything.
+  if (vscode.workspace.isTrusted) {
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      candidates.push(folder.uri.fsPath, path.join(folder.uri.fsPath, PLATFORM_SUBDIR));
+    }
   }
   if (deps) {
     candidates.push(path.join(downloadDir(deps), PLATFORM_SUBDIR));
@@ -269,12 +274,11 @@ async function obtainPlatformFolder(
     () => undefined,
   );
   await vscode.workspace.fs.createDirectory(deps.context.globalStorageUri);
-  // The platform release made for this extension version; the default branch
-  // only when that tag does not exist (development builds).
-  const version = String(deps.context.extension.packageJSON.version ?? '');
-  let result = await runProcess(deps.logger, 'git', cloneArgs(version, target), undefined, token);
+  // The platform release this extension was tested with; the default branch
+  // only when that tag does not exist (before the release is tagged).
+  let result = await runProcess(deps.logger, 'git', cloneArgs(PLATFORM_RELEASE, target), undefined, token);
   if (!result.spawnFailed && result.exitCode !== 0 && !token.isCancellationRequested) {
-    deps.logger.warn(`no platform tag ${platformTag(version)}; downloading the default branch instead`);
+    deps.logger.warn(`no platform tag ${platformTag(PLATFORM_RELEASE)}; downloading the default branch instead`);
     await vscode.workspace.fs.delete(vscode.Uri.file(target), { recursive: true, useTrash: false }).then(
       () => undefined,
       () => undefined,

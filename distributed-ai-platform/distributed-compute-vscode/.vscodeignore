@@ -15,6 +15,7 @@ vitest.config.ts
 dist/**/*.map
 docs/**
 e2e/**
+media/readme/**
 vitest.e2e.config.ts
 .vscode-test/**
 **/tsconfig.json

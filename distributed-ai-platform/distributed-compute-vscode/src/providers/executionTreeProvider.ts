@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../connection/connectionManager';
 import { ApiError } from '../models/http';
-import { isTerminal, progressFraction, type Execution } from '../models/execution';
+import { executionLabel, isTerminal, progressFraction, statusText, type Execution } from '../models/execution';
 import { Logger } from '../utilities/logger';
 
 type ExecTreeItem =
@@ -57,8 +57,9 @@ export class ExecutionTreeProvider implements vscode.TreeDataProvider<ExecTreeIt
     const collapsible = this.detailed
       ? vscode.TreeItemCollapsibleState.Collapsed
       : vscode.TreeItemCollapsibleState.None;
-    const item = new vscode.TreeItem(e.id, collapsible);
-    item.description = this.summary(e);
+    const item = new vscode.TreeItem(executionLabel(e), collapsible);
+    item.description = `${this.summary(e)} · ${e.id.slice(0, 8)}`;
+    item.tooltip = `${e.id}\nStarted ${new Date(e.createdAt).toLocaleString()}`;
     item.iconPath = new vscode.ThemeIcon(STATUS_ICON[e.status] ?? 'circle-outline');
     item.id = `${this.detailed ? 'exec' : 'job'}:${e.id}`;
     item.contextValue = `execution:${e.status}:${isTerminal(e.status) ? 'terminal' : 'active'}`;
@@ -69,7 +70,7 @@ export class ExecutionTreeProvider implements vscode.TreeDataProvider<ExecTreeIt
   private summary(e: Execution): string {
     const frac = progressFraction(e);
     const pct = frac === undefined ? '' : ` · ${Math.round(frac * 100)}%`;
-    return `${e.runtime} · ${e.status}${pct}`;
+    return `${statusText(e.status)}${pct}`;
   }
 
   async getChildren(element?: ExecTreeItem): Promise<ExecTreeItem[]> {
@@ -85,12 +86,16 @@ export class ExecutionTreeProvider implements vscode.TreeDataProvider<ExecTreeIt
   private async rootChildren(): Promise<ExecTreeItem[]> {
     const gw = this.connection.gateway();
     if (!gw) {
-      return [{ kind: 'message', label: 'Not connected. Run "Distributed Compute: Connect to Master".' }];
+      // Empty: the view's welcome content (package.json viewsWelcome) explains
+      // what to do, with buttons.
+      return [];
     }
     try {
       const { items } = await gw.listExecutions();
       if (items.length === 0) {
-        return [{ kind: 'message', label: 'No executions yet. Submit one with a Run command.' }];
+        // Empty: the view's welcome content (package.json viewsWelcome) explains
+        // what to do, with buttons.
+        return [];
       }
       return items
         .slice()

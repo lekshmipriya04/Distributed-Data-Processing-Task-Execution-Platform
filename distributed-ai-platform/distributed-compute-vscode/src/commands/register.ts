@@ -23,6 +23,7 @@ import {
   retrieveResults,
   retryExecution,
   runInParallel,
+  runnableEditor,
   viewLogs,
 } from './executions';
 import {
@@ -426,7 +427,7 @@ async function runActiveFile(
   if (!gw) {
     return;
   }
-  const editor = vscode.window.activeTextEditor;
+  const editor = runnableEditor();
   if (!editor) {
     void vscode.window.showWarningMessage('Open a file to run before submitting an execution.');
     return;

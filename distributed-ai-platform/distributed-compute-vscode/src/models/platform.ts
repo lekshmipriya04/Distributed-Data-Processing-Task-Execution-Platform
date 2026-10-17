@@ -4,14 +4,22 @@
 /** Where the extension downloads the platform when the user has no copy. */
 export const PLATFORM_REPO = 'https://github.com/lekshmipriya04/Distributed-Data-Processing-Task-Execution-Platform.git';
 
-/** Git tag of the platform release that matches an extension version. */
-export function platformTag(extensionVersion: string): string {
-  return `v${extensionVersion.replace(/^v/, '')}`;
+/**
+ * The platform release this extension version was tested with. The extension
+ * and the platform are versioned separately (the Marketplace needed 1.0.x for
+ * the extension while the platform is 0.1.x), so bump this when the extension
+ * starts relying on a newer platform.
+ */
+export const PLATFORM_RELEASE = '0.1.0';
+
+/** Git tag of a platform release. */
+export function platformTag(release: string): string {
+  return `v${release.replace(/^v/, '')}`;
 }
 
-/** `git clone` of that tag (or of the default branch when no version is given). */
-export function cloneArgs(extensionVersion: string | undefined, target: string): string[] {
-  const ref = extensionVersion ? ['--branch', platformTag(extensionVersion)] : [];
+/** `git clone` of that release (or of the default branch when none is given). */
+export function cloneArgs(release: string | undefined, target: string): string[] {
+  const ref = release ? ['--branch', platformTag(release)] : [];
   return ['clone', '--depth', '1', ...ref, PLATFORM_REPO, target];
 }
 

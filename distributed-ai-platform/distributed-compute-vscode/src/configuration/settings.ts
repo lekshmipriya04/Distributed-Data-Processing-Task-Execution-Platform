@@ -20,7 +20,6 @@ export interface Settings {
   masterUrl: string;
   autoConnect: boolean;
   refreshIntervalSeconds: number;
-  enableCodeLens: boolean;
   defaultRuntime: Runtime;
   defaultTimeoutSeconds: number;
   executionPolicy: ExecutionPolicy;
@@ -73,7 +72,6 @@ export function readSettings(): Settings {
     masterUrl: (c.get<string>('masterUrl', DEFAULT_MASTER_URL) ?? '').trim(),
     autoConnect: c.get<boolean>('autoConnect', false),
     refreshIntervalSeconds,
-    enableCodeLens: c.get<boolean>('enableCodeLens', true),
     defaultRuntime,
     defaultTimeoutSeconds,
     executionPolicy,

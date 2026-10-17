@@ -14,6 +14,7 @@ import { NodeTreeProvider } from './providers/nodeTreeProvider';
 import { ExecutionTreeProvider } from './providers/executionTreeProvider';
 import { TrainingTreeProvider } from './providers/trainingTreeProvider';
 import { registerCommands, type CommandDeps } from './commands/register';
+import { clusterSummary } from './models/execution';
 import { runStartup } from './commands/platform';
 
 let output: vscode.OutputChannel;
@@ -51,33 +52,40 @@ export function activate(context: vscode.ExtensionContext): DistributedComputeAp
     vscode.window.createTreeView('distributedCompute.training', { treeDataProvider: trainingProvider }),
   );
 
-  const refreshAll = (): void => {
-    nodeProvider.refresh();
-    jobsProvider.refresh();
-    execProvider.refresh();
-    trainingProvider.refresh();
-  };
-
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = 'distributedCompute.showConnectionStatus';
   context.subscriptions.push(statusBar);
   renderStatusBar(connection.snapshot().state, undefined);
   statusBar.show();
 
+  // The status bar counts follow every refresh (polling, commands), not only
+  // the moment of connecting.
+  const updateStatusBar = async (): Promise<void> => {
+    const state = connection.snapshot().state;
+    if (state !== 'connected') {
+      renderStatusBar(state, undefined);
+      return;
+    }
+    try {
+      const cs = await connection.gateway()?.clusterStatus();
+      renderStatusBar('connected', cs ? clusterSummary(cs.nodesOnline, cs.nodesTotal, cs.jobsRunning) : undefined);
+    } catch {
+      renderStatusBar('connected', undefined);
+    }
+  };
+
+  const refreshAll = (): void => {
+    nodeProvider.refresh();
+    jobsProvider.refresh();
+    execProvider.refresh();
+    trainingProvider.refresh();
+    void updateStatusBar();
+  };
+
   // Reflect connection changes in the status bar and refresh authoritative
   // state from REST after any (re)connect.
   context.subscriptions.push(
-    connection.onDidChangeState(async (snap) => {
-      if (snap.state === 'connected') {
-        try {
-          const cs = await connection.gateway()?.clusterStatus();
-          renderStatusBar('connected', cs ? `${cs.nodesTotal} Nodes | ${cs.jobsRunning} Jobs` : undefined);
-        } catch {
-          renderStatusBar('connected', undefined);
-        }
-      } else {
-        renderStatusBar(snap.state, undefined);
-      }
+    connection.onDidChangeState((snap) => {
       void vscode.commands.executeCommand('setContext', 'distributedCompute.connected', snap.state === 'connected');
       refreshAll();
     }),
@@ -109,13 +117,13 @@ export function activate(context: vscode.ExtensionContext): DistributedComputeAp
 
 function renderStatusBar(state: string, detail: string | undefined): void {
   if (state === 'connected') {
-    statusBar.text = `$(server) DCP: ${detail ?? 'Connected'}`;
-    statusBar.tooltip = 'Distributed Compute — connected';
+    statusBar.text = `$(server) ${detail ?? 'Connected'}`;
+    statusBar.tooltip = 'Distributed Compute: connected. Click for actions.';
   } else if (state === 'connecting') {
-    statusBar.text = '$(loading~spin) DCP: Connecting…';
+    statusBar.text = '$(loading~spin) Distributed Compute: connecting…';
   } else {
-    statusBar.text = '$(debug-disconnect) DCP: Disconnected';
-    statusBar.tooltip = 'Distributed Compute — not connected';
+    statusBar.text = '$(debug-disconnect) Distributed Compute: not connected';
+    statusBar.tooltip = 'Distributed Compute: not connected. Click to set up or connect.';
   }
 }
 

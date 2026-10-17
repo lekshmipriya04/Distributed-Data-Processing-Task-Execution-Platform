@@ -113,12 +113,16 @@ export class TrainingTreeProvider implements vscode.TreeDataProvider<Item> {
     }
     const gw = this.connection.gateway();
     if (!gw) {
-      return [{ kind: 'message', label: 'Not connected. Run "Distributed Compute: Connect to Master".' }];
+      // Empty: the view's welcome content (package.json viewsWelcome) explains
+      // what to do, with buttons.
+      return [];
     }
     try {
       const runs = await gw.listTrainingRuns();
       if (runs.length === 0) {
-        return [{ kind: 'message', label: 'No training runs yet. Run "Distributed Compute: Submit Training Job".' }];
+        // Empty: the view's welcome content (package.json viewsWelcome) explains
+        // what to do, with buttons.
+        return [];
       }
       return runs.map((run) => ({ kind: 'run', run }));
     } catch (err) {

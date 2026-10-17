@@ -129,7 +129,7 @@ export function detectionSummary(c: NodeCapabilities): string {
     parts.push('no GPU');
   }
   const runtimes = Object.entries(c.runtimes ?? {});
-  parts.push(runtimes.length ? runtimes.map(([id, v]) => (v ? `${id} ${v}` : id)).join(', ') : 'no languages found');
+  parts.push(runtimes.length ? runtimes.map(([id, v]) => runtimeWithVersion(id, v)).join(', ') : 'no languages found');
   return parts.join(' · ');
 }
 
@@ -212,4 +212,18 @@ export function resultFileName(seq: number, total: number, kind: 'out' | 'err'):
 
 function round1(v: number): number {
   return Math.round(v * 10) / 10;
+}
+
+/** "Python 3.14.8" -> "3.14.8"; "GNU bash, version 5.2.21(1)" -> "5.2.21"; otherwise as is. */
+export function versionNumber(raw: string | null | undefined): string {
+  const v = (raw ?? '').trim();
+  return /\d+(?:\.\d+)+/.exec(v)?.[0] ?? v;
+}
+
+/** "python 3.14.8"; just "sh" when the "version" only names the shell. */
+export function runtimeWithVersion(id: string, raw: string | null | undefined): string {
+  const v = versionNumber(raw);
+  return !v || (!/\d/.test(v) && (v.toLowerCase().includes(id.toLowerCase()) || id.toLowerCase().includes(v.toLowerCase())))
+    ? id
+    : `${id} ${v}`;
 }

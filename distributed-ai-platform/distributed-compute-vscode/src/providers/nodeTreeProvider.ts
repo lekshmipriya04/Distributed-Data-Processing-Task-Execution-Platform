@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../connection/connectionManager';
 import { ApiError } from '../models/http';
-import { capacityLabel, hasGpu, nodeLabel, orUnknown, sliceLabel, type ComputeNode } from '../models/node';
+import { capacityLabel, coresLent, hasGpu, orUnknown, sliceLabel, type ComputeNode } from '../models/node';
 import { Logger } from '../utilities/logger';
 
 type NodeTreeItem =
@@ -50,8 +50,10 @@ export class NodeTreeProvider implements vscode.TreeDataProvider<NodeTreeItem> {
       return item;
     }
     const n = element.node;
-    const item = new vscode.TreeItem(nodeLabel(n), vscode.TreeItemCollapsibleState.Collapsed);
-    item.description = `${n.status} · CPU ${capacityLabel(n.cpuReserved, n.cpuTotal)}`;
+    // Name first, so it is never cut off; status and slice follow.
+    const name = `${n.name || n.id}${hasGpu(n) && n.gpuModel ? ` (${n.gpuModel})` : ''}`;
+    const item = new vscode.TreeItem(name, vscode.TreeItemCollapsibleState.Collapsed);
+    item.description = `${n.status} · ${coresLent(n)}`;
     item.iconPath = new vscode.ThemeIcon(STATUS_ICON[n.status] ?? 'question');
     item.contextValue = `node:${n.status}`;
     item.id = `node:${n.id}`;
@@ -82,12 +84,16 @@ export class NodeTreeProvider implements vscode.TreeDataProvider<NodeTreeItem> {
   private async rootChildren(): Promise<NodeTreeItem[]> {
     const gw = this.connection.gateway();
     if (!gw) {
-      return [{ kind: 'message', label: 'Not connected. Run "Distributed Compute: Connect to Master".' }];
+      // Empty: the view's welcome content (package.json viewsWelcome) explains
+      // what to do, with buttons.
+      return [];
     }
     try {
       const { items } = await gw.listNodes();
       if (items.length === 0) {
-        return [{ kind: 'message', label: 'No compute nodes registered on the connected backend.' }];
+        // Empty: the view's welcome content (package.json viewsWelcome) explains
+        // what to do, with buttons.
+        return [];
       }
       return items.map((node) => ({ kind: 'node', node }));
     } catch (err) {

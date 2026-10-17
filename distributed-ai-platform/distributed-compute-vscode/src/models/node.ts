@@ -113,3 +113,8 @@ export function nodeLabel(n: ComputeNode): string {
 export function gpuPresetGb(totalGb: number, fraction: number): number {
   return Math.floor(totalGb * fraction * 2) / 2;
 }
+
+/** "2 of 12 cores" (lent of detected), for the node list. */
+export function coresLent(n: Pick<ComputeNode, 'cpuAllocatable' | 'cpuTotal'>): string {
+  return `${orUnknown(n.cpuAllocatable)} of ${orUnknown(n.cpuTotal)} cores`;
+}

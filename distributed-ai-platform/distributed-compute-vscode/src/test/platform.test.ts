@@ -6,6 +6,7 @@ import {
   dockerStartHint,
   dockerStateFrom,
   normalizeLineEndings,
+  PLATFORM_RELEASE,
   platformTag,
   startupAction,
   type StartupFacts,
@@ -89,7 +90,8 @@ describe('line endings', () => {
 });
 
 describe('platform download', () => {
-  it('clones the release tag matching the extension version', () => {
+  it('clones the tag of the platform release the extension targets', () => {
+    expect(PLATFORM_RELEASE).toMatch(/^\d+\.\d+\.\d+$/);
     expect(platformTag('0.1.0')).toBe('v0.1.0');
     expect(platformTag('v0.1.0')).toBe('v0.1.0');
     expect(cloneArgs('0.1.0', '/tmp/p')).toEqual([

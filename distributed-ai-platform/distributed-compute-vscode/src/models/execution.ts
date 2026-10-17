@@ -132,3 +132,28 @@ const TERMINAL: ReadonlySet<ExecutionStatus> = new Set<ExecutionStatus>([
 export function isTerminal(status: ExecutionStatus): boolean {
   return TERMINAL.has(status);
 }
+
+/**
+ * Documents whose text may be sent to workers: files on disk and unsaved
+ * editors. Not the extension's own output views, settings, or other
+ * virtual documents.
+ */
+export function isRunnableScheme(scheme: string): boolean {
+  return scheme === 'file' || scheme === 'untitled';
+}
+
+/** "python · 8 tasks", the readable name of an execution in the views. */
+export function executionLabel(e: Pick<Execution, 'runtime' | 'total'>): string {
+  return `${e.runtime} · ${e.total} task${e.total === 1 ? '' : 's'}`;
+}
+
+/** Status bar text: "2/2 nodes online · 1 job running". */
+export function clusterSummary(online: number, total: number, running: number): string {
+  const jobs = running === 0 ? 'no jobs running' : `${running} job${running === 1 ? '' : 's'} running`;
+  return `${online}/${total} node${total === 1 ? '' : 's'} online · ${jobs}`;
+}
+
+/** "completed_with_errors" -> "completed with errors". */
+export function statusText(status: string): string {
+  return status.replace(/_/g, ' ');
+}

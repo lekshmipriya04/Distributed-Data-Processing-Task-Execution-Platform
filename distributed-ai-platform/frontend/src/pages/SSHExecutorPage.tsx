@@ -255,9 +255,11 @@ function OnboardingCard({
 
   const onProvisioned = (res: NodeProvisionResponse) => {
     setProvisioned(res);
-    setAllocCpu(Math.max(1, res.detected_cpu));
-    const { max } = memBounds(res.detected_memory_gb);
-    setAllocMem(max);
+    // Start at half the machine (as VS Code does): safe on a computer someone
+    // also uses. The sliders go up to everything.
+    setAllocCpu(Math.max(1, Math.floor(res.detected_cpu / 2)));
+    const { min, max } = memBounds(res.detected_memory_gb);
+    setAllocMem(Math.max(min, Math.floor(max) / 2));
     setAllocGpuGb(Math.round(gpuTotalGb(res) * 0.25 * 2) / 2);
     setNotice(null);
     setStep('detected');
