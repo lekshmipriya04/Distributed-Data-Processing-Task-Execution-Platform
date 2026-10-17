@@ -16,8 +16,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-platform}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-platform_secret}
       POSTGRES_DB: ${POSTGRES_DB:-platform_db}
+    # Bound to loopback so the database is not reachable from the LAN.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     networks:
       - platform-net
     volumes:
@@ -130,9 +131,18 @@ services:
       - "8000:8000"
     networks:
       - platform-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     depends_on:
-      - storage-service
-      - ssh-executor
+      storage-service:
+        condition: service_healthy
+      ssh-executor:
+        condition: service_healthy
 
   storage-service:
     build:
@@ -145,6 +155,13 @@ services:
       - "8001:8001"
     networks:
       - platform-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy
@@ -164,6 +181,13 @@ services:
       - "8011:8011"
     networks:
       - platform-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     depends_on:
       postgres:
         condition: service_healthy
@@ -183,8 +207,26 @@ services:
       - "8090:8090"
     networks:
       - platform-net
+    restart: unless-stopped
+    # Healthcheck is defined in the image (the binary probes its own /health).
     depends_on:
-      - ssh-executor
+      ssh-executor:
+        condition: service_healthy
+
+  # Web dashboard: nginx serves the built SPA and proxies /api + /health to
+  # api-gateway on the same origin. Open http://localhost:3000.
+  frontend:
+    build:
+      context: frontend
+    container_name: frontend
+    ports:
+      - "3000:80"
+    networks:
+      - platform-net
+    restart: unless-stopped
+    depends_on:
+      api-gateway:
+        condition: service_healthy
 
   # Throwaway provider node for local end-to-end testing of SSH resource
   # sharing: runs only sshd + python3, exactly the "provider runs nothing but
