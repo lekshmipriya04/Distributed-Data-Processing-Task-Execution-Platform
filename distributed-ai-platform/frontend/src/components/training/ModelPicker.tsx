@@ -119,7 +119,7 @@ export function ModelPicker({ value, onChange, sparkAvailable, engine }: Props) 
             }`}
           >
             <div className="font-semibold">{m.label}</div>
-            <div className="text-xs text-slate-500 mt-0.5">{m.blurb}</div>
+            <div className="text-xs text-slate-600 mt-0.5">{m.blurb}</div>
           </button>
         ))}
         <button
@@ -130,7 +130,7 @@ export function ModelPicker({ value, onChange, sparkAvailable, engine }: Props) 
           }`}
         >
           <div className="font-semibold flex items-center gap-1.5"><FileCode2 size={14} /> Your own model</div>
-          <div className="text-xs text-slate-500 mt-0.5">A model.py with train(); any library your workers have</div>
+          <div className="text-xs text-slate-600 mt-0.5">A model.py with train(); any library your workers have</div>
         </button>
       </div>
 

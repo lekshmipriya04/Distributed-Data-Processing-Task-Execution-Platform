@@ -13,6 +13,8 @@ export function StatusBadge({ status }: { status: JobStatus | string }) {
     cancelling: 'bg-amber-50 text-amber-700 border-amber-200 animate-pulse',
     online: 'bg-emerald-50 text-emerald-700 border-emerald-200',
     offline: 'bg-rose-50 text-rose-700 border-rose-200',
+    unreachable: 'bg-rose-50 text-rose-700 border-rose-200',
+    draining: 'bg-amber-50 text-amber-700 border-amber-200',
   };
   return (
     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${styles[status] ?? styles.pending}`}>
@@ -177,6 +179,7 @@ export function NumberField({
   step,
   fallback,
   className = '',
+  id,
 }: {
   value: number;
   onChange: (n: number) => void;
@@ -185,6 +188,7 @@ export function NumberField({
   step?: number;
   fallback?: number;
   className?: string;
+  id?: string;
 }) {
   const fmt = (n: number) => (Number.isFinite(n) ? String(n) : '');
   const [text, setText] = useState<string>(fmt(value));
@@ -227,6 +231,7 @@ export function NumberField({
 
   return (
     <input
+      id={id}
       type="text"
       inputMode="decimal"
       value={text}

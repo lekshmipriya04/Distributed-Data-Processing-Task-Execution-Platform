@@ -251,14 +251,14 @@ export function DataUpload({
         </label>
         <label className="text-sm">
           <span className="text-xs text-slate-500 font-medium block mb-1">
-            Description <span className="text-slate-400">(optional)</span>
+            Description <span className="text-slate-500">(optional)</span>
           </span>
           <input className={INPUT_CLS} value={description} onChange={(e) => setDescription(e.target.value)} />
         </label>
         {kind === 'images' && (
           <label className="text-sm">
             <span className="text-xs text-slate-500 font-medium block mb-1">
-              Resize to (pixels per side) <span className="text-slate-400">· grayscale</span>
+              Resize to (pixels per side) <span className="text-slate-500">· grayscale</span>
             </span>
             <NumberField value={imageSize} min={4} max={64} step={1} onChange={setImageSize} className={INPUT_CLS} />
           </label>
@@ -277,7 +277,7 @@ export function DataUpload({
       <div className="mt-6 pt-5 border-t border-slate-200">
         <div className="flex items-center justify-between mb-2">
           <span className="text-sm font-medium text-slate-700 flex items-center gap-2">
-            <Database size={15} className="text-slate-400" /> Your datasets
+            <Database size={15} className="text-slate-500" /> Your datasets
           </span>
           <button
             type="button"
@@ -289,7 +289,7 @@ export function DataUpload({
           </button>
         </div>
         {datasets.length === 0 ? (
-          <p className="text-sm text-slate-400 italic">{loading ? 'Loading…' : 'No datasets yet. Upload one above.'}</p>
+          <p className="text-sm text-slate-500 italic">{loading ? 'Loading…' : 'No datasets yet. Upload one above.'}</p>
         ) : (
           <div className="space-y-1.5 max-h-64 overflow-auto pr-1">
             {datasets.map((d) => {
@@ -306,9 +306,9 @@ export function DataUpload({
                     {active ? (
                       <CheckCircle2 size={15} className="text-blue-600 shrink-0" />
                     ) : image ? (
-                      <ImageIcon size={15} className="text-slate-400 shrink-0" />
+                      <ImageIcon size={15} className="text-slate-500 shrink-0" />
                     ) : (
-                      <FileSpreadsheet size={15} className="text-slate-400 shrink-0" />
+                      <FileSpreadsheet size={15} className="text-slate-500 shrink-0" />
                     )}
                     <span className={`font-medium truncate ${active ? 'text-blue-800' : 'text-slate-800'}`}>{d.name}</span>
                     <span className="text-xs text-slate-500 shrink-0">
@@ -319,7 +319,7 @@ export function DataUpload({
                   <button
                     type="button"
                     onClick={() => setPendingDelete(d)}
-                    className="text-slate-400 hover:text-rose-600 transition-colors"
+                    className="text-slate-500 hover:text-rose-600 transition-colors"
                     title="Delete dataset"
                   >
                     <Trash2 size={15} />

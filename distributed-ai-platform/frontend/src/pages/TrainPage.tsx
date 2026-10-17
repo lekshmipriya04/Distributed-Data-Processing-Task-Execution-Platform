@@ -226,7 +226,7 @@ export function TrainPage() {
                       : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
                   }`}
                 >
-                  <span className={mode === opt.value ? 'text-blue-600' : 'text-slate-400'}>{opt.icon}</span> {opt.label}
+                  <span className={mode === opt.value ? 'text-blue-600' : 'text-slate-500'}>{opt.icon}</span> {opt.label}
                 </button>
               );
             })}
@@ -253,7 +253,7 @@ export function TrainPage() {
                         className={`text-left px-3.5 py-2.5 rounded-lg border text-sm transition-all ${
                           active ? 'bg-blue-50 border-blue-500 text-blue-800'
                           : online ? 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'
-                          : 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed'
+                          : 'bg-slate-50 border-slate-200 text-slate-500 cursor-not-allowed'
                         }`}
                       >
                         <div className="flex items-center justify-between">
@@ -313,7 +313,7 @@ export function TrainPage() {
           </div>
           {model.modelType === 'cnn' && (
             <label className="text-sm block mt-3 max-w-[220px]">
-              <span className="text-xs text-slate-500 font-medium block mb-1">Number of classes <span className="text-slate-400">(0 = auto)</span></span>
+              <span className="text-xs text-slate-500 font-medium block mb-1">Number of classes <span className="text-slate-500">(0 = auto)</span></span>
               <NumberField value={numClasses} min={0} max={1000} step={1} onChange={setNumClasses} className={NUM_INPUT} />
             </label>
           )}
@@ -328,16 +328,16 @@ export function TrainPage() {
             <>
               {run.model_family !== 'spark' && (
                 <SecondaryButton onClick={() => download(() => sshApi.downloadTrainingData(run.id), 'training data')} disabled={busy}>
-                  <Download size={16} /> Training data (JSON)
+                  <span className="flex items-center gap-1.5"><Download size={16} /> Training data (JSON)</span>
                 </SecondaryButton>
               )}
               <SecondaryButton onClick={() => download(() => sshApi.downloadTrainingModel(run.id), 'model')} disabled={busy}>
-                <Download size={16} /> {MODEL_FORMAT_LABEL[run.model_format ?? 'onnx'] ?? 'Model'}
+                <span className="flex items-center gap-1.5"><Download size={16} /> {MODEL_FORMAT_LABEL[run.model_format ?? 'onnx'] ?? 'Model'}</span>
               </SecondaryButton>
             </>
           )}
-          <SecondaryButton onClick={newTraining}><Plus size={16} /> New training</SecondaryButton>
-          <SecondaryButton onClick={removePrevious} disabled={busy}><Trash2 size={16} /> Remove previous</SecondaryButton>
+          <SecondaryButton onClick={newTraining}><span className="flex items-center gap-1.5"><Plus size={16} /> New training</span></SecondaryButton>
+          <SecondaryButton onClick={removePrevious} disabled={busy}><span className="flex items-center gap-1.5"><Trash2 size={16} /> Remove previous</span></SecondaryButton>
         </div>
       )}
 
@@ -345,7 +345,7 @@ export function TrainPage() {
         <Card>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-sm text-slate-600 font-medium flex items-center gap-2">
-              <Cpu size={15} className="text-slate-400" />
+              <Cpu size={15} className="text-slate-500" />
               {blocker ? (
                 <span className={usesWorkers && chosenNodes.length === 0 && dataset ? 'text-rose-600' : ''}>{blocker}</span>
               ) : (

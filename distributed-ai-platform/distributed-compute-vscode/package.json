@@ -94,7 +94,6 @@
     "commands": [
       { "command": "distributedCompute.setUpPlatform", "title": "Distributed Compute: Set Up Platform on This Computer", "icon": "$(rocket)" },
       { "command": "distributedCompute.stopPlatform", "title": "Distributed Compute: Stop Platform on This Computer" },
-      { "command": "distributedCompute.openDashboard", "title": "Distributed Compute: Open Dashboard" },
       { "command": "distributedCompute.connect", "title": "Distributed Compute: Connect to Master" },
       { "command": "distributedCompute.disconnect", "title": "Distributed Compute: Disconnect from Master" },
       { "command": "distributedCompute.configureMaster", "title": "Distributed Compute: Configure Master URL" },
@@ -237,11 +236,6 @@
             "type": "boolean",
             "default": true,
             "description": "After the platform has been set up on this computer, start its Docker containers (and Docker Desktop, if needed) when VS Code opens, then connect."
-          },
-          "distributedCompute.dashboardUrl": {
-            "type": "string",
-            "default": "http://localhost:3001",
-            "description": "Address of the web dashboard, opened by \"Open Dashboard\". docker compose serves it on FRONTEND_PORT (3001 by default)."
           },
           "distributedCompute.platformPath": {
             "type": "string",

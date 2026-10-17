@@ -1,8 +1,9 @@
 # Deployment plan: Distributed Compute 0.1.0
 
-Release runbook for the VS Code extension (`aaron43210.distributed-compute`
-0.1.0) and the platform it runs on. Steps are in order; each has a check that
-says it worked.
+Release runbook for version 0.1.0 of everything: the platform (Python
+services, Go gateway, Docker setup), the web dashboard, and the VS Code
+extension (`aaron43210.distributed-compute`). Steps are in order; each has a
+check that says it worked.
 
 ## 1. Where things stand
 
@@ -14,7 +15,9 @@ says it worked.
 | `.vsix` installs as `aaron43210.distributed-compute@0.1.0` | macOS | `code --install-extension` into a clean profile |
 | Gateway builds for linux, darwin, windows (amd64, arm64) | macOS cross-compile | `go build` with `GOOS`/`GOARCH` |
 | Python services (133 tests), ruff, mypy | macOS | `pytest`, `make lint` |
-| Extension on **Windows and Linux** | **not yet**: first CI run | `extension` job, OS matrix |
+| Dashboard unit tests (29), ESLint, build | macOS | `npm test`, `npm run lint`, `npm run build` |
+| Dashboard in Chromium, Firefox, WebKit, Android (Pixel 7) and iPhone 14 emulation (53 tests) | macOS + Docker | `npm run test:e2e`: the nginx image on ports 4101/4102/4103 as three users, 2 SSH test workers |
+| Extension and dashboard build on **Windows and Linux** | **not yet**: first CI run | `extension` and `frontend` jobs, OS matrix |
 | Full stack in CI | **not yet**: first CI run | `e2e` job |
 | **Windows worker machines** | **never** | implemented, not tested on real Windows hosts |
 | Physical remote workers | **never** | only Docker test workers so far |
@@ -29,15 +32,36 @@ partial failure and retry of failed tasks only; cancel; timeout; dataset upload;
 built-in training with ONNX download; a custom `model.py`; and node removal
 with the key deleted from the worker.
 
+The dashboard suite covers, as three users on three ports: each port keeping
+its own sign-in; malformed, forged and expired tokens rejected; onboarding
+through the form, including a wrong password; users not seeing each other's
+workers, runs and datasets; health check, drain and resume; parallel runs with
+per-task output; failure with the extracted error and retry of failed tasks;
+cancel; dataset upload, training and ONNX download; worker removal; and sign
+out. In every browser and phone: all pages render with no console errors,
+deep links and unknown URLs, navigation at that screen size, no sideways
+overflow, an axe accessibility scan with no serious problems (WCAG 2 A/AA),
+"Offline" when the gateway is down, the sign-in dialog when the server
+requires it, keyboard sign-in, a real run, and the security headers
+(CSP, frame, referrer, content-type) on pages, assets and API responses.
+
+Testing found and fixed: no way to sign in on the website (production mode was
+unusable), a wrong SSH password treated as an expired sign-in, low-contrast
+text, unlabelled form fields, broken layouts on phones, missing security
+headers on most responses, a Google Fonts request on every page, and HDFS
+containers being killed for lack of memory (heaps now capped; restarts
+automatic).
+
 ## 2. Before release (blocking)
 
 1. **Push and get CI green.**
    ```bash
    git push origin main
    ```
-   All jobs must pass: `python`, `spark-ray`, `frontend`, `extension`
-   (Linux, macOS, Windows), `go`, `e2e`. This is the first run of the OS
-   matrix and the `e2e` job; fix anything they find before going further.
+   All jobs must pass: `python`, `spark-ray`, `frontend` and `extension`
+   (Linux, macOS, Windows each), `go`, `e2e`. This is the first run of the OS
+   matrices and the `e2e` job; fix anything they find before going further.
+   Then protect `main` (Settings → Branches) so these checks are required.
 2. **Create the Marketplace publisher** `aaron43210` (must equal `publisher`
    in `package.json`) at <https://marketplace.visualstudio.com/manage>, signed
    in with the Microsoft account that will own it.
@@ -47,7 +71,12 @@ with the key deleted from the worker.
 4. **Optional: Open VSX** (VSCodium, Cursor, Windsurf, Gitpod users). Create
    the namespace `aaron43210` at <https://open-vsx.org>, get a token, store it
    as `OVSX_PAT`.
-5. **Review the listing.** The Marketplace shows `README.md`, `CHANGELOG.md`,
+5. **Prepare the repository for the public.** Turn on *Private vulnerability
+   reporting* (Settings → Code security), which `SECURITY.md` relies on. Add a
+   description and topics (ssh, distributed-computing, vscode-extension,
+   machine-learning, docker). Check `LICENSE` (MIT, all three authors) is what
+   you intend for the whole repository.
+6. **Review the listing.** The Marketplace shows `README.md`, `CHANGELOG.md`,
    the icon and the description. Check the README renders, all links are
    absolute (`https://`), and no example uses real hosts or passwords other than
    the documented test workers.
@@ -76,7 +105,8 @@ with the key deleted from the worker.
    Check: the listing appears within minutes at
    `https://marketplace.visualstudio.com/items?itemName=aaron43210.distributed-compute`.
 4. **GitHub Release** for `v0.1.0`: attach the `.vsix`, paste the 0.1.0
-   section of `CHANGELOG.md`, and list the known limits from section 7.
+   section of `CHANGELOG.md`, add the screenshots from `docs/images/`, and list
+   the known limits from section 7.
 
 ## 4. After release: smoke test on each OS
 
@@ -90,6 +120,9 @@ On one clean Windows, macOS and Linux machine each, with Docker installed:
    view should fill in live.
 5. **Submit Training Job** with a small CSV; download the model.
 6. **Remove** the node; its `authorized_keys` line must be gone.
+7. Open the dashboard (http://localhost:3001) in that machine's browsers and
+   on a phone on the same network (start with `BIND_ADDR=0.0.0.0 make up`
+   for the phone): add a worker, run a task, train a model.
 
 Record the results in the GitHub Release. Any failure becomes 0.1.1.
 
@@ -105,16 +138,17 @@ sign-in, every port bound to `127.0.0.1`.
    and `SSH_CRED_KEY` to long random strings:
    `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
    The services refuse to start with placeholders.
-2. Put HTTPS in front of the gateway (port 8090), for example with Caddy or
-   nginx and a certificate. SSH passwords for onboarding travel in request
-   bodies. The extension accepts plain `http://` only for local and LAN
-   addresses; anything else must be `https://`.
-3. Start with `BIND_ADDR=0.0.0.0 make up` and open only the HTTPS port in
+2. Put HTTPS in front of the dashboard (port 3001) and the extension
+   gateway (port 8090), for example with Caddy or nginx and a certificate.
+   SSH passwords for onboarding travel in request bodies. The extension
+   accepts plain `http://` only for local and LAN addresses.
+3. Start with `BIND_ADDR=0.0.0.0 make up` and open only the HTTPS ports in
    the firewall.
 4. Give each person their own token:
-   `python generate_token.py --sub <name> --hours 720`. They run
-   **Configure Master URL** (`https://master.example:443`) and **Configure
-   Authentication**. Each user sees only their own nodes, runs and data.
+   `python generate_token.py --sub <name> --hours 720`. On the dashboard they
+   click the account button (top right) and paste it; in VS Code they run
+   **Configure Master URL** and **Configure Authentication**. Each user sees
+   only their own workers, runs and data, on both.
 
 **C. Workers.** Each needs only `sshd` and `python3`, plus a dedicated
 non-admin account. Nothing is installed on them. Tasks run with that
@@ -136,7 +170,8 @@ account's permissions, so never use an admin account.
   workers.
 - The sandbox isolates files and processes, not the kernel. Memory slices are
   a scheduling figure, and cores are not pinned on macOS.
-- The first setup builds every image from source (several minutes, a few GB).
+- The first setup builds every image from source (several minutes, a few GB
+  of disk). The running stack needs about 2 GB of memory for Docker.
 - Spark + Ray is optional and adds about 1 GB on the master.
 
 ## 8. Next (0.2.0)
@@ -146,3 +181,4 @@ account's permissions, so never use an admin account.
 - Run the `e2e` job against a real Windows worker and a remote Linux machine.
 - A client event stream (WebSocket) instead of polling.
 - A real database migration tool.
+- Sign-in with an identity provider (OIDC) instead of pasted tokens.

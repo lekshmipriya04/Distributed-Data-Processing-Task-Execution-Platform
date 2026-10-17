@@ -1,193 +1,187 @@
-# Distributed Data Processing & Task Execution Platform
+# Distributed Compute
 
-Use spare CPU and GPU on your own machines over plain SSH. You can:
+[![CI](https://github.com/lekshmipriya04/Distributed-Data-Processing-Task-Execution-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/lekshmipriya04/Distributed-Data-Processing-Task-Execution-Platform/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-informational)
 
-- **Add a worker with a password, once.** The master installs a restricted
-  key that it manages, then forgets the password.
-- **Run code in any language** the worker already has (Python, Bash, Node.js,
-  Go, Rust, Java, C/C++, Ruby, R, Julia, … or a `custom` command), in parallel,
-  in throwaway sandboxes.
-- **Train** the built-in linear regression, logistic regression or small CNN,
-  **your own model** (a `model.py` with a `train()` function, using any
-  library your workers already have), or, with the optional **Spark + Ray**
-  engine, **any Spark MLlib model**. Pure Python is the default; Spark + Ray is
-  installed on the master only if you ask for it, never on workers.
+**Run code and train models on the computers you already have, over plain
+SSH.** Lend a few cores of a lab machine, an old laptop or a server, then run
+any language on them in parallel, or train a model across all of them, from
+VS Code or a web dashboard.
 
-Workers need only `sshd` and `python3`. **Nothing is ever installed on them.**
-After a job, the only trace on a worker is the platform's single
-authorized-keys line.
+Workers need only `sshd` and `python3`. **Nothing is installed on them.** You
+type a worker's password once; the platform installs a restricted key, forgets
+the password, and removes the key when you remove the worker.
 
-- [Architecture](distributed-ai-platform/docs/architecture.md)
-- [Connections, ports and protocols](distributed-ai-platform/docs/connections.md)
-- [API contract](distributed-ai-platform/docs/API_CONTRACT.md)
-- [Deployment plan (0.1.0)](distributed-ai-platform/docs/DEPLOYMENT.md)
-- [Project overview](distributed-ai-platform/project.md)
+![The web dashboard: a run of four tasks on two workers, one failed](distributed-ai-platform/docs/images/task-executor.png)
 
-![Platform architecture](distributed-ai-platform/docs/architecture-overview.svg)
+## What you can do
 
-## Components
+- **Add workers** with their SSH password, once. The platform shows the host
+  key to confirm, detects CPU, memory, GPU and languages, and lets you choose
+  how much of each machine to lend.
+- **Run code in any language** your workers have (Python, Bash, Node.js, Go,
+  Rust, Java, C/C++, Ruby, R, Julia, … or any command you give), as many
+  parallel tasks, each in a throwaway sandbox. Watch every task's output live,
+  cancel, retry only the failed tasks, and copy the output (VS Code can also
+  save every task's output to files).
+- **Train models** across your workers: built-in linear and logistic
+  regression and a small CNN, **your own `model.py`** using any library the
+  workers have, or, with the optional Spark + Ray engine, **any Spark MLlib
+  model**. Download the trained model (ONNX, JSON or a Spark pipeline).
+- **Share it** with a team: each person signs in with their own token and sees
+  only their own workers, runs and data.
 
-| Component | Port | What it does |
-|---|---:|---|
-| Web dashboard (`frontend/`) | 3001 | `/ssh` workers, `/execute` Task Executor, `/train` training (nginx; proxies `/api` to api-gateway) |
-| api-gateway | 8000 | Proxies `/api/v1/storage/*` and `/api/v1/ssh/*` |
-| storage-service | 8001 | Owner-scoped datasets (CSV/JSON, image ZIP → pixel CSV), bytes in HDFS, metadata in Postgres |
-| ssh-executor | 8011 | Onboarding, capability and runtime detection, sandboxed batches, leases, training, ONNX export |
-| extension-gateway (Go) | 8090 | API for the VS Code extension; forwards to ssh-executor with the user's JWT |
-| PostgreSQL 15 | 5433 (host) | Metadata and state |
-| HDFS (1 NameNode + 3 DataNodes) | 9000, 9870 | Dataset bytes |
-| `ssh-provider`, `ssh-provider-2` | 2222 (internal) | Throwaway test workers, `--profile dev` only |
-
-The VS Code extension (`distributed-compute-vscode/`) does everything without
-the dashboard: it sets the platform up, adds and manages workers, runs files
-in parallel with live output, cancels and retries runs, saves results, and
-trains models.
-
-## How it works
-
-**Onboarding.** Connect, and the master shows the host-key fingerprint
-(no credential is sent). Provision with the password, once: the master
-installs a `restrict ssh-ed25519 … dp-platform:<id>` key, verifies it, and
-detects the OS, CPU, memory, GPU, any PyTorch GPU backend already present and
-the available languages. Then register the slice you lend (cores, memory,
-optional GPU count and memory). If the worker refuses password login, the UI
-shows a one-line command to add the key yourself. Keys can be rotated, legacy
-nodes can be re-secured, and deleting a node removes its key line.
-
-**Task Executor.** Each task runs in `dp-exec.<execution_id>.XXXXXX` in the
-worker's temp directory. The program, its input (stdin and `input.txt`) and a
-small Python runner are uploaded there. The task runs with a clean
-environment, in its own process group, under `nice` (by execution policy),
-`taskset` to its cores (Linux) and a wall-clock timeout. Then the group is
-killed and the directory deleted, on success, error, timeout and cancel.
-Compiled languages build inside the sandbox. If none of the selected online
-nodes has the runtime, the request returns 400.
-
-**Resources.** Leases are reserved atomically per node, so jobs never
-overcommit a worker. Thread pools are capped to the slot's cores. A GPU slice
-(`CUDA_VISIBLE_DEVICES` plus a PyTorch memory fraction) is enforced only for
-Python tasks on workers where PyTorch is already installed. Execution policies
-are `safe_background` (default, nice 19), `balanced` (nice 10) and
-`max_available` (nice 0). They change priority only, never the slice.
-
-**Training.** Built-in and custom models use federated averaging. The master
-loads the dataset, splits it into shards sized by each worker's compute score,
-sends each worker its shard plus a stdlib-only script (or your `model.py`),
-and averages the results, weighted by rows, over several rounds. In `single`
-mode built-in models train on the master's cores instead. Built-in runs export
-ONNX; custom runs export their parameters as JSON.
-
-**Spark + Ray (optional).** Turn it on with **Distributed Compute: Enable
-Spark + Ray Engine** in VS Code, or `make enable-spark-ray` (about 1 GB, on the
-master only). It adds:
-
-- every Spark MLlib model (random forests, gradient-boosted trees, linear,
-  logistic and generalized linear regression, naive Bayes, SVM, k-means,
-  Gaussian mixtures, …), trained by Spark on the master, with optional grid
-  search; the download is a Spark `PipelineModel` ready to predict;
-- Parquet datasets, and a uniform random sample when a dataset exceeds the
-  row cap;
-- Ray: a parameter server holds the model across rounds, and single-machine
-  runs train their shards as parallel Ray tasks.
-
-If the master already has PySpark, Ray and Java, it is detected and used. Set
-`SPARK_MASTER_URL` or `RAY_ADDRESS` (see `config/.env.example`) to use an
-existing cluster.
+| | |
+|---|---|
+| ![Workers](distributed-ai-platform/docs/images/workers.png) | ![Training](distributed-ai-platform/docs/images/training.png) |
+| Workers with their lent slice, health and languages | A model trained on four shards across two workers |
 
 ## Quick start
 
-Requires Docker.
+You need [Docker](https://www.docker.com/products/docker-desktop/) (Docker
+Desktop on Windows and macOS, Docker Engine or Desktop on Linux).
 
-**From VS Code (no terminal):** install the extension and click **Set Up
-Platform on This Computer** when it asks. It starts Docker if needed,
-downloads the platform, starts it and connects. From then on, opening VS Code
-starts it by itself.
+**From VS Code, with no terminal:** install the **Distributed Compute**
+extension and click **Set Up Now** when it asks. It starts Docker if needed,
+downloads the platform, starts it and connects. Then click **Add Compute
+Node**.
 
 **From a terminal:**
 
 ```bash
-cd distributed-ai-platform
-make up            # or: make up-dev (adds two test SSH workers)
+git clone https://github.com/lekshmipriya04/Distributed-Data-Processing-Task-Execution-Platform.git
+cd Distributed-Data-Processing-Task-Execution-Platform/distributed-ai-platform
+make up          # first start builds the images: several minutes
 ```
 
-`make up` creates `config/.env` from the example on first use, and HDFS
-folders are created on every start, so there is nothing else to run.
+Open the dashboard at **http://localhost:3001**, go to **SSH Connection** and
+add a worker. Because the platform runs inside Docker:
 
-Add workers with **Add Compute Node** in VS Code, or in the dashboard at
-http://localhost:3001 under **SSH Connection**. The master runs in Docker, so add this computer as
-`host.docker.internal`, not `localhost`.
+| Worker | Address to enter |
+|---|---|
+| This computer | `host.docker.internal` (turn on SSH / Remote Login first) |
+| Another machine on your network | its IP address, e.g. `192.168.1.20` |
+| Two test workers, to try it out | run `make up-dev`, then `ssh-provider`, port `2222`, user `provider`, password `providerpass` |
 
-**Sign-in.** The platform is built to run on your own machine. With the
-default `ENVIRONMENT=development`, the dashboard needs no login, and the VS
-Code extension gets its token automatically from the local gateway. Every port
-listens on `127.0.0.1` only, so nobody else on your network can reach it. To
-use it from another computer on your network, start it with
-`BIND_ADDR=0.0.0.0 make up`; then anyone who can reach those ports can run
-code on your workers.
+Use a dedicated, non-admin account on each worker: tasks run with its
+permissions.
 
-With `ENVIRONMENT=production` every request needs a token and automatic
-sign-in is off. Mint tokens with `python generate_token.py --sub <user>` and
-paste them with **Configure Authentication**. Outside `development`, the
-services refuse to start with placeholder or short secrets.
+`make down` stops everything and keeps your data; `make reset` deletes it.
 
-Stop with `make down` (keeps your data). `make reset` also deletes the
-database and HDFS volumes.
+## One computer, or a team
 
-For frontend development with hot reload, stop the `frontend` container and
-run `cd frontend && npm install && npm run dev`.
+By default the platform is for **one person on one computer**: every port
+listens on `127.0.0.1`, and you are the local user with no sign-in.
 
-## Tests
+For **several people**, run it on one machine in production mode with HTTPS in
+front, and give each person a token (`python generate_token.py --sub <name>`).
+They sign in from the dashboard's account button or VS Code's **Configure
+Authentication**. Each user sees only their own workers, runs, datasets and
+models. Step-by-step: [docs/DEPLOYMENT.md](distributed-ai-platform/docs/DEPLOYMENT.md).
+
+## Supported platforms
+
+| | Supported | Tested |
+|---|---|---|
+| Platform (Docker) | Linux, macOS, Windows | macOS; CI runs it on Linux |
+| VS Code extension | VS Code 1.90+ on Linux, macOS, Windows | real VS Code on macOS; CI runs Linux, macOS, Windows |
+| Web dashboard | Chrome, Edge, Firefox, Safari; Android and iOS browsers | Chromium, Firefox, WebKit, Android and iPhone emulation (Playwright) |
+| Workers | Linux and macOS with `sshd` + `python3`; Windows with OpenSSH | Linux; Windows workers not yet verified |
+
+## How it works
+
+```
+VS Code extension ─► extension-gateway :8090 ─┐
+Web dashboard :3001 ─► api-gateway :8000 ─────┼─► ssh-executor (the master) ──SSH──► your workers
+                                              └─► storage-service ─► HDFS (datasets)
+```
+
+![Platform architecture](distributed-ai-platform/docs/architecture-overview.svg)
+
+- **Onboarding.** The master shows the worker's host-key fingerprint before
+  any credential is sent. Your password is used once to install a
+  `restrict ssh-ed25519 … dp-platform:<id>` key, then dropped. If a worker
+  refuses password logins, you get one command to run there instead.
+- **Tasks.** Each task runs in its own temporary directory on the worker, with
+  a clean environment, its own process group, `nice`, core pinning (Linux) and
+  a timeout. Afterwards the processes are killed and the directory deleted:
+  on success, failure, timeout or cancel.
+- **Resources.** Cores and memory are reserved per worker so jobs never
+  overcommit it. A GPU slice is enforced for Python tasks where PyTorch is
+  already installed.
+- **Training.** The master splits the dataset into shards sized by each
+  worker's speed, sends each worker its shard and a small script (or your
+  `model.py`), and averages the results over several rounds (federated
+  averaging).
+- **Spark + Ray (optional).** `make enable-spark-ray`, or **Enable Spark + Ray
+  Engine** in VS Code, adds about 1 GB to the master (never to workers): every
+  Spark MLlib model with grid search, Parquet data, and Ray for the parameter
+  server and parallel local shards. Existing clusters can be used via
+  `SPARK_MASTER_URL` and `RAY_ADDRESS`.
+
+More: [architecture](distributed-ai-platform/docs/architecture.md) ·
+[ports and protocols](distributed-ai-platform/docs/connections.md) ·
+[API](distributed-ai-platform/docs/API_CONTRACT.md) ·
+[project overview](distributed-ai-platform/project.md)
+
+## Development and tests
 
 ```bash
 cd distributed-ai-platform
-pytest tests -q                         # Python unit tests, incl. a local sandbox run
-make lint                               # ruff (E9,F) + mypy shared/
-cd frontend && npm run build
-cd ../distributed-compute-vscode && npm test
-cd ../services/extension-gateway && go test ./...
+make init && pytest tests -q && make lint            # Python services
+(cd services/extension-gateway && go test ./...)     # Go gateway
+(cd frontend && npm ci && npm test && npm run build) # dashboard
+(cd distributed-compute-vscode && npm ci && npm test && npm run test:vscode)
 ```
 
-## Honest limits
+End-to-end tests run against the real stack (`make up-dev`) as three users on
+three ports:
 
-- The sandbox isolates **files and processes, not the kernel**. Tasks run with
-  the SSH user's permissions, can read that user's files and can use the
-  network. Register a dedicated non-admin account on each worker. Cleanup kills
-  the process group and, as a best effort, escaped processes still in the
-  sandbox. A task that deliberately leaves the group and the sandbox directory
-  can outlive the job.
-- Memory is a scheduling figure. No kernel memory limit is applied. On macOS,
-  cores are not pinned.
-- The GPU cap is PyTorch's allocator limit, applied only where torch is already
-  installed. It is best effort.
-- Windows workers are implemented but **not verified on a real Windows host**.
-- The platform has **not been tested against physical remote machines**.
-  Verification of the current code comes from unit tests and a local sandbox
-  run on the development host. The Docker test workers (`make up-dev`) are
-  there for end-to-end checks, but no such run is recorded for this version.
-- There is no database migration tool beyond a small list of additive
-  `ADD COLUMN IF NOT EXISTS` statements.
-- `ssh-executor` runs caller-supplied code on worker machines. Treat it as a
-  privileged remote-code-execution service, and put HTTPS in front of the
-  gateway, because the onboarding password travels in a request body.
+```bash
+(cd frontend && npm run e2e:serve && npm run test:e2e)  # Chromium, Firefox, WebKit, Android, iOS
+(cd distributed-compute-vscode && npm run test:e2e)     # needs gateways on 8091/8092, see the CI e2e job
+```
+
+For dashboard development with hot reload: `cd frontend && npm run dev`
+(http://localhost:3000).
+
+## Limits
+
+- The sandbox isolates **files and processes, not the kernel**. Tasks can read
+  the SSH user's files and use the network; that is why workers need a
+  dedicated, non-admin account. A task that deliberately escapes its process
+  group can outlive the job.
+- Memory slices are a scheduling figure, not a kernel limit; cores are not
+  pinned on macOS. The GPU cap is best effort and needs PyTorch on the worker.
+- End-to-end tests use Docker test workers. **Physical remote machines and
+  Windows workers have not been verified yet.**
+- `ssh-executor` runs code you send on your workers: treat it as a privileged
+  service. Put HTTPS in front of it when anyone else can reach it.
+- Database changes are additive only; there is no migration tool yet.
+
+## Contributing
+
+Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Please read
+the [Code of Conduct](CODE_OF_CONDUCT.md), and report security issues
+privately as described in [SECURITY.md](SECURITY.md).
 
 ## Repository layout
 
 ```text
-.
-|-- README.md
-`-- distributed-ai-platform/
-    |-- docker-compose.yml, Makefile, generate_token.py
-    |-- config/                      .env.example
-    |-- docs/                        architecture, connections, API contract
-    |-- frontend/                    React/Vite application
-    |-- services/                    api-gateway, storage-service, ssh-executor, extension-gateway (Go)
-    |-- shared/                      shared Python library
-    |-- distributed-compute-vscode/  VS Code extension
-    |-- infrastructure/docker/       Postgres init, Hadoop config
-    |-- scripts/                     setup_hdfs.sh
-    `-- tests/                       unit tests, locust load test
+distributed-ai-platform/
+├── docker-compose.yml, Makefile, generate_token.py
+├── config/                      .env.example (settings and secrets)
+├── frontend/                    web dashboard (React, Vite, nginx) + Playwright tests
+├── distributed-compute-vscode/  VS Code extension
+├── services/                    api-gateway, storage-service, ssh-executor (Python), extension-gateway (Go)
+├── shared/                      shared Python library
+├── infrastructure/docker/       Postgres init, Hadoop config
+├── docs/                        architecture, API, deployment, images
+└── tests/                       Python unit tests, load test
 ```
 
-## License
+## Authors and license
 
-The VS Code extension is under the [MIT License](distributed-ai-platform/distributed-compute-vscode/LICENSE); see individual components for their terms.
+Made by AARON R, M R LEKSHMI PRIYA and ALEENA VJ. Released under the
+[MIT License](LICENSE).

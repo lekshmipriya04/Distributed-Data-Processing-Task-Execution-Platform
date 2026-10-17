@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Code2, Play, Server, Cpu, Square, History, RefreshCw, Loader2 } from 'lucide-react';
+import { Code2, Play, Server, Cpu, Square, History, RefreshCw, Loader2, RotateCcw } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 import { Card, SectionTitle, PrimaryButton, SecondaryButton, StatusBadge, NumberField } from '../components/common/Primitives';
 import { ApiError, errorMessage } from '../api/client';
@@ -10,6 +10,7 @@ import type { ExecutionPolicy } from '../api/ssh';
 import {
   sshApi,
   executionPolicyLabel,
+  shortVersion,
   TERMINAL_BATCH_STATUSES,
   type BatchCreateRequest,
   type BatchResponse,
@@ -162,6 +163,7 @@ export function TaskExecutorPage() {
           : null;
 
   const running = batch !== null && !isTerminal(batch.batch.status);
+  const unfinished = batch ? batch.batch.failed + (batch.batch.cancelled ?? 0) : 0;
 
   const handleSubmit = async () => {
     if (blocker || !runtime) return;
@@ -188,6 +190,23 @@ export function TaskExecutorPage() {
       showError(errorMessage(e, 'Submit failed'));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const [retrying, setRetrying] = useState(false);
+  const handleRetry = async (failedOnly: boolean) => {
+    if (!batch) return;
+    setRetrying(true);
+    try {
+      const created = await sshApi.retryBatch(batch.batch.id, failedOnly);
+      setBatch({ batch: created, tasks: [] });
+      setSearchParams({ batch: created.id });
+      showSuccess(`Started again (${created.total} task${created.total === 1 ? '' : 's'})`);
+      loadRecent();
+    } catch (e) {
+      showError(errorMessage(e, 'Retry failed'));
+    } finally {
+      setRetrying(false);
     }
   };
 
@@ -262,7 +281,7 @@ export function TaskExecutorPage() {
             <div className="sm:col-span-2">
               <span className="text-xs text-slate-500 font-medium block mb-2">Language</span>
               {runtimes.length === 0 ? (
-                <span className="text-sm text-slate-400">Loading…</span>
+                <span className="text-sm text-slate-500">Loading…</span>
               ) : (
                 <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Language">
                   {[...runtimes]
@@ -284,7 +303,7 @@ export function TaskExecutorPage() {
                               ? 'border-blue-600 bg-blue-600 text-white shadow-sm'
                               : available
                                 ? 'border-slate-300 bg-white text-slate-700 hover:border-blue-400 hover:text-blue-700'
-                                : 'border-dashed border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
+                                : 'border-dashed border-slate-200 bg-slate-50 text-slate-500 cursor-not-allowed'
                           }`}
                         >
                           {r.name}
@@ -357,7 +376,7 @@ export function TaskExecutorPage() {
                   : isCustom
                     ? 'uses your command'
                     : version !== undefined
-                      ? `${runtime?.name} ${version}`.trim()
+                      ? `${runtime?.name ?? ''} ${shortVersion(runtime?.name ?? '', version)}`.trim()
                       : `no ${runtime?.name ?? 'runtime'}`;
               return (
                 <button
@@ -370,7 +389,7 @@ export function TaskExecutorPage() {
                       ? 'bg-blue-50 border-blue-500 text-blue-800'
                       : eligible
                         ? 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'
-                        : 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed'
+                        : 'bg-slate-50 border-slate-200 text-slate-500 cursor-not-allowed'
                   }`}
                 >
                   <div className="flex items-center justify-between">
@@ -381,14 +400,14 @@ export function TaskExecutorPage() {
                     <span className="text-slate-500">
                       {n.host}:{n.port} · {n.allocated_cpu} cores
                     </span>
-                    <span className={eligible ? 'text-emerald-700' : 'text-slate-400'}>{reason}</span>
+                    <span className={eligible ? 'text-emerald-700' : 'text-slate-500'}>{reason}</span>
                   </div>
                 </button>
               );
             })}
           </div>
         )}
-        <p className="text-xs text-slate-400 mt-3">
+        <p className="text-xs text-slate-500 mt-3">
           Only workers that have the chosen language can be selected. Leave all unselected to use every eligible worker.
         </p>
       </Card>
@@ -398,10 +417,11 @@ export function TaskExecutorPage() {
         <SectionTitle>Code &amp; inputs</SectionTitle>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium mb-1 text-slate-700">
-              Code {runtime && !isCustom ? <span className="text-slate-400 font-normal font-mono">({runtime.filename})</span> : null}
+            <label htmlFor="exec-code" className="block text-sm font-medium mb-1 text-slate-700">
+              Code {runtime && !isCustom ? <span className="text-slate-500 font-normal font-mono">({runtime.filename})</span> : null}
             </label>
             <textarea
+              id="exec-code"
               className="w-full border border-slate-300 rounded-lg p-3 bg-slate-50 font-mono text-sm h-64 outline-none focus:ring-2 focus:ring-blue-500 shadow-inner"
               value={code}
               spellCheck={false}
@@ -409,10 +429,11 @@ export function TaskExecutorPage() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1 text-slate-700">
-              Inputs <span className="text-slate-400 font-normal">(one line = one task, delivered on stdin and as input.txt)</span>
+            <label htmlFor="exec-inputs" className="block text-sm font-medium mb-1 text-slate-700">
+              Inputs <span className="text-slate-500 font-normal">(one line = one task, delivered on stdin and as input.txt)</span>
             </label>
             <textarea
+              id="exec-inputs"
               className="w-full border border-slate-300 rounded-lg p-3 font-mono text-sm h-64 outline-none focus:ring-2 focus:ring-blue-500"
               value={inputsText}
               spellCheck={false}
@@ -457,17 +478,31 @@ export function TaskExecutorPage() {
               {running ? <Loader2 size={18} className="text-blue-600 animate-spin" /> : <Cpu size={18} className="text-blue-600" />}
               <h3 className="font-semibold text-slate-900">
                 Batch {batch.batch.id.slice(0, 8)}{' '}
-                <span className="text-slate-400 font-normal">
+                <span className="text-slate-500 font-normal">
                   · {batch.batch.runtime} · {executionPolicyLabel(batch.batch.execution_policy)}
                 </span>
               </h3>
             </div>
             <div className="flex items-center gap-3 text-sm">
               <StatusBadge status={batch.batch.status} />
-              <span className="text-slate-500">
+              <span className="text-slate-500" data-testid="batch-summary">
                 {batch.batch.completed}/{batch.batch.total} done · {batch.batch.failed} failed
                 {batch.batch.cancelled ? ` · ${batch.batch.cancelled} cancelled` : ''}
               </span>
+              {!running && unfinished > 0 && unfinished < batch.batch.total && (
+                <SecondaryButton onClick={() => handleRetry(true)} disabled={retrying}>
+                  <span className="flex items-center gap-1.5">
+                    <RotateCcw size={14} /> Retry {unfinished} failed
+                  </span>
+                </SecondaryButton>
+              )}
+              {!running && (
+                <SecondaryButton onClick={() => handleRetry(false)} disabled={retrying}>
+                  <span className="flex items-center gap-1.5">
+                    <RotateCcw size={14} /> {retrying ? 'Starting…' : 'Run again'}
+                  </span>
+                </SecondaryButton>
+              )}
               {running && (
                 <SecondaryButton onClick={handleCancel} disabled={cancelling || batch.batch.status === 'cancelling'}>
                   <span className="flex items-center gap-1.5">
@@ -479,14 +514,14 @@ export function TaskExecutorPage() {
           </div>
           {batch.batch.message && <p className="text-sm text-slate-600 mb-3">{batch.batch.message}</p>}
           <div className="space-y-3">
-            {batch.tasks.length === 0 && <p className="text-sm text-slate-400 italic">Waiting for tasks…</p>}
+            {batch.tasks.length === 0 && <p className="text-sm text-slate-500 italic">Waiting for tasks…</p>}
             {batch.tasks.map((t) => (
               <div key={t.id} className="border border-slate-200 rounded-lg overflow-hidden">
                 <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-slate-50">
                   <span className="text-sm font-medium text-slate-700">
                     Task #{t.seq}
                     {t.attempts > 1 ? ` (attempt ${t.attempts})` : ''}
-                    <span className="text-slate-400 font-normal"> · {nodeName(t.node_id)}</span>
+                    <span className="text-slate-500 font-normal"> · {nodeName(t.node_id)}</span>
                   </span>
                   <StatusBadge status={t.status} />
                 </div>
@@ -511,12 +546,12 @@ export function TaskExecutorPage() {
             <History size={18} className="text-blue-600" />
             <h3 className="font-semibold text-slate-900">Recent batches</h3>
           </div>
-          <button onClick={loadRecent} className="text-slate-400 hover:text-slate-700" title="Reload">
+          <button onClick={loadRecent} className="text-slate-500 hover:text-slate-700" title="Reload">
             <RefreshCw size={15} />
           </button>
         </div>
         {recent.length === 0 ? (
-          <p className="text-sm text-slate-400 italic">No batches yet.</p>
+          <p className="text-sm text-slate-500 italic">No batches yet.</p>
         ) : (
           <div className="space-y-1.5">
             {recent.map((b) => (
@@ -533,7 +568,7 @@ export function TaskExecutorPage() {
                 <span className="text-slate-500">
                   {b.completed}/{b.total} done{b.failed ? ` · ${b.failed} failed` : ''}
                 </span>
-                <span className="text-xs text-slate-400">{new Date(b.created_at).toLocaleString()}</span>
+                <span className="text-xs text-slate-500">{new Date(b.created_at).toLocaleString()}</span>
                 <span className="ml-auto">
                   <StatusBadge status={b.status} />
                 </span>

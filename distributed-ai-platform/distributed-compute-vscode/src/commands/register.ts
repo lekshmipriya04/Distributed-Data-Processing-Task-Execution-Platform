@@ -52,7 +52,6 @@ export function registerCommands(deps: CommandDeps): void {
 
   reg('distributedCompute.setUpPlatform', () => setUpPlatform(deps));
   reg('distributedCompute.stopPlatform', () => stopPlatform(deps));
-  reg('distributedCompute.openDashboard', () => vscode.env.openExternal(vscode.Uri.parse(readSettings().dashboardUrl)));
   reg('distributedCompute.connect', () => doConnect(deps));
   reg('distributedCompute.disconnect', () => {
     deps.connection.disconnect();
@@ -209,7 +208,7 @@ async function showConnectionStatus(deps: CommandDeps): Promise<void> {
   const snap = deps.connection.snapshot();
   const connected = snap.state === 'connected';
   const actions = [
-    connected ? 'Open Dashboard' : 'Start Platform on This Computer',
+    connected ? 'Add Compute Node' : 'Start Platform on This Computer',
     connected ? 'View Cluster Status' : 'Connect to Master',
     'View Jobs',
     'Refresh Platform State',
@@ -222,8 +221,8 @@ async function showConnectionStatus(deps: CommandDeps): Promise<void> {
   switch (pick) {
     case 'Start Platform on This Computer':
       return void vscode.commands.executeCommand('distributedCompute.setUpPlatform');
-    case 'Open Dashboard':
-      return void vscode.commands.executeCommand('distributedCompute.openDashboard');
+    case 'Add Compute Node':
+      return void vscode.commands.executeCommand('distributedCompute.addNode');
     case 'Connect to Master':
       return void vscode.commands.executeCommand('distributedCompute.connect');
     case 'View Cluster Status':

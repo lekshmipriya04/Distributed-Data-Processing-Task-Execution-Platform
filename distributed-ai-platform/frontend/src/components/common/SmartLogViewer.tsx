@@ -90,7 +90,7 @@ export function SmartLogViewer({ stdout, stderr, exitCode, status, durationMs, l
 
   if (!out && !err && exitCode == null) {
     return status && ['pending', 'running'].includes(status) ? (
-      <p className="px-4 py-3 text-xs text-slate-400 italic">Waiting for output…</p>
+      <p className="px-4 py-3 text-xs text-slate-500 italic">Waiting for output…</p>
     ) : null;
   }
 
@@ -118,7 +118,7 @@ export function SmartLogViewer({ stdout, stderr, exitCode, status, durationMs, l
             <Clock size={12} /> {formatDuration(durationMs)}
           </span>
         )}
-        {label && <span className="text-xs text-slate-400">{label}</span>}
+        {label && <span className="text-xs text-slate-500">{label}</span>}
         <span className="ml-auto flex gap-2">
           {keyError && <CopyButton text={errorText} label="Copy error" />}
           <CopyButton text={fullLog} label="Copy logs" />
@@ -163,7 +163,7 @@ export function SmartLogViewer({ stdout, stderr, exitCode, status, durationMs, l
           ))}
         </div>
         <label className="relative ml-auto">
-          <Search size={13} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Search size={13} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-slate-500" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}

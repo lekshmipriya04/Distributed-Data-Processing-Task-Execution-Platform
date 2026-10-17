@@ -2,3 +2,7 @@ node_modules
 dist
 .DS_Store
 *.log
+e2e
+e2e-results
+playwright-report
+playwright.config.ts

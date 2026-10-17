@@ -16,6 +16,7 @@ services:
   postgres:
     image: postgres:15
     container_name: postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-platform}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-platform_secret}
@@ -40,9 +41,13 @@ services:
   namenode:
     image: apache/hadoop:3
     container_name: namenode
+    restart: unless-stopped
     user: root
     environment:
       - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+      # The JVM default (1/4 of RAM) is far more than this workload needs and
+      # gets containers OOM-killed on 8 GB machines.
+      - HADOOP_HEAPSIZE_MAX=512m
     command: >
       bash -c "if [ ! -d /hadoop/dfs/name/current ]; then hdfs namenode -format platform -force -nonInteractive; fi && hdfs namenode"
     ports:
@@ -87,6 +92,7 @@ services:
   datanode-1:
     image: apache/hadoop:3
     container_name: datanode-1
+    restart: unless-stopped
     hostname: datanode-1
     # Data dir is a named volume owned by root; the datanode enforces
     # dfs.datanode.data.dir.perm (700) via chmod on startup, which the image's
@@ -99,6 +105,9 @@ services:
         condition: service_healthy
     environment:
       - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+      # The JVM default (1/4 of RAM) is far more than this workload needs and
+      # gets containers OOM-killed on 8 GB machines.
+      - HADOOP_HEAPSIZE_MAX=256m
     volumes:
       - hadoop_datanode_1:/hadoop/dfs/data
       - ./infrastructure/docker/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
@@ -109,6 +118,7 @@ services:
   datanode-2:
     image: apache/hadoop:3
     container_name: datanode-2
+    restart: unless-stopped
     hostname: datanode-2
     user: root
     command: ["hdfs", "datanode"]
@@ -117,6 +127,9 @@ services:
         condition: service_healthy
     environment:
       - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+      # The JVM default (1/4 of RAM) is far more than this workload needs and
+      # gets containers OOM-killed on 8 GB machines.
+      - HADOOP_HEAPSIZE_MAX=256m
     volumes:
       - hadoop_datanode_2:/hadoop/dfs/data
       - ./infrastructure/docker/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
@@ -127,6 +140,7 @@ services:
   datanode-3:
     image: apache/hadoop:3
     container_name: datanode-3
+    restart: unless-stopped
     hostname: datanode-3
     user: root
     command: ["hdfs", "datanode"]
@@ -135,6 +149,9 @@ services:
         condition: service_healthy
     environment:
       - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+      # The JVM default (1/4 of RAM) is far more than this workload needs and
+      # gets containers OOM-killed on 8 GB machines.
+      - HADOOP_HEAPSIZE_MAX=256m
     volumes:
       - hadoop_datanode_3:/hadoop/dfs/data
       - ./infrastructure/docker/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml

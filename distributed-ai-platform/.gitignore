@@ -44,3 +44,8 @@ config/certs/
 frontend/node_modules/
 frontend/dist/
 frontend/.npm/
+
+# Browser tests (frontend/)
+frontend/e2e-results/
+frontend/playwright-report/
+frontend/blob-report/

@@ -4,11 +4,12 @@
 // All requests go through the Vite dev-server proxy ('/api' -> gateway at
 // localhost:8000, see vite.config.ts) so we always call relative paths here.
 //
-// AUTH GAP: there is no /login endpoint anywhere in this backend
-// (shared/common/auth.py only *validates* a pre-issued JWT). Until a real
-// identity provider sits in front of the Gateway, the token has to come from
-// somewhere else -- for local dev, mint one with generate_token.py against the
-// same JWT_SECRET as config/.env and store it via setToken() below.
+// Sign-in: the backend validates pre-issued JWTs (generate_token.py, same
+// JWT_SECRET as config/.env); there is no /login endpoint. The account menu
+// stores the token here. localStorage is per origin, so each host:port of the
+// dashboard keeps its own user. Without a token, development backends treat
+// requests as the local "dev-user"; production backends answer 401, which
+// opens the sign-in dialog (AUTH_REQUIRED_EVENT).
 // ---------------------------------------------------------------------------
 
 const TOKEN_KEY = 'platform_jwt_token';
@@ -34,6 +35,52 @@ export function clearToken() {
     localStorage.removeItem(TOKEN_KEY);
   } catch {
     /* storage unavailable */
+  }
+}
+
+/** Fired on every 401 so the account menu can ask the user to sign in. */
+export const AUTH_REQUIRED_EVENT = 'dc:auth-required';
+
+export interface TokenInfo {
+  sub: string;
+  /** Expiry, ms since epoch; undefined when the token has none. */
+  expiresAt?: number;
+}
+
+/**
+ * Reads the subject and expiry of a JWT for display. The signature is not
+ * checked here; the backend does that on every request.
+ */
+export function tokenInfo(token: string | null): TokenInfo | null {
+  if (!token) return null;
+  const part = token.split('.')[1];
+  if (!part) return null;
+  try {
+    const json = atob(part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '='));
+    const claims = JSON.parse(json) as { sub?: unknown; exp?: unknown };
+    if (typeof claims.sub !== 'string' || claims.sub === '') return null;
+    return { sub: claims.sub, expiresAt: typeof claims.exp === 'number' ? claims.exp * 1000 : undefined };
+  } catch {
+    return null;
+  }
+}
+
+export function isExpired(info: TokenInfo | null, now = Date.now()): boolean {
+  return info?.expiresAt !== undefined && info.expiresAt <= now;
+}
+
+/**
+ * A 401 about the platform token carries `WWW-Authenticate: Bearer`. Other
+ * 401s (a worker refusing an SSH password during onboarding) do not, and must
+ * not send the user to the sign-in dialog.
+ */
+export function isSignInRequired(res: Pick<Response, 'status' | 'headers'>): boolean {
+  return res.status === 401 && /bearer/i.test(res.headers.get('www-authenticate') ?? '');
+}
+
+function reportAuthRequired(res: Response) {
+  if (isSignInRequired(res) && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
   }
 }
 
@@ -158,7 +205,10 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     body: body === undefined ? undefined : isFormData ? (body as FormData) : JSON.stringify(body),
   });
 
-  if (!res.ok) throw await errorFromResponse(res);
+  if (!res.ok) {
+    reportAuthRequired(res);
+    throw await errorFromResponse(res);
+  }
 
   // 204 / empty body responses
   const text = await res.text();
@@ -168,7 +218,10 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
 /** GET a file with auth and hand it to the browser as a download. */
 export async function downloadFile(path: string, filename: string): Promise<void> {
   const res = await fetch(path, { headers: getAuthHeaders() });
-  if (!res.ok) throw await errorFromResponse(res);
+  if (!res.ok) {
+    reportAuthRequired(res);
+    throw await errorFromResponse(res);
+  }
   const blob = await res.blob();
   // Prefer the server's name: its extension depends on what was produced.
   const served = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1];

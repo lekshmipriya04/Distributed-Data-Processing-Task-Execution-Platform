@@ -100,7 +100,7 @@ export function EngineSelector({ value, onChange, onSparkAvailable }: Props) {
                   {id === 'python' ? 'Always available' : available ? `Spark ${versions.spark} · Ray ${versions.ray}` : 'Not installed'}
                 </span>
               </div>
-              <p className="text-xs text-slate-500 leading-relaxed">{COPY[id].desc}</p>
+              <p className="text-xs text-slate-600 leading-relaxed">{COPY[id].desc}</p>
             </button>
           );
         })}

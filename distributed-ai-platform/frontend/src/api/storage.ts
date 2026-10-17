@@ -79,7 +79,7 @@ export async function readCsvHeader(file: File): Promise<string[]> {
   try {
     const head = await file.slice(0, 64 * 1024).text();
     const firstLine = head.split(/\r?\n/, 1)[0] ?? '';
-    return splitCsvLine(firstLine.replace(/^﻿/, ''))
+    return splitCsvLine(firstLine.replace(/^\uFEFF/, ''))
       .map((c) => c.trim())
       .filter(Boolean);
   } catch {

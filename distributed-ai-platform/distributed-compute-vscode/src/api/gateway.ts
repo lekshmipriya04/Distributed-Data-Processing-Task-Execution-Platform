@@ -345,7 +345,7 @@ export class GatewayApi {
     return raw.items as Dataset[];
   }
 
-  /** Upload a local file to storage-service (multipart, like the dashboard). */
+  /** Upload a local file to storage-service via multipart streaming. */
   async uploadDataset(name: string, filename: string, content: Uint8Array, signal?: AbortSignal): Promise<Dataset> {
     const form = new FormData();
     form.append('name', name);

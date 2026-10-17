@@ -88,6 +88,8 @@ export interface NodeResecureRequest {
 
 export interface NodeUpdateRequest {
   name?: string | null;
+  /** "draining": running work finishes, no new tasks or training; "online": resume. */
+  status?: 'online' | 'draining';
   allocated_cpu?: number | null;
   allocated_memory_gb?: number | null;
   allocated_gpu_count?: number | null;
@@ -386,6 +388,10 @@ export const sshApi = {
 
   getBatchTasks: (id: string) => apiRequest<BatchTasksResponse>(`${BASE}/batches/${id}/tasks`),
 
+  /** Run a finished batch again as a new one; `failedOnly` keeps only failed/cancelled inputs. */
+  retryBatch: (id: string, failedOnly = false) =>
+    apiRequest<BatchResponse>(`${BASE}/batches/${id}/retry${failedOnly ? '?failed_only=true' : ''}`, { method: 'POST' }),
+
   cancelBatch: (id: string) =>
     apiRequest<BatchResponse>(`${BASE}/batches/${id}/cancel`, { method: 'POST' }),
 
@@ -412,3 +418,16 @@ export const sshApi = {
   deleteTrainingRun: (id: string) =>
     apiRequest<null>(`${BASE}/train/${id}`, { method: 'DELETE' }),
 };
+
+/**
+ * The version to show next to a runtime's name: the number from a tool's
+ * --version line ("GNU bash, version 5.2.21(1)" -> "5.2.21"), or nothing when
+ * the "version" only repeats the name ("POSIX Shell" / "shell").
+ */
+export function shortVersion(name: string, version: string | null | undefined): string {
+  const v = (version ?? '').trim();
+  if (!v) return '';
+  const number = /\d+(?:\.\d+)+/.exec(v);
+  if (number) return number[0];
+  return name.toLowerCase().includes(v.toLowerCase()) ? '' : v;
+}

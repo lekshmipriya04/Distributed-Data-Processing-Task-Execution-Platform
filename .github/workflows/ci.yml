@@ -67,8 +67,14 @@ jobs:
     - name: Run engine tests
       run: pytest tests/unit/services/test_ml_engines.py -v -rs
 
+  # The dashboard builds and passes its unit tests on every desktop OS
+  # (browser engines are covered by the e2e job).
   frontend:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: distributed-ai-platform/frontend
@@ -78,13 +84,14 @@ jobs:
     - name: Set up Node
       uses: actions/setup-node@v4
       with:
-        node-version: "20"
+        node-version: "22"
         cache: "npm"
         cache-dependency-path: distributed-ai-platform/frontend/package-lock.json
 
-    - name: Install, test and build
+    - name: Install, lint, test and build
       run: |
         npm ci
+        npm run lint
         npm test
         npm run build
 
@@ -131,11 +138,11 @@ jobs:
         name: distributed-compute-vsix
         path: distributed-ai-platform/distributed-compute-vscode/distributed-compute.vsix
 
-  # The whole platform in Docker with the two test SSH workers, three users on
-  # three gateway ports, and VS Code driving a real run.
+  # The whole platform in Docker with the two test SSH workers: three users on
+  # three gateway ports and three dashboard ports, VS Code and five browsers.
   e2e:
     runs-on: ubuntu-latest
-    needs: [extension, go, python]
+    needs: [extension, frontend, go, python]
     defaults:
       run:
         working-directory: distributed-ai-platform
@@ -184,6 +191,23 @@ jobs:
     - name: VS Code against the gateway on port 8091
       working-directory: distributed-ai-platform/distributed-compute-vscode
       run: DC_E2E_URL=http://127.0.0.1:8091 xvfb-run -a npm run test:vscode
+
+    - name: Website in Chromium, Firefox, WebKit and on phones (ports 4101-4103)
+      working-directory: distributed-ai-platform/frontend
+      run: |
+        npm ci
+        npx playwright install --with-deps chromium firefox webkit
+        node e2e/serve.mjs
+        npx playwright test
+
+    - name: Keep the browser test report
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: playwright-report
+        path: |
+          distributed-ai-platform/frontend/playwright-report
+          distributed-ai-platform/frontend/e2e-results
 
     - name: Logs on failure
       if: failure()

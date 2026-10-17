@@ -9,7 +9,9 @@ import {
   Fingerprint,
   KeyRound,
   Loader2,
+  PauseCircle,
   Pencil,
+  PlayCircle,
   Plus,
   RefreshCw,
   RotateCw,
@@ -23,6 +25,7 @@ import { useToast } from '../context/ToastContext';
 import { Card, ConfirmDialog, NumberField, PrimaryButton, SecondaryButton, StatusBadge } from '../components/common/Primitives';
 import { ApiError, errorMessage } from '../api/client';
 import {
+  shortVersion,
   sshApi,
   type NodeCapabilities,
   type NodeConnectResponse,
@@ -85,7 +88,7 @@ function GpuSliceControl({
       <div className="text-sm">
         <span className="text-xs text-slate-500 font-medium block mb-1">GPU slice</span>
         <input type="range" disabled min={0} max={1} value={0} className="w-full opacity-40" readOnly />
-        <span className="text-xs text-slate-400">no GPU</span>
+        <span className="text-xs text-slate-500">no GPU</span>
       </div>
     );
   }
@@ -181,7 +184,7 @@ export function SSHExecutorPage() {
       <OnboardingCard runtimeNames={runtimeNames} onRegistered={loadNodes} />
 
       <Card>
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-4">
           <div className="flex items-center gap-2">
             <Server size={18} className="text-blue-600" />
             <h2 className="text-lg font-semibold text-slate-900">Workers</h2>
@@ -190,7 +193,7 @@ export function SSHExecutorPage() {
             <span className="text-sm text-slate-500">
               {totalAllocatedCores} cores lent across {nodes.length} worker(s)
             </span>
-            <button onClick={loadNodes} className="text-slate-400 hover:text-slate-700" title="Reload list">
+            <button onClick={loadNodes} className="text-slate-500 hover:text-slate-700" title="Reload list">
               <RefreshCw size={15} />
             </button>
           </div>
@@ -394,10 +397,11 @@ function OnboardingCard({
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-medium mb-1 text-slate-700">
-            Name <span className="text-slate-400 font-normal">(optional)</span>
+          <label htmlFor="onb-name" className="block text-sm font-medium mb-1 text-slate-700">
+            Name <span className="text-slate-500 font-normal">(optional)</span>
           </label>
           <input
+            id="onb-name"
             className={INPUT_CLS}
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -405,8 +409,9 @@ function OnboardingCard({
           />
         </div>
         <div>
-          <label className="block text-sm font-medium mb-1 text-slate-700">Host / IP</label>
+          <label htmlFor="onb-host" className="block text-sm font-medium mb-1 text-slate-700">Host / IP</label>
           <input
+            id="onb-host"
             className={INPUT_CLS}
             disabled={formLocked}
             value={form.host}
@@ -415,9 +420,10 @@ function OnboardingCard({
           />
         </div>
         <div>
-          <label className="block text-sm font-medium mb-1 text-slate-700">Port</label>
+          <label htmlFor="onb-port" className="block text-sm font-medium mb-1 text-slate-700">Port</label>
           <fieldset disabled={formLocked}>
             <NumberField
+              id="onb-port"
               value={form.port}
               min={1}
               max={65535}
@@ -429,8 +435,9 @@ function OnboardingCard({
           </fieldset>
         </div>
         <div>
-          <label className="block text-sm font-medium mb-1 text-slate-700">Username</label>
+          <label htmlFor="onb-user" className="block text-sm font-medium mb-1 text-slate-700">Username</label>
           <input
+            id="onb-user"
             className={INPUT_CLS}
             disabled={formLocked}
             value={form.username}
@@ -484,10 +491,11 @@ function OnboardingCard({
             }}
             autoComplete="off"
           >
-            <label className="block text-sm font-medium mb-1 text-slate-700">
+            <label htmlFor="onb-password" className="block text-sm font-medium mb-1 text-slate-700">
               Password for {connectInfo.username}
             </label>
             <input
+              id="onb-password"
               type="password"
               autoComplete="off"
               name="worker-one-time-password"
@@ -495,7 +503,7 @@ function OnboardingCard({
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
-            <p className="text-xs text-slate-400 mt-1">Used once over the confirmed connection; never stored.</p>
+            <p className="text-xs text-slate-500 mt-1">Used once over the confirmed connection; never stored.</p>
             <div className="mt-4 flex flex-wrap items-center gap-3">
               <PrimaryButton type="submit" disabled={!password || busy !== null}>
                 <span className="flex items-center gap-2">
@@ -574,10 +582,11 @@ function OnboardingCard({
           <CapabilityChips caps={provisioned} runtimeNames={runtimeNames} />
           <div className="space-y-4 mt-5">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">
+              <label htmlFor="onb-cpu" className="block text-sm font-medium text-slate-700 mb-1">
                 Cores to lend: {allocCpu} / {provisioned.detected_cpu}
               </label>
               <input
+                id="onb-cpu"
                 type="range"
                 min={1}
                 max={Math.max(1, provisioned.detected_cpu)}
@@ -587,10 +596,11 @@ function OnboardingCard({
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">
+              <label htmlFor="onb-mem" className="block text-sm font-medium text-slate-700 mb-1">
                 Memory to lend (GB): {allocMem} / {provisioned.detected_memory_gb}
               </label>
               <input
+                id="onb-mem"
                 type="range"
                 min={memBounds(provisioned.detected_memory_gb).min}
                 max={memBounds(provisioned.detected_memory_gb).max}
@@ -610,7 +620,7 @@ function OnboardingCard({
               Cancel
             </SecondaryButton>
           </div>
-          <p className="text-xs text-slate-400 mt-2">
+          <p className="text-xs text-slate-500 mt-2">
             Offer valid until {new Date(provisioned.expires_at).toLocaleString()}.
           </p>
         </div>
@@ -622,7 +632,7 @@ function OnboardingCard({
 // ---------------------------------------------------------------------------
 // One registered worker
 // ---------------------------------------------------------------------------
-type RowAction = 'health' | 'refresh' | 'rotate' | 'resecure' | 'save' | 'delete';
+type RowAction = 'health' | 'refresh' | 'rotate' | 'resecure' | 'save' | 'delete' | 'drain';
 
 function NodeRow({
   node,
@@ -650,6 +660,7 @@ function NodeRow({
   const [resecureOpen, setResecureOpen] = useState(false);
 
   const managed = node.auth_type === 'managed_key';
+  const draining = node.status === 'draining';
 
   const run = async (action: RowAction, fn: () => Promise<NodeResponse>, ok: (n: NodeResponse) => string) => {
     setBusy(action);
@@ -702,16 +713,16 @@ function NodeRow({
   };
 
   const iconBtn =
-    'p-1.5 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed';
+    'p-1.5 rounded-md text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed';
   const mem = memBounds(node.detected_memory_gb);
 
   return (
     <div className="border border-slate-200 rounded-lg px-4 py-3">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 sm:gap-3">
         <div className="min-w-0">
           <div className="font-medium text-slate-900 flex flex-wrap items-center gap-2">
             {node.name}
-            <span className="text-slate-400 font-normal text-sm">
+            <span className="text-slate-500 font-normal text-sm">
               {node.username}@{node.host}:{node.port}
             </span>
             {managed ? (
@@ -738,12 +749,12 @@ function NodeRow({
             </div>
           )}
           {node.fingerprint && (
-            <div className="text-[11px] text-slate-400 font-mono mt-0.5 truncate" title={node.fingerprint}>
+            <div className="text-[11px] text-slate-500 font-mono mt-0.5 truncate" title={node.fingerprint}>
               {node.fingerprint}
             </div>
           )}
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex flex-wrap items-center gap-1 shrink-0">
           <StatusBadge status={node.status} />
           {!managed && (
             <button
@@ -775,6 +786,21 @@ function NodeRow({
               {busy === 'rotate' ? <Loader2 size={15} className="animate-spin" /> : <RotateCw size={15} />}
             </button>
           )}
+          <button
+            className={iconBtn}
+            title={draining ? 'Resume: take new work again' : 'Drain: finish running work, take no new work'}
+            aria-label={draining ? 'Resume worker' : 'Drain worker'}
+            disabled={busy !== null}
+            onClick={() =>
+              run(
+                'drain',
+                () => sshApi.updateNode(node.id, { status: draining ? 'online' : 'draining' }),
+                (n) => (n.status === 'draining' ? `${n.name} is draining: it gets no new tasks or training` : `${n.name} takes new work again`),
+              )
+            }
+          >
+            {busy === 'drain' ? <Loader2 size={15} className="animate-spin" /> : draining ? <PlayCircle size={15} /> : <PauseCircle size={15} />}
+          </button>
           <button
             className={iconBtn}
             title="Edit name and allocation"
@@ -913,7 +939,7 @@ function ResecureDialog({
           <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
             <KeyRound size={18} className="text-amber-600" /> Re-secure {node.name}
           </h3>
-          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600">
+          <button type="button" onClick={onClose} className="text-slate-500 hover:text-slate-600">
             <X size={16} />
           </button>
         </div>
@@ -969,12 +995,14 @@ function CapabilityChips({ caps, runtimeNames }: { caps: NodeCapabilities; runti
         <Cpu size={11} /> {caps.python_version ? `Python ${caps.python_version}` : 'No Python 3'}
       </span>
       {languages.length === 0 ? (
-        <span className={`${chip} bg-slate-50 text-slate-400 border-slate-200`}>no other languages detected</span>
+        <span className={`${chip} bg-slate-50 text-slate-500 border-slate-200`}>no other languages detected</span>
       ) : (
         languages.map(([id, version]) => (
             <span key={id} className={`${chip} bg-sky-50 text-sky-700 border-sky-200`} title={version}>
               {runtimeNames[id] ?? id}
-              {version ? <span className="text-sky-500">{version.length > 16 ? `${version.slice(0, 16)}…` : version}</span> : null}
+              {shortVersion(runtimeNames[id] ?? id, version) ? (
+                <span className="text-sky-600">{shortVersion(runtimeNames[id] ?? id, version)}</span>
+              ) : null}
             </span>
           ))
       )}
@@ -1015,7 +1043,7 @@ function NoticeBox({ notice }: { notice: NonNullable<Notice> }) {
   const styles =
     notice.tone === 'error' ? 'bg-rose-50 border-rose-200 text-rose-800' : 'bg-amber-50 border-amber-200 text-amber-800';
   return (
-    <div className={`mt-4 flex gap-2 rounded-lg border px-3.5 py-2.5 text-sm ${styles}`}>
+    <div className={`mt-4 flex gap-2 rounded-lg border px-3.5 py-2.5 text-sm ${styles}`} role={notice.tone === 'error' ? 'alert' : 'status'}>
       <AlertTriangle size={16} className="shrink-0 mt-0.5" />
       <div>
         <div className="font-semibold">{notice.title}</div>
