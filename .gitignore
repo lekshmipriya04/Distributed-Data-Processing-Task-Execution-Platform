@@ -48,3 +48,4 @@ Thumbs.db
 # ---- Logs & local databases ----
 *.log
 *.sqlite3
+*.zip
