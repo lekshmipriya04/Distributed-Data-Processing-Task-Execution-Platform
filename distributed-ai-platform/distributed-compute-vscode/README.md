@@ -86,6 +86,12 @@ Press F5 to launch the Extension Development Host. Point `masterUrl` at a local
 backend or a mock server — never run the test suite against a real cluster or
 with production credentials.
 
+## Authors
+
+- **AARON R**
+- **M R LEKSHMI PRIYA**
+- **ALEENA VJ**
+
 ## License
 
 [MIT](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for release notes.

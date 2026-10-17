@@ -3,11 +3,22 @@
   "displayName": "Distributed Compute",
   "description": "Developer control interface for the Distributed Data Processing & Task Execution Platform — manage compute nodes, submit any-language executions to your own workers, and monitor them without leaving VS Code.",
   "version": "1.0.0",
-  "publisher": "REPLACE_WITH_PUBLISHER",
-  "license": "SEE LICENSE IN LICENSE",
-  "repository": { "type": "git", "url": "https://example.com/REPLACE/distributed-compute-vscode" },
-  "bugs": { "url": "https://example.com/REPLACE/distributed-compute-vscode/issues" },
-  "homepage": "https://example.com/REPLACE/distributed-compute-vscode#readme",
+  "publisher": "lekshmipriya04",
+  "author": "AARON R, M R LEKSHMI PRIYA, ALEENA VJ",
+  "contributors": [
+    "AARON R",
+    "M R LEKSHMI PRIYA",
+    "ALEENA VJ"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lekshmipriya04/Distributed-Data-Processing-Task-Execution-Platform.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lekshmipriya04/Distributed-Data-Processing-Task-Execution-Platform/issues"
+  },
+  "homepage": "https://github.com/lekshmipriya04/Distributed-Data-Processing-Task-Execution-Platform#readme",
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Other", "Machine Learning", "Visualization"],
   "keywords": ["distributed", "compute", "ssh", "remote execution", "machine learning"],
