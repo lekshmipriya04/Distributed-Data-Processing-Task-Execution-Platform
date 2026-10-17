@@ -1,0 +1,20 @@
+# Build context for the backend images (docker compose uses context ".").
+# They only COPY shared/ and services/<name>/, so keep everything else out,
+# especially secrets and the large node_modules folders.
+.git
+config
+frontend
+distributed-compute-vscode
+docs
+tests
+infrastructure
+scripts
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+.mypy_cache
+.ruff_cache
+.pytest_cache
+*.egg-info
+*.md

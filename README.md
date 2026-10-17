@@ -18,7 +18,6 @@ authorized-keys line.
 - [Architecture](distributed-ai-platform/docs/architecture.md)
 - [Connections, ports and protocols](distributed-ai-platform/docs/connections.md)
 - [API contract](distributed-ai-platform/docs/API_CONTRACT.md)
-- [Implementation plan and status](distributed-ai-platform/docs/IMPLEMENTATION_PLAN.md)
 - [Project overview](distributed-ai-platform/project.md)
 
 ![Platform architecture](distributed-ai-platform/docs/architecture-overview.svg)
@@ -27,7 +26,7 @@ authorized-keys line.
 
 | Component | Port | What it does |
 |---|---:|---|
-| React frontend (`frontend/`) | 3000 (Vite dev) | `/ssh` workers, `/execute` Task Executor, `/train` training |
+| Web dashboard (`frontend/`) | 3000 | `/ssh` workers, `/execute` Task Executor, `/train` training (nginx; proxies `/api` to api-gateway) |
 | api-gateway | 8000 | Proxies `/api/v1/storage/*` and `/api/v1/ssh/*` |
 | storage-service | 8001 | Owner-scoped datasets (CSV/JSON, image ZIP → pixel CSV), bytes in HDFS, metadata in Postgres |
 | ssh-executor | 8011 | Onboarding, capability and runtime detection, sandboxed batches, leases, training, ONNX export |
@@ -76,18 +75,37 @@ results (FedAvg) over several rounds, and exports ONNX.
 
 ## Quick start
 
+Requires Docker.
+
 ```bash
 cd distributed-ai-platform
-cp config/.env.example config/.env       # set real secrets for anything non-local
-make up                                  # or: make up-dev (adds two test SSH workers)
-make setup-hdfs
-cd frontend && npm install && npm run dev   # http://localhost:3000
+cp config/.env.example config/.env
+make up            # or: make up-dev (adds two test SSH workers)
+make setup-hdfs    # once, after the first start
 ```
 
-In `development` mode, anonymous requests run as `dev-user`. With
-`ENVIRONMENT=production` every request needs a JWT. There is no login
-endpoint: mint one with `python generate_token.py --sub <user>`. Outside
-`development`, services refuse to start with placeholder or short secrets.
+Open the dashboard at http://localhost:3000. In VS Code, install the
+extension and run **Distributed Compute: Connect to Master**; it connects to
+`http://localhost:8090` and signs in by itself.
+
+**Sign-in.** The platform is built to run on your own machine. With the
+default `ENVIRONMENT=development`, the dashboard needs no login, and the VS
+Code extension gets its token automatically from the local gateway. Every port
+listens on `127.0.0.1` only, so nobody else on your network can reach it. To
+use it from another computer on your network, start it with
+`BIND_ADDR=0.0.0.0 make up`; then anyone who can reach those ports can run
+code on your workers.
+
+With `ENVIRONMENT=production` every request needs a token and automatic
+sign-in is off. Mint tokens with `python generate_token.py --sub <user>` and
+paste them with **Configure Authentication**. Outside `development`, the
+services refuse to start with placeholder or short secrets.
+
+Stop with `make down` (keeps your data). `make reset` also deletes the
+database and HDFS volumes.
+
+For frontend development with hot reload, stop the `frontend` container and
+run `cd frontend && npm install && npm run dev`.
 
 ## Tests
 
@@ -131,7 +149,7 @@ cd ../services/extension-gateway && go test ./...
 `-- distributed-ai-platform/
     |-- docker-compose.yml, Makefile, generate_token.py
     |-- config/                      .env.example
-    |-- docs/                        architecture, connections, API contract, plan/status
+    |-- docs/                        architecture, connections, API contract
     |-- frontend/                    React/Vite application
     |-- services/                    api-gateway, storage-service, ssh-executor, extension-gateway (Go)
     |-- shared/                      shared Python library

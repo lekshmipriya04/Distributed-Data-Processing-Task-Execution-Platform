@@ -288,7 +288,7 @@ learning rate and execution policy.
   `pending_provisions`, `resource_leases`, `task_batches`, `tasks`,
   `training_runs` (ssh-executor). The schema comes from `create_all` plus
   idempotent `ADD COLUMN IF NOT EXISTS` statements. There is no migration tool.
-  Columns that the list does not cover need a fresh database (`make down` drops
+  Columns that the list does not cover need a fresh database (`make reset` drops
   the volumes) or a manual `ALTER`.
 - **Workers** keep nothing: their sandboxes are deleted, and the only
   persistent change is one `dp-platform:<id>` line in authorized keys.
@@ -296,8 +296,10 @@ learning rate and execution policy.
 ## 9. Security
 
 - **JWT (HS256)**, shared `JWT_SECRET`. With `ENVIRONMENT=production` every
-  request needs a token. Otherwise anonymous calls run as `dev-user`.
-  `generate_token.py` mints a token for testing.
+  request needs a token. Otherwise anonymous calls run as `dev-user`, and the
+  extension gateway serves `POST /auth/local-token`, which the VS Code
+  extension calls to sign in as `dev-user` without a pasted token.
+  `generate_token.py` mints tokens for production mode.
 - **Secrets**: with any `ENVIRONMENT` other than `development`, services refuse
   to start if `JWT_SECRET` or `SSH_CRED_KEY` is a placeholder or shorter than
   32 characters (`security.py`).
@@ -325,7 +327,7 @@ the editor are reported as "not supported by the connected backend".
 ## 11. Deployment, configuration and CI
 
 - `make up` (core stack), `make up-dev` (plus two SSH providers, login
-  `provider/providerpass`, dev only), `make down` (drops volumes).
+  `provider/providerpass`, dev only), `make down` (keeps data), `make reset` (drops volumes).
 - `config/.env` provides `ENVIRONMENT`, `JWT_SECRET`, `SSH_CRED_KEY`,
   `DATABASE_URL`, `HDFS_WEBHDFS_URL` and `HDFS_USER`. ssh-executor settings
   (`config.py`) include timeouts, output and code caps, `allowed_runtimes`,

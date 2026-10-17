@@ -6,8 +6,7 @@
 
 Details: [docs/architecture.md](docs/architecture.md) ·
 [docs/connections.md](docs/connections.md) ·
-[docs/API_CONTRACT.md](docs/API_CONTRACT.md) ·
-[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) (status).
+[docs/API_CONTRACT.md](docs/API_CONTRACT.md).
 
 ---
 
@@ -73,9 +72,9 @@ executions and can submit the active file.
   transport on the development host, and optional Docker SSH providers.
 - GPU memory caps apply only where PyTorch is already installed, and only for
   Python tasks.
-- There is no `/login` endpoint and no token UI. Mint a token with
-  `generate_token.py`. Outside production, anonymous requests run as
-  `dev-user`.
+- There is no `/login` endpoint. Outside production, anonymous requests run as
+  `dev-user` and the VS Code extension signs in automatically. In production,
+  mint tokens with `generate_token.py`.
 - There is no migration tool. The schema comes from `create_all` plus a list of
   additive `ADD COLUMN IF NOT EXISTS` statements.
 
@@ -138,7 +137,7 @@ age, shard weights and `max_train_rows`.
 ```bash
 cp config/.env.example config/.env      # set real secrets for non-local use
 make up            # or: make up-dev   (adds two throwaway SSH providers)
-cd frontend && npm install && npm run dev          # http://localhost:3000
+                   # dashboard: http://localhost:3000
 python generate_token.py --sub alice    # token for production mode / REST clients
 
 pytest tests -q                         # Python unit tests

@@ -24,9 +24,6 @@ coverage.xml
 *.swp
 *.swo
 
-# Docker
-.dockerignore
-
 # Build
 dist/
 build/

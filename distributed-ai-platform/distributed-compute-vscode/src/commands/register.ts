@@ -1,8 +1,8 @@
 // Command handlers. Commands the connected gateway supports are wired to real
 // requests; commands the current backend does NOT expose (node lifecycle,
 // training, logs, cancel/retry/results) report an honest "not supported by the
-// connected backend" message rather than faking success — matching the hard
-// boundary in IMPLEMENTATION_PLAN.md and docs/backend-api-contract.md.
+// connected backend" message rather than faking success (see
+// docs/backend-api-contract.md).
 
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../connection/connectionManager';

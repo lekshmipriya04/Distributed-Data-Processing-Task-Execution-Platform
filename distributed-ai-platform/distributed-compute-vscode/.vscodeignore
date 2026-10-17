@@ -13,7 +13,6 @@ vitest.config.ts
 **/*.ts
 !dist/**
 dist/**/*.map
-IMPLEMENTATION_PLAN.md
 docs/**
 **/tsconfig.json
 **/.DS_Store

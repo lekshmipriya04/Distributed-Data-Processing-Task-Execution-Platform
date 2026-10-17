@@ -1,4 +1,4 @@
-.PHONY: init up up-dev down build test test-unit lint lint-full format setup-hdfs frontend-build go-test
+.PHONY: init up up-dev down reset clean build test test-unit lint lint-full format setup-hdfs frontend-build go-test
 
 init:
 	pip install -e .[dev]
@@ -10,8 +10,20 @@ up:
 up-dev:
 	docker compose --profile dev up -d
 
+# Stops everything and keeps your data (database, datasets, registered nodes).
 down:
-	docker compose down -v
+	docker compose --profile dev down
+
+# Stops everything and DELETES the database and HDFS volumes.
+reset:
+	docker compose --profile dev down -v
+
+# Removes caches and build output. Leaves node_modules and your data alone.
+clean:
+	find . -name __pycache__ -type d -prune -not -path "*/node_modules/*" -exec rm -rf {} +
+	rm -rf .mypy_cache .ruff_cache .pytest_cache .coverage coverage.xml htmlcov *.egg-info
+	rm -rf frontend/dist distributed-compute-vscode/dist distributed-compute-vscode/*.vsix
+	find . -name .DS_Store -not -path "*/node_modules/*" -delete
 
 build:
 	docker compose build
