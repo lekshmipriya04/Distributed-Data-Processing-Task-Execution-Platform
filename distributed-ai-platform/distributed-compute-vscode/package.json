@@ -299,6 +299,10 @@
         { "command": "distributedCompute.runWithRuntime", "group": "distributedCompute@2" },
         { "command": "distributedCompute.runDistributed", "group": "distributedCompute@2" },
         { "command": "distributedCompute.trainWithModelFile", "when": "resourceLangId == python", "group": "distributedCompute@3" }
+      ],
+      "editor/title/run": [
+        { "command": "distributedCompute.runPythonFile", "when": "resourceLangId == python", "group": "1_run@1" },
+        { "command": "distributedCompute.runDistributed", "group": "1_run@2" }
       ]
     }
   },
