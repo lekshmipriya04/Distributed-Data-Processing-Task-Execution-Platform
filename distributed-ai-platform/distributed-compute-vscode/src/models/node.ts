@@ -15,6 +15,7 @@ export type NodeStatus =
 export interface ComputeNode {
   id: string;
   name: string;
+  host?: string;
   osType?: string;
   osVersion?: string;
   status: NodeStatus;

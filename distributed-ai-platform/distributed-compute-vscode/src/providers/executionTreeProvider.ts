@@ -15,6 +15,9 @@ type ExecTreeItem =
   | { kind: 'detail'; label: string; value: string };
 
 const STATUS_ICON: Record<string, string> = {
+  pending: 'watch',
+  cancelling: 'loading~spin',
+  completed_with_errors: 'warning',
   created: 'circle-outline',
   queued: 'watch',
   scheduling: 'loading~spin',
@@ -59,6 +62,7 @@ export class ExecutionTreeProvider implements vscode.TreeDataProvider<ExecTreeIt
     item.iconPath = new vscode.ThemeIcon(STATUS_ICON[e.status] ?? 'circle-outline');
     item.id = `${this.detailed ? 'exec' : 'job'}:${e.id}`;
     item.contextValue = `execution:${e.status}:${isTerminal(e.status) ? 'terminal' : 'active'}`;
+    item.command = { command: 'distributedCompute.viewLogs', title: 'View Logs', arguments: [element] };
     return item;
   }
 
@@ -106,6 +110,8 @@ export class ExecutionTreeProvider implements vscode.TreeDataProvider<ExecTreeIt
       { kind: 'detail', label: 'Tasks total', value: String(e.total) },
       { kind: 'detail', label: 'Completed', value: String(e.completed) },
       { kind: 'detail', label: 'Failed', value: String(e.failed) },
+      ...(e.cancelled ? [{ kind: 'detail' as const, label: 'Cancelled', value: String(e.cancelled) }] : []),
+      ...(e.message ? [{ kind: 'detail' as const, label: 'Message', value: e.message }] : []),
       { kind: 'detail', label: 'Created', value: e.createdAt },
       { kind: 'detail', label: 'Ended', value: e.endedAt ?? 'Not ended' },
     ];

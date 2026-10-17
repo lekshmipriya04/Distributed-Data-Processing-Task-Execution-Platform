@@ -842,6 +842,8 @@ class NodeService:
         node = await self._require_node(node_id, owner_id)
         if request.name is not None and request.name.strip():
             node.name = request.name.strip()
+        if request.status is not None:
+            node.status = request.status
         cpu = request.allocated_cpu if request.allocated_cpu is not None else node.allocated_cpu
         mem = request.allocated_memory_gb if request.allocated_memory_gb is not None else node.allocated_memory_gb
         node.allocated_cpu, node.allocated_memory_gb = _clamp_allocation(

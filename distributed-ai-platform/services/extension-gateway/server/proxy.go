@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-// Proxy forwards the training, engine and dataset routes to ssh-executor and
+// Proxy forwards node onboarding and lifecycle, execution logs and retry,
+// and the training, engine and dataset routes to ssh-executor and
 // storage-service unchanged (their JSON shapes, files and errors), adding the
 // caller's bearer token and request id. Bodies stream in both directions, so
 // dataset uploads and model downloads are not buffered in the gateway.
@@ -90,6 +91,9 @@ type proxyRoute struct {
 	target   func(p *Proxy, r *http.Request) (string, bool)
 	transfer bool // long-running upload/download
 	upload   bool
+	// nodeErrors keeps SSH failures readable: a refused password is not a
+	// bad platform token, and an unreachable worker should say why.
+	nodeErrors bool
 }
 
 func sshPath(path string) func(*Proxy, *http.Request) (string, bool) {
@@ -112,6 +116,21 @@ func storagePath(path string) func(*Proxy, *http.Request) (string, bool) {
 }
 
 var proxyRoutes = []proxyRoute{
+	// Node onboarding (host key, one-time password or manual key, register)
+	// and lifecycle. Detection over SSH can take a while; the JSON timeout
+	// (120s) covers it.
+	{pattern: "POST /nodes/connect", target: sshPath("/nodes/connect"), nodeErrors: true},
+	{pattern: "POST /nodes/provision", target: sshPath("/nodes/provision"), nodeErrors: true},
+	{pattern: "POST /nodes/provision/manual", target: sshPath("/nodes/provision/manual"), nodeErrors: true},
+	{pattern: "POST /nodes/provision/{id}/verify", target: sshPath("/nodes/provision/{id}/verify"), nodeErrors: true},
+	{pattern: "POST /nodes", target: sshPath("/nodes"), nodeErrors: true},
+	{pattern: "DELETE /nodes/{id}", target: sshPath("/nodes/{id}"), nodeErrors: true},
+	{pattern: "POST /nodes/{id}/health-check", target: sshPath("/nodes/{id}/health-check"), nodeErrors: true},
+	{pattern: "POST /nodes/{id}/refresh", target: sshPath("/nodes/{id}/refresh"), nodeErrors: true},
+	{pattern: "POST /nodes/{id}/rotate-key", target: sshPath("/nodes/{id}/rotate-key"), nodeErrors: true},
+	// Per-task output of an execution, and running it again.
+	{pattern: "GET /executions/{id}/tasks", target: sshPath("/batches/{id}/tasks")},
+	{pattern: "POST /executions/{id}/retry", target: sshPath("/batches/{id}/retry")},
 	{pattern: "GET /engines", target: sshPath("/engines")},
 	{pattern: "GET /engines/spark-ray/models", target: sshPath("/engines/spark_ray/models")},
 	{pattern: "GET /training", target: sshPath("/train")},
@@ -216,6 +235,12 @@ func (p *Proxy) serve(s *Server, route proxyRoute, w http.ResponseWriter, r *htt
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		if route.nodeErrors {
+			if se := mapNodeError(resp.StatusCode, raw); se != nil {
+				s.writeStoreError(w, r, se)
+				return
+			}
+		}
 		s.writeStoreError(w, r, mapUpstreamStatus(r.Method, r.URL.Path, resp.StatusCode, raw))
 		return
 	}
@@ -228,4 +253,24 @@ func (p *Proxy) serve(s *Server, route proxyRoute, w http.ResponseWriter, r *htt
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		p.logger.Warn("proxy_copy_failed", "path", r.URL.Path, "err", err.Error())
 	}
+}
+
+// mapNodeError translates ssh-executor's onboarding and node errors, keeping
+// their detail. nil means "use the generic mapping".
+func mapNodeError(status int, body []byte) error {
+	detail := upstreamDetail(body)
+	if detail == "" {
+		return nil
+	}
+	switch status {
+	case http.StatusUnauthorized:
+		// The gateway already accepted the caller's token: this is the
+		// worker refusing the SSH login.
+		return &StatusError{Status: http.StatusBadRequest, Code: "ssh_auth_failed", Message: detail}
+	case http.StatusForbidden:
+		return &StatusError{Status: http.StatusForbidden, Code: "host_not_allowed", Message: detail}
+	case http.StatusBadGateway:
+		return &StatusError{Status: http.StatusBadGateway, Code: "node_unreachable", Message: detail}
+	}
+	return nil
 }

@@ -213,3 +213,61 @@ async def test_batch_service_stores_execution_policy():
     req = schemas.BatchCreateRequest(code="print(1)", inputs=["a"], execution_policy="max_available")
     batch = await tasks_mod.BatchService(session).create_batch(req, OWNER, timeout_seconds=30)
     assert batch.execution_policy == "max_available"
+
+
+def _finished_batch(ctx, status="completed_with_errors", task_statuses=("completed", "failed", "cancelled")):
+    b = _batch(status)
+    b.code = "print(input())"
+    b.custom_command = None
+    b.custom_filename = None
+    b.execution_policy = "balanced"
+    b.node_ids_json = f'["{ctx.n_py.id}"]'
+    ctx.svc.batches[b.id] = b
+    tasks = [
+        SimpleNamespace(seq=i, input_data=f"in-{i}", status=s)
+        for i, s in enumerate(task_statuses)
+    ]
+
+    async def list_tasks(batch_id):
+        return tasks if batch_id == b.id else []
+
+    ctx.svc.list_tasks = list_tasks
+    return b
+
+
+def test_retry_reruns_every_input_as_a_new_batch(ctx):
+    b = _finished_batch(ctx)
+    r = ctx.client.post(f"/api/v1/ssh/batches/{b.id}/retry")
+    assert r.status_code == 201, r.text
+    assert r.json()["id"] != str(b.id)
+    request, timeout = ctx.svc.created[-1]
+    assert request.inputs == ["in-0", "in-1", "in-2"]
+    assert request.code == "print(input())"
+    assert request.execution_policy == "balanced"
+    assert [str(n) for n in request.node_ids] == [str(ctx.n_py.id)]
+    assert timeout == 120
+    assert len(ctx.dispatched) == 1
+
+
+def test_retry_failed_only_keeps_failed_and_cancelled_inputs(ctx):
+    b = _finished_batch(ctx)
+    r = ctx.client.post(f"/api/v1/ssh/batches/{b.id}/retry?failed_only=true")
+    assert r.status_code == 201
+    assert ctx.svc.created[-1][0].inputs == ["in-1", "in-2"]
+
+
+def test_retry_refuses_running_batches_and_nothing_to_retry(ctx):
+    running = _finished_batch(ctx, status="running")
+    assert ctx.client.post(f"/api/v1/ssh/batches/{running.id}/retry").status_code == 409
+    clean = _finished_batch(ctx, status="completed", task_statuses=("completed",))
+    r = ctx.client.post(f"/api/v1/ssh/batches/{clean.id}/retry?failed_only=true")
+    assert r.status_code == 400
+    assert ctx.client.post(f"/api/v1/ssh/batches/{uuid.uuid4()}/retry").status_code == 404
+
+
+def test_node_update_accepts_only_online_or_draining():
+    schemas = _get("schemas")
+    assert schemas.NodeUpdateRequest(status="draining").status == "draining"
+    assert schemas.NodeUpdateRequest().status is None
+    with pytest.raises(Exception):
+        schemas.NodeUpdateRequest(status="offline")

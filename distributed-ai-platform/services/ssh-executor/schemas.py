@@ -124,6 +124,9 @@ class NodeResecureRequest(BaseModel):
 
 class NodeUpdateRequest(BaseModel):
     name: Optional[str] = Field(default=None, max_length=256)
+    # "draining" keeps running work but gives the node no new tasks or
+    # training shards; "online" takes new work again.
+    status: Optional[str] = Field(default=None, pattern="^(online|draining)$")
     allocated_cpu: Optional[int] = Field(default=None, ge=1)
     allocated_memory_gb: Optional[float] = Field(default=None, ge=0.0)
     allocated_gpu_count: Optional[int] = Field(default=None, ge=0)

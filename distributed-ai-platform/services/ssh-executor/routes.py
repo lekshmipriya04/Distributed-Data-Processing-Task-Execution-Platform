@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import get_settings
 from database import get_db_manager
-from tasks import BatchService, dispatch_batch
+from tasks import TERMINAL_BATCH_STATUSES, BatchService, dispatch_batch
 from leases import LeaseService
 import leases as execution_manager
 from models import TrainingRun
@@ -408,6 +408,16 @@ async def create_batch(
     service: BatchService = Depends(get_batch_service),
     session: AsyncSession = Depends(get_db_session),
 ):
+    return await _start_batch(request, background, user, service, session)
+
+
+async def _start_batch(
+    request: BatchCreateRequest,
+    background: BackgroundTasks,
+    user: dict,
+    service: BatchService,
+    session: AsyncSession,
+):
     settings = get_settings()
     try:
         validate_execution_request(
@@ -474,6 +484,52 @@ async def cancel_batch(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     return await service.request_cancel(batch)
+
+
+RETRYABLE_TASK_STATUSES = ("failed", "cancelled")
+
+
+@batches_router.post(
+    "/batches/{batch_id}/retry",
+    response_model=BatchResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit("batch", 30))],
+)
+async def retry_batch(
+    batch_id: UUID,
+    background: BackgroundTasks,
+    failed_only: bool = False,
+    user: dict = Depends(get_current_user),
+    service: BatchService = Depends(get_batch_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Run a finished batch again as a new batch: every input, or with
+    ``failed_only`` just the inputs whose task failed or was cancelled."""
+    batch = await service.get_batch(batch_id, user.get("sub"))
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if batch.status not in TERMINAL_BATCH_STATUSES:
+        raise HTTPException(status_code=409, detail="The batch is still running; cancel it or wait for it to finish")
+    tasks = await service.list_tasks(batch_id)
+    inputs = [
+        t.input_data or ""
+        for t in tasks
+        if not failed_only or t.status in RETRYABLE_TASK_STATUSES
+    ]
+    if not inputs:
+        raise HTTPException(status_code=400, detail="No failed or cancelled tasks to retry")
+    request = BatchCreateRequest(
+        code=batch.code,
+        inputs=inputs,
+        node_ids=[UUID(n) for n in json.loads(batch.node_ids_json or "[]")],
+        runtime=batch.runtime,
+        custom_command=batch.custom_command,
+        custom_filename=batch.custom_filename,
+        cpu_per_task=batch.cpu_per_task,
+        timeout_seconds=batch.timeout_seconds,
+        execution_policy=batch.execution_policy,
+    )
+    return await _start_batch(request, background, user, service, session)
 
 
 @batches_router.get("/batches/{batch_id}/tasks", response_model=BatchTasksResponse)

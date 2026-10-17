@@ -170,6 +170,7 @@ type upNodeUpdate struct {
 	AllocatedMemoryGB    *float64 `json:"allocated_memory_gb,omitempty"`
 	AllocatedGPUCount    *int     `json:"allocated_gpu_count,omitempty"`
 	AllocatedGPUMemoryGB *float64 `json:"allocated_gpu_memory_gb,omitempty"`
+	Status               *string  `json:"status,omitempty"`
 }
 
 // upTime accepts the ISO-8601 variants FastAPI/pydantic emit (with or without
@@ -349,6 +350,7 @@ func (s *UpstreamStore) UpdateNodeSlice(ctx context.Context, id string, req Node
 		AllocatedMemoryGB:    req.MemoryAllocatableGB,
 		AllocatedGPUCount:    req.GPUAllocatableCount,
 		AllocatedGPUMemoryGB: req.GPUMemoryAllocatableGB,
+		Status:               req.Status,
 	}
 	var n upNode
 	if err := s.do(ctx, http.MethodPatch, "/nodes/"+url.PathEscape(id), body, &n); err != nil {

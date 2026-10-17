@@ -28,7 +28,12 @@ export interface RuntimeInfo {
   availableNodeIds: string[];
 }
 
+// The backend's batch states (pending … completed_with_errors) plus the
+// older names some masters still report.
 export type ExecutionStatus =
+  | 'pending'
+  | 'cancelling'
+  | 'completed_with_errors'
   | 'created'
   | 'queued'
   | 'scheduling'
@@ -46,6 +51,8 @@ export interface Execution {
   total: number;
   completed: number;
   failed: number;
+  cancelled?: number;
+  message?: string;
   createdAt: string;
   endedAt?: string;
 }
@@ -59,6 +66,13 @@ export interface ExecutionList {
 export interface ExecutionRequest {
   runtime: Runtime;
   code?: string;
+  /** One task per input (its stdin and input.txt); empty = one task. */
+  inputs?: string[];
+  /** Restrict to these nodes; empty = any of your online nodes. */
+  nodeIds?: string[];
+  /** Runtime "custom" only: command containing {file}, and the file name. */
+  customCommand?: string;
+  customFilename?: string;
   datasetId?: string;
   cpuPerTask?: number;
   memoryPerTaskGb?: number;
@@ -108,6 +122,7 @@ export function progressFraction(e: Pick<Execution, 'total' | 'completed' | 'fai
 
 const TERMINAL: ReadonlySet<ExecutionStatus> = new Set<ExecutionStatus>([
   'completed',
+  'completed_with_errors',
   'failed',
   'cancelled',
   'timed_out',

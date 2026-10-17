@@ -110,8 +110,10 @@ func (s *Server) handleUpdateNodeSlice(w http.ResponseWriter, r *http.Request) {
 func validateNodeSliceRequest(req NodeSliceRequest) (code, msg string) {
 	switch {
 	case req.CPUAllocatable == nil && req.MemoryAllocatableGB == nil &&
-		req.GPUAllocatableCount == nil && req.GPUMemoryAllocatableGB == nil:
+		req.GPUAllocatableCount == nil && req.GPUMemoryAllocatableGB == nil && req.Status == nil:
 		return "invalid_slice", "at least one slice field is required"
+	case req.Status != nil && *req.Status != "online" && *req.Status != "draining":
+		return "invalid_status", "status must be online or draining"
 	case req.CPUAllocatable != nil && *req.CPUAllocatable < 1:
 		return "invalid_cpu", "cpuAllocatable must be >= 1"
 	case req.MemoryAllocatableGB != nil && *req.MemoryAllocatableGB <= 0:

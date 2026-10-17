@@ -1,8 +1,6 @@
-// Command handlers. Commands the connected gateway supports are wired to real
-// requests; commands the current backend does NOT expose (node lifecycle,
-// logs, cancel/retry/results) report an honest "not supported by the
-// connected backend" message rather than faking success (see
-// docs/backend-api-contract.md).
+// Command handlers. Every command is wired to a real gateway route: nodes
+// (add, test, detect, rotate key, slice, drain/resume, remove), executions
+// (run, run in parallel, live logs, cancel, retry, results) and training.
 
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../connection/connectionManager';
@@ -16,6 +14,16 @@ import { gpuPresetGb, hasGpu, type ComputeNode, type NodeSliceRequest } from '..
 import { buildDefault, validateConfig } from '../configuration/projectConfig';
 import { disableSparkRay, enableSparkRay } from './engines';
 import { setUpPlatform, stopPlatform } from './platform';
+import { addNode, refreshNodeCapabilities, removeNode, rotateNodeKey, setDraining, testNode } from './nodes';
+import {
+  ExecutionLogProvider,
+  LOG_SCHEME,
+  cancelExecution,
+  retrieveResults,
+  retryExecution,
+  runInParallel,
+  viewLogs,
+} from './executions';
 import {
   deleteRun,
   downloadModel,
@@ -60,9 +68,23 @@ export function registerCommands(deps: CommandDeps): void {
   reg('distributedCompute.viewNode', (...a) => viewNode(deps, a[0]));
   reg('distributedCompute.configureSlice', (...a) => configureSlice(deps, a[0]));
 
-  reg('distributedCompute.runPythonFile', () => runActiveFile(deps, 'python'));
-  reg('distributedCompute.runDistributed', () => runActiveFile(deps, undefined));
-  reg('distributedCompute.runWithRuntime', () => runWithPickedRuntime(deps));
+  const logs = new ExecutionLogProvider();
+  context.subscriptions.push(logs, vscode.workspace.registerTextDocumentContentProvider(LOG_SCHEME, logs));
+  reg('distributedCompute.runPythonFile', () => runActiveFile(deps, logs, 'python'));
+  reg('distributedCompute.runDistributed', () => runInParallel(deps, logs));
+  reg('distributedCompute.viewLogs', (...a) => viewLogs(deps, logs, a[0]));
+  reg('distributedCompute.cancelExecution', (...a) => cancelExecution(deps, a[0]));
+  reg('distributedCompute.retryExecution', (...a) => retryExecution(deps, logs, a[0]));
+  reg('distributedCompute.retrieveResults', (...a) => retrieveResults(deps, a[0]));
+
+  reg('distributedCompute.addNode', () => addNode(deps));
+  reg('distributedCompute.testNode', (...a) => testNode(deps, a[0]));
+  reg('distributedCompute.refreshNodeCapabilities', (...a) => refreshNodeCapabilities(deps, a[0]));
+  reg('distributedCompute.rotateNodeKey', (...a) => rotateNodeKey(deps, a[0]));
+  reg('distributedCompute.drainNode', (...a) => setDraining(deps, a[0], true));
+  reg('distributedCompute.resumeNode', (...a) => setDraining(deps, a[0], false));
+  reg('distributedCompute.removeNode', (...a) => removeNode(deps, a[0]));
+  reg('distributedCompute.runWithRuntime', () => runWithPickedRuntime(deps, logs));
 
   reg('distributedCompute.submitTraining', () => submitTrainingWizard(deps));
   reg('distributedCompute.trainWithModelFile', (...a) => submitTrainingWizard(deps, { modelFile: uriArg(a[0]) ?? activePythonFile() }));
@@ -86,22 +108,6 @@ export function registerCommands(deps: CommandDeps): void {
   reg('distributedCompute.initProject', () => initProject(deps));
   reg('distributedCompute.validateProject', () => validateProject(deps));
 
-  // Capabilities not exposed by the current backend contract — honest refusals.
-  const unsupported: Array<[string, string]> = [
-    ['distributedCompute.addNode', 'Adding nodes'],
-    ['distributedCompute.testNode', 'Testing a node connection'],
-    ['distributedCompute.drainNode', 'Draining a node'],
-    ['distributedCompute.resumeNode', 'Resuming a node'],
-    ['distributedCompute.removeNode', 'Removing a node'],
-    ['distributedCompute.viewLogs', 'Streaming execution logs'],
-    ['distributedCompute.cancelExecution', 'Cancelling an execution'],
-    ['distributedCompute.retryExecution', 'Retrying an execution'],
-    ['distributedCompute.retrieveResults', 'Retrieving results'],
-  ];
-  for (const [id, feature] of unsupported) {
-    reg(id, () => notSupported(deps, feature));
-  }
-
   deps.logger.info('commands registered');
 }
 
@@ -112,12 +118,6 @@ function uriArg(arg: unknown): vscode.Uri | undefined {
 function activePythonFile(): vscode.Uri | undefined {
   const doc = vscode.window.activeTextEditor?.document;
   return doc && doc.languageId === 'python' && doc.uri.scheme === 'file' ? doc.uri : undefined;
-}
-
-function notSupported(deps: CommandDeps, feature: string): void {
-  const msg = `${feature} is not supported by the connected backend yet.`;
-  deps.logger.info('unsupported capability invoked', { feature });
-  void vscode.window.showWarningMessage(msg);
 }
 
 async function doConnect(deps: CommandDeps): Promise<void> {
@@ -384,7 +384,7 @@ function extractNodeId(arg: unknown): string | undefined {
  * the user pick one, then submit the active file with it. `custom` is left out
  * here because it needs a command template the editor does not know.
  */
-async function runWithPickedRuntime(deps: CommandDeps): Promise<void> {
+async function runWithPickedRuntime(deps: CommandDeps, logs: ExecutionLogProvider): Promise<void> {
   const gw = requireGateway(deps);
   if (!gw) {
     return;
@@ -413,11 +413,15 @@ async function runWithPickedRuntime(deps: CommandDeps): Promise<void> {
     { placeHolder: 'Run the active file with…' },
   );
   if (picked) {
-    await runActiveFile(deps, picked.id);
+    await runActiveFile(deps, logs, picked.id);
   }
 }
 
-async function runActiveFile(deps: CommandDeps, forcedRuntime: Runtime | undefined): Promise<void> {
+async function runActiveFile(
+  deps: CommandDeps,
+  logs: ExecutionLogProvider,
+  forcedRuntime: Runtime | undefined,
+): Promise<void> {
   const gw = requireGateway(deps);
   if (!gw) {
     return;
@@ -442,20 +446,18 @@ async function runActiveFile(deps: CommandDeps, forcedRuntime: Runtime | undefin
   const requestId = `dc-submit-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   inFlightRuntimes.add(runtime);
   try {
-    await vscode.window.withProgress(
+    const exec = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Submitting ${runtime} execution…` },
-      async () => {
-        const exec = await gw.createExecution(
+      () =>
+        gw.createExecution(
           { runtime, code, timeoutSeconds: settings.defaultTimeoutSeconds, executionPolicy: settings.executionPolicy },
           requestId,
-        );
-        deps.logger.info('execution submitted', { id: exec.id, runtime });
-        if (settings.showNotifications) {
-          void vscode.window.showInformationMessage(`Submitted ${runtime} execution ${exec.id}.`);
-        }
-      },
+        ),
     );
+    deps.logger.info('execution submitted', { id: exec.id, runtime });
     deps.refreshAll();
+    // The output opens beside the code and follows the run live.
+    await viewLogs(deps, logs, { execution: exec });
   } catch (err) {
     reportError(deps, err, 'Failed to submit the execution.');
   } finally {

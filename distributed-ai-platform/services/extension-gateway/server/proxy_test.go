@@ -185,3 +185,81 @@ func TestNewProxyRejectsBadURLs(t *testing.T) {
 		t.Fatal("expected an error for a non-http storage URL")
 	}
 }
+
+func TestProxyForwardsNodeLifecycleAndExecutionTasks(t *testing.T) {
+	backend, calls := fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	s := proxyServer(t, backend.URL, "")
+	cases := []struct{ method, path, upstream string }{
+		{"POST", "/nodes/connect", "/api/v1/ssh/nodes/connect"},
+		{"POST", "/nodes/provision", "/api/v1/ssh/nodes/provision"},
+		{"POST", "/nodes/provision/manual", "/api/v1/ssh/nodes/provision/manual"},
+		{"POST", "/nodes/provision/p-1/verify", "/api/v1/ssh/nodes/provision/p-1/verify"},
+		{"POST", "/nodes", "/api/v1/ssh/nodes"},
+		{"DELETE", "/nodes/n-1", "/api/v1/ssh/nodes/n-1"},
+		{"POST", "/nodes/n-1/health-check", "/api/v1/ssh/nodes/n-1/health-check"},
+		{"POST", "/nodes/n-1/refresh", "/api/v1/ssh/nodes/n-1/refresh"},
+		{"POST", "/nodes/n-1/rotate-key", "/api/v1/ssh/nodes/n-1/rotate-key"},
+		{"GET", "/executions/e-1/tasks", "/api/v1/ssh/batches/e-1/tasks"},
+		{"POST", "/executions/e-1/retry", "/api/v1/ssh/batches/e-1/retry"},
+	}
+	for i, c := range cases {
+		var body any
+		if c.method == "POST" {
+			body = map[string]any{}
+		}
+		w := do(t, s, c.method, c.path, "tok-1", body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s %s = %d %s", c.method, c.path, w.Code, w.Body.String())
+		}
+		got := (*calls)[i]
+		if got.method != c.method || got.path != c.upstream || got.auth != "Bearer tok-1" {
+			t.Fatalf("%s %s forwarded as %+v", c.method, c.path, got)
+		}
+	}
+}
+
+func TestProxyKeepsNodeErrorDetail(t *testing.T) {
+	status := http.StatusUnauthorized
+	backend, _ := fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"detail":"The worker refused the password"}`))
+	})
+	s := proxyServer(t, backend.URL, "")
+
+	w := do(t, s, "POST", "/nodes/provision", "tok-1", map[string]any{"password": "x"})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "ssh_auth_failed") ||
+		!strings.Contains(w.Body.String(), "refused the password") {
+		t.Fatalf("401 from provision = %d %s", w.Code, w.Body.String())
+	}
+
+	status = http.StatusBadGateway
+	w = do(t, s, "POST", "/nodes/connect", "tok-1", map[string]any{"host": "h"})
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "node_unreachable") {
+		t.Fatalf("502 from connect = %d %s", w.Code, w.Body.String())
+	}
+
+	// Non-node routes keep the generic mapping.
+	status = http.StatusUnauthorized
+	w = do(t, s, "GET", "/training", "tok-1", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("401 from training = %d", w.Code)
+	}
+}
+
+func TestNodeStatusUpdateIsValidated(t *testing.T) {
+	store := NewMemStore()
+	store.SeedNode(ComputeNode{ID: "n-1", Name: "w", Status: "online"})
+	s := New(Config{Store: store})
+	w := do(t, s, "PATCH", "/nodes/n-1", "tok-1", map[string]any{"status": "draining"})
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"draining"`) {
+		t.Fatalf("drain = %d %s", w.Code, w.Body.String())
+	}
+	w = do(t, s, "PATCH", "/nodes/n-1", "tok-1", map[string]any{"status": "offline"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d", w.Code)
+	}
+}

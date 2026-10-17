@@ -88,6 +88,8 @@ type NodeSliceRequest struct {
 	MemoryAllocatableGB    *float64 `json:"memoryAllocatableGb,omitempty"`
 	GPUAllocatableCount    *int     `json:"gpuAllocatableCount,omitempty"`
 	GPUMemoryAllocatableGB *float64 `json:"gpuMemoryAllocatableGb,omitempty"`
+	// Status "draining" stops new work going to the node; "online" resumes it.
+	Status *string `json:"status,omitempty"`
 }
 
 // Runtime is a language runtime the backend knows how to run. A runtime is

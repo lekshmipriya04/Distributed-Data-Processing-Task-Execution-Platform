@@ -128,6 +128,9 @@ func (s *MemStore) UpdateNodeSlice(_ context.Context, id string, req NodeSliceRe
 	if req.GPUMemoryAllocatableGB != nil {
 		n.GPUMemoryAllocatableGB = floatPtr(*req.GPUMemoryAllocatableGB)
 	}
+	if req.Status != nil {
+		n.Status = *req.Status
+	}
 	s.nodes[id] = n
 	return n, nil
 }
