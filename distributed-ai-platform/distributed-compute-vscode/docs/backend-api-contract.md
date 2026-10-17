@@ -1,9 +1,8 @@
 # Backend API Contract (as discovered)
 
 > Phase-0 audit of the real `distributed-ai-platform` repo. Routes marked
-> **EXISTS** were found in source; **GAP** means the extension needs it but no
-> backend implementation was found. Do not invent GAP routes in extension
-> production code — guard them and surface a clear "not supported" message.
+> **EXISTS** were found in source; **GAP** means no backend implementation
+> exists yet. Every extension command is now backed by an EXISTS route.
 
 ## Base & auth
 
@@ -47,18 +46,27 @@ Reusable TS shapes already defined in `frontend/src/api/ssh.ts`:
   `resource_usage_updated`, `job_*`, `task_*`, `execution_log`,
   `resource_lease_*`. Until it exists, the extension uses REST polling.
 
-## Node lifecycle — GAP
+## Node lifecycle and execution output — EXISTS (gateway pass-through)
 
-`POST /nodes/{id}/test`, `/refresh`, `/runtime-check`, `/drain`, `/resume`.
-Node connect/register/list/delete exist; the rest must be added backend-side
-(see the SSH platform plan, §23) or hidden in the extension.
+These are forwarded unchanged (backend snake_case shapes). SSH failures keep
+their message: a refused password is returned as `400 ssh_auth_failed`, not as
+a token error, and an unreachable worker as `502 node_unreachable`.
 
-## Generic execution — GAP
+| Gateway route | Upstream |
+|---|---|
+| `POST /nodes/connect` | `POST /api/v1/ssh/nodes/connect` (host key + onboarding token; no credential) |
+| `POST /nodes/provision` | `POST /api/v1/ssh/nodes/provision` (one-time password installs the managed key) |
+| `POST /nodes/provision/manual` | `POST /api/v1/ssh/nodes/provision/manual` (public key + install command) |
+| `POST /nodes/provision/{id}/verify` | `POST /api/v1/ssh/nodes/provision/{id}/verify` |
+| `POST /nodes` | `POST /api/v1/ssh/nodes` (register with the slice) |
+| `DELETE /nodes/{id}` | `DELETE /api/v1/ssh/nodes/{id}` (also removes the key line on the worker) |
+| `POST /nodes/{id}/health-check`, `/refresh`, `/rotate-key` | same paths under `/api/v1/ssh` |
+| `GET /executions/{id}/tasks` | `GET /api/v1/ssh/batches/{id}/tasks` (per-task stdout, stderr, exit code) |
+| `POST /executions/{id}/retry[?failed_only=true]` | `POST /api/v1/ssh/batches/{id}/retry` |
 
-`POST /executions`, `GET /executions[/{id}[/tasks]]`,
-`POST /executions/{id}/cancel|retry`, `GET /executions/{id}/results|logs`.
-Today only `batches` and `train` submission exist. Map extension "jobs" onto
-`batches`/`train` for Phases 4–7 until a unified `/executions` API lands.
+`PATCH /nodes/{id}` (adapted) also accepts `status: "online" | "draining"`.
+`POST /executions` accepts `inputs` (one task each) and `nodeIds`, so a file
+runs as many parallel tasks. `POST /executions/{id}/cancel` exists.
 
 ## Cluster / resources — VERIFY
 
@@ -95,4 +103,5 @@ platform's `.env` and running `docker compose up -d --build ssh-executor`.
    keep two job types?
 3. Exact schemas for `/resources` and `/cluster/status`.
 4. (Resolved) Spark/Ray were removed; runtime readiness comes from `GET /runtimes`.
-5. Node lifecycle endpoints (`drain`/`resume`/`refresh`/`runtime-check`).
+5. (Resolved) Node lifecycle: drain/resume is `PATCH status`, refresh and
+   health-check exist, retry is `POST /batches/{id}/retry`.

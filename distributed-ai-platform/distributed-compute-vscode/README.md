@@ -1,9 +1,10 @@
 # Distributed Compute (VS Code Extension)
 
 A developer-facing control interface for the **Distributed Data Processing & Task
-Execution Platform**. Browse compute nodes, submit executions in any runtime
-detected on your workers (Python, Bash, Node.js, Go, Rust, Java, ...), and
-monitor them from inside VS Code. The extension is a **client**
+Execution Platform**. Set up the platform, add and manage worker machines, run
+code in any language detected on them (Python, Bash, Node.js, Go, Rust, Java,
+...) in parallel, watch the output live and train models, all from inside VS
+Code. No browser or terminal is needed. The extension is a **client**
 of your own backend (the extension gateway) over REST — it is not a second
 control plane, and it never talks to compute nodes directly.
 
@@ -17,12 +18,25 @@ control plane, and it never talks to compute nodes directly.
 - **Compute Nodes view.** Live node list with status, CPU/memory
   (total / allocatable / reserved), GPU, enforcement mode, and health. Missing
   backend values render as `Unknown` — never fabricated.
+- **Add and manage workers.** **Add Compute Node** (the **+** in the view)
+  asks for address, port and user, shows the host key fingerprint to trust,
+  takes the SSH password once to install a restricted key (or gives you one
+  command to run on workers that refuse passwords), shows what was detected,
+  and lets you pick the slice to lend. Right-click a node to **Test**, **Detect
+  Hardware Again**, **Configure Resource Slice**, **Rotate Key**, **Drain** /
+  **Resume**, or **Remove** it (its key line is deleted from the worker).
 - **Jobs & Executions views.** Submitted executions with runtime, status, and
   task progress (shown only when the backend reports a meaningful total).
-- **Run commands.** Submit the active file as a Python execution, with your
-  default runtime, or with a runtime picked from `GET /runtimes` (only runtimes
-  detected on your online nodes are offered; nothing is installed on workers).
+- **Run commands.** Submit the active file as a Python execution, or with a
+  runtime picked from `GET /runtimes` (only runtimes detected on your online
+  nodes are offered; nothing is installed on workers). **Run File in
+  Parallel…** runs it as many tasks at once: one per input you type, per line
+  of a file, or N copies, on the nodes and with the cores per task you choose.
   A client-generated request id guards against duplicate submits.
+- **Live output, cancel, retry, results.** Every run opens its output beside
+  your code, task by task, updating until it finishes. Right-click an
+  execution to **Cancel** it, **Retry** it (all tasks or only the failed
+  ones), or **Save Execution Results** into `distributed-results/<id>/`.
 - **Training.** **Submit Training Job** walks you through it: pick or upload a
   dataset (also from the Explorer: right-click a `.csv`/`.json`/`.parquet` →
   **Train on This Dataset**), the engine, and the model: a built-in one, **your
@@ -40,15 +54,11 @@ control plane, and it never talks to compute nodes directly.
 - **`distributed.json`.** Initialize and validate project configuration against a
   bundled JSON schema, with workspace path-safety checks.
 
-Capabilities the connected backend does not yet expose — node lifecycle
-(add/test/drain/resume/remove), log streaming, and
-cancel / retry / retrieve-results — are surfaced as an explicit "not supported by
-the connected backend" message rather than faked.
-
 ## Boundaries
 
-The extension never connects directly to compute nodes, never holds SSH private
-keys, never decides placement or allocates resources, never disables TLS, and
+The extension never connects directly to compute nodes (the master does, over
+SSH), never stores SSH passwords (one is sent once, over the gateway, to install
+the key), never holds SSH private keys, never decides placement or allocates resources, never disables TLS, and
 never auto-connects to anyone's cluster. The backend remains the authority and
 security boundary.
 
@@ -66,7 +76,7 @@ one click:
 
 After that, opening VS Code starts the platform and connects by itself
 (setting `autoStartPlatform`). **Stop Platform on This Computer** stops it and
-keeps your data. Add worker machines in the dashboard (**Open Dashboard**).
+keeps your data. Then run **Add Compute Node**.
 
 The only requirement is [Docker Desktop](https://www.docker.com/products/docker-desktop/),
 plus Git if the extension has to download the platform.

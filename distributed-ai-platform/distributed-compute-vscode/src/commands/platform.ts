@@ -23,7 +23,6 @@ import type { CommandDeps } from './register';
 
 const SET_UP_KEY = 'distributedCompute.platformSetUp';
 const DISMISSED_KEY = 'distributedCompute.setupDismissed';
-const DASHBOARD_URL = 'http://localhost:3000/ssh';
 
 export interface RunResult {
   exitCode: number;
@@ -337,11 +336,11 @@ export async function setUpPlatform(deps: CommandDeps): Promise<boolean> {
   deps.refreshAll();
   if (firstTime) {
     const next = await vscode.window.showInformationMessage(
-      'The platform is running and VS Code is connected. Next, add a worker machine in the dashboard.',
-      'Open Dashboard',
+      'The platform is running and VS Code is connected. Next, add a worker machine.',
+      'Add Compute Node',
     );
     if (next) {
-      void vscode.env.openExternal(vscode.Uri.parse(DASHBOARD_URL));
+      await vscode.commands.executeCommand('distributedCompute.addNode');
     }
   }
   return true;

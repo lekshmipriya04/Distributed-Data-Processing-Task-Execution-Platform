@@ -37,9 +37,10 @@ authorized-keys line.
 | HDFS (1 NameNode + 3 DataNodes) | 9000, 9870 | Dataset bytes |
 | `ssh-provider`, `ssh-provider-2` | 2222 (internal) | Throwaway test workers, `--profile dev` only |
 
-The VS Code extension (`distributed-compute-vscode/`) lists nodes and
-executions, edits a node's resource slice, and submits the active file with
-any runtime detected on your nodes.
+The VS Code extension (`distributed-compute-vscode/`) does everything without
+the dashboard: it sets the platform up, adds and manages workers, runs files
+in parallel with live output, cancels and retries runs, saves results, and
+trains models.
 
 ## How it works
 
@@ -111,8 +112,8 @@ make up            # or: make up-dev (adds two test SSH workers)
 `make up` creates `config/.env` from the example on first use, and HDFS
 folders are created on every start, so there is nothing else to run.
 
-Open the dashboard at http://localhost:3000 and add workers under **SSH
-Connection**. The master runs in Docker, so add this computer as
+Add workers with **Add Compute Node** in VS Code, or in the dashboard at
+http://localhost:3000 under **SSH Connection**. The master runs in Docker, so add this computer as
 `host.docker.internal`, not `localhost`.
 
 **Sign-in.** The platform is built to run on your own machine. With the

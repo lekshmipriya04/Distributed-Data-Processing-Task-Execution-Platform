@@ -1,7 +1,7 @@
 {
   "name": "distributed-compute",
   "displayName": "Distributed Compute",
-  "description": "Developer control interface for the Distributed Data Processing & Task Execution Platform — manage compute nodes, submit any-language executions to your own workers, and monitor them without leaving VS Code.",
+  "description": "Run code and train models on your own machines over SSH, entirely from VS Code: one-click local setup, add and manage workers, run any language in parallel with live output, and train built-in, custom or Spark models.",
   "version": "1.0.0",
   "publisher": "aaron43210",
   "author": "AARON R, M R LEKSHMI PRIYA, ALEENA VJ",
@@ -49,7 +49,7 @@
       },
       {
         "view": "distributedCompute.nodes",
-        "contents": "No worker machines yet. Add one in the dashboard: it needs only SSH and Python.\n[Open Dashboard](command:distributedCompute.openDashboard)",
+        "contents": "No worker machines yet. A worker needs only SSH and Python; nothing is installed on it.\n[$(add) Add Compute Node](command:distributedCompute.addNode)",
         "when": "distributedCompute.connected"
       }
     ],
@@ -69,16 +69,16 @@
           {
             "id": "addWorker",
             "title": "Add a worker machine",
-            "description": "In the dashboard, open SSH Connection and connect a machine with its SSH password, once.\n[Open Dashboard](command:distributedCompute.openDashboard)",
+            "description": "Enter the machine's address, user and SSH password, once. VS Code checks its host key, installs a restricted key and detects its hardware.\n[Add Compute Node](command:distributedCompute.addNode)",
             "media": { "markdown": "media/walkthrough/workers.md" },
-            "completionEvents": ["onCommand:distributedCompute.openDashboard"]
+            "completionEvents": ["onCommand:distributedCompute.addNode"]
           },
           {
             "id": "run",
             "title": "Run code or train a model",
-            "description": "Open any file and run it on your workers, or train a model.\n[Run File](command:distributedCompute.runWithRuntime)\n[Train a Model](command:distributedCompute.submitTraining)",
+            "description": "Open any file and run it on your workers, as one task or many in parallel, or train a model. Output streams in live.\n[Run File in Parallel](command:distributedCompute.runDistributed)\n[Train a Model](command:distributedCompute.submitTraining)",
             "media": { "markdown": "media/walkthrough/run.md" },
-            "completionEvents": ["onCommand:distributedCompute.runWithRuntime", "onCommand:distributedCompute.submitTraining"]
+            "completionEvents": ["onCommand:distributedCompute.runDistributed", "onCommand:distributedCompute.runWithRuntime", "onCommand:distributedCompute.submitTraining"]
           }
         ]
       }

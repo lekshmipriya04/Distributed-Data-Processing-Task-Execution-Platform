@@ -370,8 +370,11 @@ Ray on a master running on the same machine offers to install it
 The gateway passes training, engine and dataset calls through to ssh-executor
 and storage-service unchanged.
 
-Adding/draining/removing nodes, log streaming and cancel/retry from the editor
-are reported as "not supported by the connected backend".
+Everything else works from the editor too, with no browser: adding a node
+(host key check, one-time password or a manual key command, detection, slice),
+testing, re-detecting, rotating its key, draining/resuming and removing it;
+running a file as many parallel tasks; live per-task output; cancel; retry
+(all or only failed tasks); and saving results into the workspace.
 
 ## 11. Deployment, configuration and CI
 

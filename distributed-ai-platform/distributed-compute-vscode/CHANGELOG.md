@@ -5,7 +5,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [1.0.0]
 
+### Fixed
+- Executions that finished with errors, or were pending or cancelling, showed
+  the wrong state; the backend's states are now recognized.
+- A worker that could not be reached, or refused access, now shows the reason
+  instead of a generic error.
+
 ### Added
+- Everything from the editor, no dashboard needed: **Add Compute Node** (host
+  key check, one-time password or manual key command, detection, slice),
+  **Test Node Connection**, **Detect Node Hardware Again**, **Rotate Node
+  Key**, **Drain** / **Resume**, **Remove Node**.
+- **Run File in Parallel…**: one task per input, per file line, or N copies,
+  on chosen nodes with chosen cores per task.
+- Live per-task output for every run; **Cancel**, **Retry** (all or only
+  failed tasks) and **Save Execution Results**.
 - One-click local setup: **Set Up Platform on This Computer** checks and starts
   Docker, finds or downloads the platform, creates `config/.env`, starts the
   containers and connects. It is offered on first start, in the Compute Nodes

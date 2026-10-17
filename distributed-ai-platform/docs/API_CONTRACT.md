@@ -54,7 +54,7 @@ Semantics:
 |---|---|---|
 | `GET /api/v1/ssh/nodes` | `NodeListResponse {items: NodeResponse[], total}` | |
 | `GET /api/v1/ssh/nodes/{id}` | `NodeResponse` | |
-| `PATCH /api/v1/ssh/nodes/{id}` `NodeUpdateRequest {name?, allocated_cpu?, allocated_memory_gb?, allocated_gpu_count?, allocated_gpu_memory_gb?}` | `NodeResponse` | rename / change allocation (≤ detected, GPU included) |
+| `PATCH /api/v1/ssh/nodes/{id}` `NodeUpdateRequest {name?, status?, allocated_cpu?, allocated_memory_gb?, allocated_gpu_count?, allocated_gpu_memory_gb?}` | `NodeResponse` | rename / change allocation (≤ detected, GPU included); `status` `draining` keeps running work but gives the node no new tasks or training, `online` resumes |
 | `DELETE /api/v1/ssh/nodes/{id}` | `NodeDeleteResponse {deleted, key_removed, message}` | removes our authorized_keys line, then the row |
 | `POST /api/v1/ssh/nodes/{id}/health-check` | `NodeResponse` | key login + `echo` |
 | `POST /api/v1/ssh/nodes/{id}/refresh` | `NodeResponse` | re-detect capabilities + runtimes |
@@ -147,6 +147,7 @@ sandbox is deleted afterwards.
 | `GET /api/v1/ssh/batches/{id}` | `BatchResponse` |
 | `GET /api/v1/ssh/batches/{id}/tasks` | `BatchTasksResponse {batch, tasks[]}` |
 | `POST /api/v1/ssh/batches/{id}/cancel` | `BatchResponse` (status `cancelling` → `cancelled`) |
+| `POST /api/v1/ssh/batches/{id}/retry[?failed_only=true]` | `201 BatchResponse`: a new batch with the same code and settings; every input, or only those whose task failed or was cancelled. 409 while the batch is still running; 400 when `failed_only` finds nothing to retry |
 
 Each input becomes one task. The task's code runs with that input on **stdin**
 (and also available as file `input.txt` in the sandbox). Validation (400):
