@@ -161,29 +161,51 @@ completed | failed | cancelled`.
 
 ---
 
-## 3. Training (unchanged paths)
+## 3. Training
 
-`POST /api/v1/ssh/train` `TrainRequest`, `GET /api/v1/ssh/train`,
-`GET /api/v1/ssh/train/{id}`, `GET /api/v1/ssh/train/{id}/model` (ONNX),
-`GET /api/v1/ssh/train/{id}/data` (JSON), `DELETE /api/v1/ssh/train/{id}`.
-`engine` is `python` (pure-Python on the master; Spark/Ray were removed).
-Workers receive a stdlib-only training script and their shard on stdin in a
-sandbox, through the same executor as batches, with the runtime fixed to
-`python`. `TrainRequest` also takes `execution_policy` (see §1.2).
+| Route | Purpose |
+|---|---|
+| `GET /api/v1/ssh/engines[?refresh=true]` | `{items: [{id, name, available, missing[], versions{spark,ray,java}, spark_master, ray_address, hint}]}` for `python` and `spark_ray`. Detection only. |
+| `GET /api/v1/ssh/engines/spark_ray/models` | Every supported Spark MLlib estimator: `{items: [{id: "spark:<Name>", name, family, needs_target, params: [{name, type, default, has_default, required, doc}]}]}`. Starts Spark; 409 when Spark + Ray is not installed. |
+| `GET /api/v1/ssh/models/custom/template` | `{filename: "model.py", code}`: a starter custom model. |
+| `POST /api/v1/ssh/train` | Start a run (`TrainRequest`, below). 400 for anything that cannot run, before it is stored. |
+| `GET /api/v1/ssh/train`, `GET /api/v1/ssh/train/{id}` | Runs (`TrainRunResponse`), the owner's latest 20. |
+| `GET /api/v1/ssh/train/{id}/model` | `model-<id>.onnx` (built-in), `params-<id>.json` (custom) or `spark-model-<id>.zip` (Spark `PipelineModel`). 409 until completed. |
+| `GET /api/v1/ssh/train/{id}/data` | The numeric rows the run trained on plus its manifest (JSON). |
+| `DELETE /api/v1/ssh/train/{id}` | Remove a run. |
 
-Multi mode leases every selected node (`cpu_per_task=1`, one shard per leased
-core) and sizes shards by **compute score** instead of equal `rows[i::k]`:
-`P = gpu_mem_gb × shard_weight_gpu + cores × shard_weight_cpu` (settings,
-defaults 5.0 / 1.0), rows split by largest-remainder rounding, ≥1 row per node
-when rows allow, rows dealt interleaved (smooth round-robin) to keep class
-balance. A shard is preferably run by the node it was sized for (other nodes
-take it only if that node died or already failed it). The GPU term only counts
-when the node has `gpu_runtime` **and** the job uses the GPU. The built-in
-stdlib trainer never uses the GPU (`ml_templates.REMOTE_SCRIPT_USES_GPU =
-False`), so today training is scored by cores only — weighting GPU nodes
-higher would make them stragglers. Example (GPU job): W1 8 GB/4c, W2 4 GB/4c,
-W3 0/4c → 44 : 24 : 4; CPU-only → equal. FedAvg weights by shard size, so
-unequal shards stay correct.
+`TrainRequest`:
+
+| Field | Notes |
+|---|---|
+| `dataset_id` | storage-service dataset |
+| `model_type` | `linear_regression` \| `logistic_regression` \| `cnn` \| `custom` \| `spark:<Estimator>` |
+| `engine` | `python` (default) \| `spark_ray` (400 with an install hint when missing) |
+| `target_column` | required except for Spark clustering models |
+| `feature_columns` | empty = every numeric column but the target |
+| `mode` | `multi` (workers) \| `single` (master cores, built-in only). Ignored for Spark models. |
+| `local_cores`, `learning_rate`, `epochs`, `rounds`, `num_classes`, `node_ids`, `execution_policy` | as before |
+| `model_code` | `custom` only: the model.py source (≤ `max_code_bytes`; must parse and define `train`) |
+| `model_params` | `custom`: merged into the config passed to the model. `spark:*`: estimator parameters, validated against the estimator. |
+| `param_grid` | `spark:*` only: `{param: [values]}`; the best on a validation split is kept |
+| `test_fraction` | `spark:*`: held-out share for test metrics (0.05–0.5, default 0.2) |
+| `uses_gpu` | `custom`: GPU nodes get shares by GPU memory as well as cores |
+| `seed` | sampling and splits |
+
+`TrainRunResponse` adds `model_family` (`builtin|custom|spark`),
+`model_format` (`onnx|json|spark-zip`) and `details`: `engine`, `data`
+(`loader`, `rows_total`, `rows_used`, `sampled`, `partitions`), `ray`
+(parameter-server `version` and per-round `updates`), `custom`
+(`has_init`, `has_evaluate`) and `spark` (model, rows, params, feature
+importances, coefficients, labels, grid search). Failed custom shards carry
+`error` (the worker's error output) in `shards[]`.
+
+Workers receive training work through the same sandboxed executor as batches
+(runtime `python`): the built-in stdlib script, or the custom runner plus the
+user's `model.py`. Shards are sized by **compute score**
+`P = gpu_mem_gb × shard_weight_gpu + cores × shard_weight_cpu` (defaults
+5.0 / 1.0), largest-remainder rounding, interleaved rows; the GPU term counts
+only for jobs that use the GPU. FedAvg weights by shard size.
 
 ---
 

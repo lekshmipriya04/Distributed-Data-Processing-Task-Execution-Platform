@@ -12,7 +12,7 @@ and protocols are in [connections.md](connections.md).
 4. [Worker onboarding (password once, managed key after)](#4-worker-onboarding)
 5. [Task Executor (any language, sandboxed)](#5-task-executor)
 6. [Resource slices, leases and execution policy](#6-resource-slices-leases-and-execution-policy)
-7. [Distributed training (pure Python)](#7-distributed-training)
+7. [Distributed training](#7-distributed-training)
 8. [Data and storage](#8-data-and-storage)
 9. [Security](#9-security)
 10. [Editor control plane (VS Code)](#10-editor-control-plane)
@@ -42,10 +42,11 @@ Backing systems: PostgreSQL 15 and HDFS (1 NameNode + 3 DataNodes). Two
 throwaway SSH provider containers exist behind the Compose `dev` profile for
 local end-to-end tests.
 
-There is **no Spark, Ray, Livy, MLflow, Kafka, scheduler, worker registry,
-resource manager, worker agent, preprocessing, evaluation, registry or serving
-service** any more. They were removed; training is pure Python on the master
-(commit `52b210f`).
+There is **no Livy, MLflow, Kafka, scheduler, worker registry, resource
+manager, worker agent, preprocessing, evaluation, registry or serving
+service**. Training is pure Python by default; Apache Spark + Ray is an
+optional engine installed on the master only on request (section 7). Worker
+nodes never run Spark or Ray.
 
 ```
 Browser (React, Vite :3000) ──/api──▶ api-gateway :8000 ──▶ storage-service :8001 ──▶ HDFS + Postgres
@@ -259,26 +260,63 @@ also sweeps sandboxes older than `stale_sandbox_minutes`.
 
 ## 7. Distributed training
 
-`POST /train` with `model_type` `linear_regression | logistic_regression | cnn`,
-`engine` = `python` (the only value), `mode` `single | multi`, epochs, rounds,
-learning rate and execution policy.
+`POST /train` takes a `model_type` from three families and an `engine`.
 
-1. The master downloads the dataset from storage-service on behalf of the run
-   owner and parses CSV or JSON lines in pure Python. The row cap is
-   `max_train_rows`.
-2. **single**: shards train in a `ProcessPoolExecutor` on the master
-   (`local_cores`). The data never leaves the master.
+| Family | `model_type` | Trains where | Engines |
+|---|---|---|---|
+| Built-in | `linear_regression`, `logistic_regression`, `cnn` | workers (`multi`) or the master's cores (`single`) | `python`, `spark_ray` |
+| Custom | `custom` + `model_code` (the user's `model.py`) | workers only (`multi`) | `python`, `spark_ray` |
+| Spark MLlib | `spark:<Estimator>`, any of `GET /engines/spark_ray/models` | Spark on the master (or `SPARK_MASTER_URL`) | `spark_ray` |
+
+**Engines** (`ml/engines.py`, `GET /engines`). `python` is always available.
+`spark_ray` needs pyspark, ray and Java on the master; it is detected, never
+installed by the service. The image adds it only when built with
+`WITH_SPARK_RAY=true` (`make enable-spark-ray`, or the VS Code command). A
+master run outside Docker with its own pyspark/ray/Java is detected the same
+way. Asking for `spark_ray` when it is missing returns 400; nothing silently
+falls back. Worker nodes never run Spark or Ray.
+
+**Built-in and custom models** (federated averaging):
+
+1. The master downloads the dataset on behalf of the run owner. `python` parses
+   CSV/JSON lines itself. `spark_ray` reads CSV, JSON or **Parquet** with Spark,
+   casts and drops incomplete rows, and keeps a **uniform random sample** when
+   the data exceeds `max_train_rows` (the Python reader keeps the first rows).
+2. **single** (built-in only): shards train in a `ProcessPoolExecutor`
+   (`python`) or as **Ray tasks** (`spark_ray`), running the same stdlib code
+   the workers run.
 3. **multi**: every selected node is leased (`cpu_per_task=1`). Shard sizes
    follow a **compute score**, `gpu_mem_gb × shard_weight_gpu + cores ×
-   shard_weight_cpu`, with largest-remainder rounding and interleaved rows. A
-   shard prefers the node it was sized for. The built-in trainer is stdlib-only
-   and never uses the GPU (`REMOTE_SCRIPT_USES_GPU = False`), so today shards are
-   weighted by cores only. Each worker receives a generated stdlib-only script
-   and its shard (JSON on stdin, also in `input.txt`) in a sandbox, through the
-   same `TaskExecutor` as batches.
-4. The master averages the shard results weighted by row count (FedAvg), for
-   `rounds` rounds. It stores metrics and history, and exports ONNX
-   (`GET /train/{id}/model`).
+   shard_weight_cpu`, with largest-remainder rounding and interleaved rows. The
+   GPU term counts only for jobs that use the GPU: never for the built-in
+   trainer, and for custom models when the request sets `uses_gpu`.
+4. Each round the master averages the shard parameters weighted by row count
+   (`ml/params.average_params`, any nested JSON structure of numbers; values
+   identical on every shard, such as layer sizes, are kept). With `spark_ray`
+   a **Ray parameter-server actor** holds the global model for the run and
+   applies every round's update. Both paths produce identical models.
+5. Built-in runs export ONNX; custom runs export `params.json`.
+
+**Custom models** (`ml/custom_model.py`). The user's `model.py` defines
+`train(params, rows, config)` and optionally `init(config)` and
+`evaluate(params, rows, config)`. A generated runner loads it in the normal
+task sandbox and prints one `__DP_RESULT__ {json}` line, so the user's own
+prints cannot break parsing. Before data is sent, a `check` task on every node
+imports the file, so a missing package fails early naming the node. `init`
+runs once on one worker; each round's tasks first evaluate the incoming global
+model on their shard, so metrics need no extra round trip. **None of the
+user's code runs on the master**, which holds `SSH_CRED_KEY` and every node key.
+
+**Spark MLlib models** (`ml/spark_ml.py`). Estimators are discovered from
+`pyspark.ml.classification/regression/clustering` at runtime (18 with Spark
+3.5.1; `OneVsRest`, `AFTSurvivalRegression` and `LDA` are excluded because a
+features + target table cannot feed them). `model_params` sets estimator
+parameters; `param_grid` runs Spark's `TrainValidationSplit` and keeps the
+best. Labels are indexed outside the saved pipeline, so the downloaded zipped
+`PipelineModel` predicts from the feature columns alone and adds
+`predicted_label` with the original class names. Metrics are computed on a
+held-out `test_fraction`; details include feature importances, coefficients
+and the grid-search candidates.
 
 ## 8. Data and storage
 
@@ -320,9 +358,20 @@ It stores the token in SecretStorage and shows nodes, the cluster, jobs and
 executions. It can edit a node's slice and submit the active file as an
 execution: as Python, with the default runtime, or with a runtime picked from
 `GET /runtimes` (only runtimes detected on online nodes are offered). The
-runtime is any registry id. The extension has no Spark or Ray commands.
-Adding/draining/removing nodes, training, log streaming and cancel/retry from
-the editor are reported as "not supported by the connected backend".
+runtime is any registry id.
+
+Training: **Submit Training Job** walks through dataset (or uploading a local
+file), engine, model (built-in, the user's `model.py`, or any Spark MLlib
+model), target column and parameters; **Run Training Again** repeats the
+`training` block saved in `distributed.json`; the **Training Runs** view shows
+round progress, metrics and what ran, and downloads the model. Choosing Spark +
+Ray on a master running on the same machine offers to install it
+(`docker compose up -d --build ssh-executor` with `WITH_SPARK_RAY=true`).
+The gateway passes training, engine and dataset calls through to ssh-executor
+and storage-service unchanged.
+
+Adding/draining/removing nodes, log streaming and cancel/retry from the editor
+are reported as "not supported by the connected backend".
 
 ## 11. Deployment, configuration and CI
 
@@ -333,10 +382,14 @@ the editor are reported as "not supported by the connected backend".
   (`config.py`) include timeouts, output and code caps, `allowed_runtimes`,
   `allowed_hosts`/`allowed_cidrs`, lease TTL, the recovery interval, the stale
   sandbox age and the shard weights.
-- The ssh-executor image is `python:3.11-slim` plus `procps`. It has no JVM.
-- CI (`.github/workflows/ci.yml`) runs `make lint`, the Python unit tests, the
-  frontend build and the Go tests. It lives inside the project folder and must
-  be moved to the git root to run. The CD workflows are placeholders.
+- The ssh-executor image is `python:3.11-slim-bookworm` plus `procps`. Built
+  with `WITH_SPARK_RAY=true` it also has Java 17, PySpark 3.5.1 and Ray 2.31
+  (about 1 GB). Compose tags the two variants separately and gives the
+  container 2 GB of shared memory for Ray.
+- CI (`.github/workflows/ci.yml` at the repository root) runs `make lint`, the
+  Python unit tests, the engine tests with real Java/PySpark/Ray, the frontend
+  tests and build, the extension lint/tests/production build, and `go vet` and
+  the Go tests. There is no CD: the platform is meant to run on your own machine.
 
 ## 12. Testing and verification
 

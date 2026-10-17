@@ -25,14 +25,16 @@ can reach over SSH that have `python3`. There are three user-facing features:
    `custom` command) as a batch, one task per input, in parallel across
    workers. Each task runs in its own sandbox directory, which is deleted
    afterwards. Tasks can be cancelled.
-3. **Training.** Linear regression, logistic regression or a small CNN, trained
-   with federated averaging. In `single` mode it runs on the master's cores; in
-   `multi` mode it runs on workers, with shards sized by each worker's compute.
-   Training is **pure Python**: no Spark, Ray or JVM on the master or the
-   workers. The result exports to ONNX.
+3. **Training.** Built-in linear regression, logistic regression or a small
+   CNN, **your own model** (a `model.py` with `train()`), or with the optional
+   Spark + Ray engine **any Spark MLlib model**. Built-in and custom models use
+   federated averaging: on the master's cores (`single`) or on workers
+   (`multi`), with shards sized by each worker's compute. Spark models train
+   with Spark on the master. Pure Python is the default; Spark + Ray is
+   installed on the master only when you ask for it, and never on workers.
 
 A VS Code extension, through a small Go gateway, shows the same nodes and
-executions and can submit the active file.
+executions, submits the active file, and runs and tracks training jobs.
 
 ## 2. Objectives
 

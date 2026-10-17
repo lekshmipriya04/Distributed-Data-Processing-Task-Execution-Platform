@@ -7,9 +7,11 @@ Use spare CPU and GPU on your own machines over plain SSH. You can:
 - **Run code in any language** the worker already has (Python, Bash, Node.js,
   Go, Rust, Java, C/C++, Ruby, R, Julia, … or a `custom` command), in parallel,
   in throwaway sandboxes.
-- **Train** linear regression, logistic regression or a small CNN with
-  federated averaging, in **pure Python** on the master and on workers. There
-  is no Spark, Ray or JVM anywhere.
+- **Train** the built-in linear regression, logistic regression or small CNN,
+  **your own model** (a `model.py` with a `train()` function, using any
+  library your workers already have), or, with the optional **Spark + Ray**
+  engine, **any Spark MLlib model**. Pure Python is the default; Spark + Ray is
+  installed on the master only if you ask for it, never on workers.
 
 Workers need only `sshd` and `python3`. **Nothing is ever installed on them.**
 After a job, the only trace on a worker is the platform's single
@@ -66,12 +68,29 @@ Python tasks on workers where PyTorch is already installed. Execution policies
 are `safe_background` (default, nice 19), `balanced` (nice 10) and
 `max_available` (nice 0). They change priority only, never the slice.
 
-**Training.** The master reads the dataset in pure Python. In `single` mode it
-trains shards in local processes. In `multi` mode it leases the selected
-workers, sizes shards by compute score (cores, plus GPU memory only for jobs
-that use the GPU; the built-in trainer does not, so today the score is cores
-only), sends each worker a stdlib-only script plus its shard, averages the
-results (FedAvg) over several rounds, and exports ONNX.
+**Training.** Built-in and custom models use federated averaging. The master
+loads the dataset, splits it into shards sized by each worker's compute score,
+sends each worker its shard plus a stdlib-only script (or your `model.py`),
+and averages the results, weighted by rows, over several rounds. In `single`
+mode built-in models train on the master's cores instead. Built-in runs export
+ONNX; custom runs export their parameters as JSON.
+
+**Spark + Ray (optional).** Turn it on with **Distributed Compute: Enable
+Spark + Ray Engine** in VS Code, or `make enable-spark-ray` (about 1 GB, on the
+master only). It adds:
+
+- every Spark MLlib model (random forests, gradient-boosted trees, linear,
+  logistic and generalized linear regression, naive Bayes, SVM, k-means,
+  Gaussian mixtures, …), trained by Spark on the master, with optional grid
+  search; the download is a Spark `PipelineModel` ready to predict;
+- Parquet datasets, and a uniform random sample when a dataset exceeds the
+  row cap;
+- Ray: a parameter server holds the model across rounds, and single-machine
+  runs train their shards as parallel Ray tasks.
+
+If the master already has PySpark, Ray and Java, it is detected and used. Set
+`SPARK_MASTER_URL` or `RAY_ADDRESS` (see `config/.env.example`) to use an
+existing cluster.
 
 ## Quick start
 
