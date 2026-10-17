@@ -23,13 +23,25 @@ control plane, and it never talks to compute nodes directly.
   default runtime, or with a runtime picked from `GET /runtimes` (only runtimes
   detected on your online nodes are offered; nothing is installed on workers).
   A client-generated request id guards against duplicate submits.
+- **Training.** **Submit Training Job** walks you through it: pick or upload a
+  dataset (also from the Explorer: right-click a `.csv`/`.json`/`.parquet` →
+  **Train on This Dataset**), the engine, and the model: a built-in one, **your
+  own `model.py`** (right-click → **Train with This Model File**; **New Custom
+  Model File** writes a starter), or with Spark + Ray **any Spark MLlib model**,
+  with optional grid search. The **Training Runs** view shows round progress,
+  metrics and what actually ran, and downloads the trained model. Save a run to
+  `distributed.json` and **Run Training Again** repeats it in one click.
+- **Optional Spark + Ray.** Pure Python needs nothing. If you pick Spark + Ray
+  and your master runs on this machine, the extension offers to install it into
+  the master container (about 1 GB). Worker machines are never changed. A
+  master that already has PySpark, Ray and Java is detected and used as is.
 - **Status bar + polling.** A connection indicator and a controlled refresh
   interval (REST polling until a client-facing event stream exists backend-side).
 - **`distributed.json`.** Initialize and validate project configuration against a
   bundled JSON schema, with workspace path-safety checks.
 
 Capabilities the connected backend does not yet expose — node lifecycle
-(add/test/drain/resume/remove), training submission, log streaming, and
+(add/test/drain/resume/remove), log streaming, and
 cancel / retry / retrieve-results — are surfaced as an explicit "not supported by
 the connected backend" message rather than faked.
 

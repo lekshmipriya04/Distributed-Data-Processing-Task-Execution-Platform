@@ -36,9 +36,24 @@ const MESSAGES: Record<ApiErrorKind, string> = {
   unknown: 'An unexpected error occurred.',
 };
 
-export function httpStatusToError(status: number, requestId?: string): ApiError {
+/** Statuses whose server message describes the user's own request. */
+const USER_FACING = new Set([400, 409, 413, 422]);
+
+export function httpStatusToError(status: number, requestId?: string, detail?: string): ApiError {
   const kind = statusToKind(status);
-  return new ApiError(MESSAGES[kind], kind, status, requestId);
+  const message = detail && USER_FACING.has(status) ? detail : MESSAGES[kind];
+  return new ApiError(message, kind, status, requestId);
+}
+
+/** The gateway's error message from a response body ({"error": "..."}), if any. */
+export function errorDetail(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown; detail?: unknown };
+    const value = typeof parsed.error === 'string' ? parsed.error : parsed.detail;
+    return typeof value === 'string' && value.trim() !== '' ? value.trim().slice(0, 500) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Normalize any thrown value into an ApiError (used around fetch). */

@@ -4,6 +4,7 @@
 
 import * as vscode from 'vscode';
 import { isExecutionPolicy, isRuntime, type ExecutionPolicy, type Runtime } from '../models/execution';
+import type { Engine } from '../models/training';
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 
@@ -25,6 +26,24 @@ export interface Settings {
   executionPolicy: ExecutionPolicy;
   showNotifications: boolean;
   logLevel: LogLevel;
+  training: TrainingDefaults;
+  /** Folder with the platform's docker-compose.yml ("" = find it). */
+  platformPath: string;
+}
+
+export interface TrainingDefaults {
+  engine: Engine;
+  rounds: number;
+  epochs: number;
+  learningRate: number;
+}
+
+function positiveInt(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+}
+
+function positiveNumber(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 const LOG_LEVELS: ReadonlySet<string> = new Set(['error', 'warn', 'info', 'debug']);
@@ -58,7 +77,18 @@ export function readSettings(): Settings {
     executionPolicy,
     showNotifications: c.get<boolean>('showNotifications', true),
     logLevel,
+    training: {
+      engine: c.get<string>('training.defaultEngine', 'python') === 'spark_ray' ? 'spark_ray' : 'python',
+      rounds: positiveInt(c.get<number>('training.defaultRounds', 3), 3),
+      epochs: positiveInt(c.get<number>('training.defaultEpochs', 10), 10),
+      learningRate: positiveNumber(c.get<number>('training.defaultLearningRate', 0.01), 0.01),
+    },
+    platformPath: (c.get<string>('platformPath', '') ?? '').trim(),
   };
+}
+
+export async function updatePlatformPath(path: string): Promise<void> {
+  await cfg().update('platformPath', path, vscode.ConfigurationTarget.Global);
 }
 
 export async function updateMasterUrl(url: string, target: vscode.ConfigurationTarget): Promise<void> {

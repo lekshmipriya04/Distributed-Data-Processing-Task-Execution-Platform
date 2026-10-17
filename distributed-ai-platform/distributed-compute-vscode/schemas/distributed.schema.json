@@ -4,31 +4,202 @@
   "title": "Distributed Compute project configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "name", "entrypoint", "runtime"],
+  "required": [
+    "version",
+    "name",
+    "entrypoint",
+    "runtime"
+  ],
   "properties": {
-    "version": { "type": "integer", "const": 1 },
-    "name": { "type": "string", "minLength": 1 },
-    "entrypoint": { "type": "string", "minLength": 1, "description": "Workspace-relative path to the task entrypoint." },
-    "runtime": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.+-]{0,31}$", "description": "Runtime id from GET /runtimes, e.g. python, bash, node, go." },
-    "dataset": { "type": "string", "description": "Workspace-relative dataset path or a storage-service dataset reference." },
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entrypoint": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Workspace-relative path to the task entrypoint."
+    },
+    "runtime": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.+-]{0,31}$",
+      "description": "Runtime id from GET /runtimes, e.g. python, bash, node, go."
+    },
+    "dataset": {
+      "type": "string",
+      "description": "Workspace-relative dataset path or a storage-service dataset reference."
+    },
     "resources": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "cpu": { "type": "integer", "minimum": 1 },
-        "memory": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(GB|MB)$" },
-        "gpu": { "type": "integer", "minimum": 0 }
+        "cpu": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(GB|MB)$"
+        },
+        "gpu": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "execution": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "timeoutSeconds": { "type": "integer", "minimum": 1 },
-        "maxRetries": { "type": "integer", "minimum": 0 },
-        "placement": { "type": "string", "enum": ["spread", "pack", "balanced", "gpu_first", "memory_first"] }
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxRetries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "placement": {
+          "type": "string",
+          "enum": [
+            "spread",
+            "pack",
+            "balanced",
+            "gpu_first",
+            "memory_first"
+          ]
+        }
       }
     },
-    "output": { "type": "string", "description": "Workspace-relative output directory." }
+    "output": {
+      "type": "string",
+      "description": "Workspace-relative output directory."
+    },
+    "training": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataset",
+        "modelType"
+      ],
+      "description": "Saved answers of 'Submit Training Job'. 'Run Again' submits these without asking.",
+      "properties": {
+        "dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "storage-service dataset id."
+        },
+        "modelType": {
+          "type": "string",
+          "pattern": "^(linear_regression|logistic_regression|cnn|custom|spark:[A-Za-z][A-Za-z0-9]{1,63})$",
+          "description": "A built-in model, 'custom' (your model.py, trained on the workers), or 'spark:<Estimator>' (any Spark MLlib model, trained by Spark on the master)."
+        },
+        "modelFile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Workspace-relative model.py (modelType 'custom')."
+        },
+        "engine": {
+          "type": "string",
+          "enum": [
+            "python",
+            "spark_ray"
+          ],
+          "description": "'spark_ray' needs Spark + Ray on the master ('Enable Spark + Ray Engine')."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "single",
+            "multi"
+          ],
+          "description": "'multi' trains on worker nodes; 'single' on the master's cores."
+        },
+        "targetColumn": {
+          "type": "string"
+        },
+        "featureColumns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "epochs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "learningRate": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "executionPolicy": {
+          "type": "string",
+          "enum": [
+            "safe_background",
+            "balanced",
+            "max_available"
+          ]
+        },
+        "modelParams": {
+          "type": "object",
+          "description": "Spark: estimator parameters. Custom: added to the config your model receives."
+        },
+        "paramGrid": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1
+          },
+          "description": "Spark only: values to try; the best on a validation split is kept."
+        },
+        "usesGpu": {
+          "type": "boolean",
+          "description": "Custom models: give GPU nodes bigger shards."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "modelType": {
+                "const": "custom"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "modelFile"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "modelType": {
+                "pattern": "^spark:"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "engine": {
+                "const": "spark_ray"
+              }
+            },
+            "required": [
+              "engine"
+            ]
+          }
+        }
+      ]
+    }
   }
 }

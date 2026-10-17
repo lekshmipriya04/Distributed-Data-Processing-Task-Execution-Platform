@@ -6,7 +6,7 @@
 // — so it unit-tests in plain Node and reuses the global fetch at runtime.
 
 import { ApiError, type RequestOptions } from '../models/http';
-import { httpStatusToError, toApiError } from '../utilities/errors';
+import { errorDetail, httpStatusToError, toApiError } from '../utilities/errors';
 import { joinUrl } from './urls';
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -46,10 +46,52 @@ export class ApiClient {
   }
 
   async request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-    const requestId = opts.requestId ?? this.newRequestId();
     const method = opts.method ?? 'GET';
     const hasBody = opts.body !== undefined && method !== 'GET';
-    const headers = await this.buildHeaders(requestId, hasBody);
+    const { response, requestId } = await this.send(path, opts, {
+      body: hasBody ? JSON.stringify(opts.body) : undefined,
+      contentType: hasBody ? 'application/json' : undefined,
+    });
+    if (response.status === 204) {
+      return undefined as T;
+    }
+    try {
+      return (await response.json()) as T;
+    } catch {
+      throw new ApiError('The master returned a non-JSON response.', 'bad-response', response.status, requestId);
+    }
+  }
+
+  /**
+   * Like request(), but for non-JSON bodies (file uploads) and responses
+   * (downloads): returns the successful Response for the caller to read.
+   */
+  async requestRaw(
+    path: string,
+    opts: RequestOptions & { rawBody?: RequestInit['body']; contentType?: string; accept?: string } = {},
+  ): Promise<Response> {
+    const { response } = await this.send(path, opts, {
+      body: opts.rawBody,
+      contentType: opts.contentType,
+      accept: opts.accept,
+    });
+    return response;
+  }
+
+  private async send(
+    path: string,
+    opts: RequestOptions,
+    payload: { body?: RequestInit['body']; contentType?: string; accept?: string },
+  ): Promise<{ response: Response; requestId: string }> {
+    const requestId = opts.requestId ?? this.newRequestId();
+    const method = opts.method ?? 'GET';
+    const headers = await this.buildHeaders(requestId, false);
+    if (payload.contentType) {
+      headers['Content-Type'] = payload.contentType;
+    }
+    if (payload.accept) {
+      headers.Accept = payload.accept;
+    }
     const url = joinUrl(this.options.baseUrl, path);
 
     // Timeout via an internal controller, linked to any caller abort signal.
@@ -69,7 +111,7 @@ export class ApiClient {
       response = await this.fetchImpl(url, {
         method,
         headers,
-        body: hasBody ? JSON.stringify(opts.body) : undefined,
+        body: method === 'GET' ? undefined : payload.body,
         signal: controller.signal,
       });
     } catch (err) {
@@ -77,17 +119,15 @@ export class ApiClient {
     } finally {
       clearTimeout(timer);
     }
-
     if (!response.ok) {
-      throw httpStatusToError(response.status, requestId);
+      let detail: string | undefined;
+      try {
+        detail = errorDetail(await response.text());
+      } catch {
+        detail = undefined;
+      }
+      throw httpStatusToError(response.status, requestId, detail);
     }
-    if (response.status === 204) {
-      return undefined as T;
-    }
-    try {
-      return (await response.json()) as T;
-    } catch {
-      throw new ApiError('The master returned a non-JSON response.', 'bad-response', response.status, requestId);
-    }
+    return { response, requestId };
   }
 }

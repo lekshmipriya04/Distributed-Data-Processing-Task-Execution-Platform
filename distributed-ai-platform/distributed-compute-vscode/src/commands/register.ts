@@ -1,6 +1,6 @@
 // Command handlers. Commands the connected gateway supports are wired to real
 // requests; commands the current backend does NOT expose (node lifecycle,
-// training, logs, cancel/retry/results) report an honest "not supported by the
+// logs, cancel/retry/results) report an honest "not supported by the
 // connected backend" message rather than faking success (see
 // docs/backend-api-contract.md).
 
@@ -14,6 +14,15 @@ import { ApiError } from '../models/http';
 import type { Runtime } from '../models/execution';
 import { gpuPresetGb, hasGpu, type ComputeNode, type NodeSliceRequest } from '../models/node';
 import { buildDefault, validateConfig } from '../configuration/projectConfig';
+import { disableSparkRay, enableSparkRay } from './engines';
+import {
+  deleteRun,
+  downloadModel,
+  newCustomModel,
+  runTrainingAgain,
+  showRunDetails,
+  submitTrainingWizard,
+} from './training';
 
 export interface CommandDeps {
   context: vscode.ExtensionContext;
@@ -51,6 +60,25 @@ export function registerCommands(deps: CommandDeps): void {
   reg('distributedCompute.runDistributed', () => runActiveFile(deps, undefined));
   reg('distributedCompute.runWithRuntime', () => runWithPickedRuntime(deps));
 
+  reg('distributedCompute.submitTraining', () => submitTrainingWizard(deps));
+  reg('distributedCompute.trainWithModelFile', (...a) => submitTrainingWizard(deps, { modelFile: uriArg(a[0]) ?? activePythonFile() }));
+  reg('distributedCompute.trainOnDataset', async (...a) => {
+    const file = uriArg(a[0]);
+    if (file) {
+      await submitTrainingWizard(deps, { datasetFile: file });
+    } else {
+      await submitTrainingWizard(deps);
+    }
+  });
+  reg('distributedCompute.runTrainingAgain', () => runTrainingAgain(deps));
+  reg('distributedCompute.newCustomModel', () => newCustomModel());
+  reg('distributedCompute.enableSparkRay', () => enableSparkRay(deps));
+  reg('distributedCompute.disableSparkRay', () => disableSparkRay(deps));
+  reg('distributedCompute.downloadModel', (...a) => downloadModel(deps, a[0]));
+  reg('distributedCompute.showTrainingRun', (...a) => showRunDetails(deps, a[0]));
+  reg('distributedCompute.deleteTrainingRun', (...a) => deleteRun(deps, a[0]));
+  reg('distributedCompute.refreshTraining', () => deps.refreshAll());
+
   reg('distributedCompute.initProject', () => initProject(deps));
   reg('distributedCompute.validateProject', () => validateProject(deps));
 
@@ -61,7 +89,6 @@ export function registerCommands(deps: CommandDeps): void {
     ['distributedCompute.drainNode', 'Draining a node'],
     ['distributedCompute.resumeNode', 'Resuming a node'],
     ['distributedCompute.removeNode', 'Removing a node'],
-    ['distributedCompute.submitTraining', 'Submitting a training job'],
     ['distributedCompute.viewLogs', 'Streaming execution logs'],
     ['distributedCompute.cancelExecution', 'Cancelling an execution'],
     ['distributedCompute.retryExecution', 'Retrying an execution'],
@@ -72,6 +99,15 @@ export function registerCommands(deps: CommandDeps): void {
   }
 
   deps.logger.info('commands registered');
+}
+
+function uriArg(arg: unknown): vscode.Uri | undefined {
+  return arg instanceof vscode.Uri ? arg : undefined;
+}
+
+function activePythonFile(): vscode.Uri | undefined {
+  const doc = vscode.window.activeTextEditor?.document;
+  return doc && doc.languageId === 'python' && doc.uri.scheme === 'file' ? doc.uri : undefined;
 }
 
 function notSupported(deps: CommandDeps, feature: string): void {

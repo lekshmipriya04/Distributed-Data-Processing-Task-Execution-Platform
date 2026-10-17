@@ -16,7 +16,8 @@
     "onStartupFinished",
     "onView:distributedCompute.nodes",
     "onView:distributedCompute.jobs",
-    "onView:distributedCompute.executions"
+    "onView:distributedCompute.executions",
+    "onView:distributedCompute.training"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -33,7 +34,8 @@
       "distributedCompute": [
         { "id": "distributedCompute.nodes", "name": "Compute Nodes" },
         { "id": "distributedCompute.jobs", "name": "Jobs" },
-        { "id": "distributedCompute.executions", "name": "Executions" }
+        { "id": "distributedCompute.executions", "name": "Executions" },
+        { "id": "distributedCompute.training", "name": "Training Runs" }
       ]
     },
     "commands": [
@@ -54,7 +56,17 @@
       { "command": "distributedCompute.runDistributed", "title": "Distributed Compute: Run Distributed Task" },
       { "command": "distributedCompute.runPythonFile", "title": "Distributed Compute: Run Python File" },
       { "command": "distributedCompute.runWithRuntime", "title": "Distributed Compute: Run File with Runtime…" },
-      { "command": "distributedCompute.submitTraining", "title": "Distributed Compute: Submit Training Job" },
+      { "command": "distributedCompute.submitTraining", "title": "Distributed Compute: Submit Training Job", "icon": "$(play)" },
+      { "command": "distributedCompute.trainWithModelFile", "title": "Distributed Compute: Train with This Model File" },
+      { "command": "distributedCompute.trainOnDataset", "title": "Distributed Compute: Train on This Dataset" },
+      { "command": "distributedCompute.runTrainingAgain", "title": "Distributed Compute: Run Training Again", "icon": "$(debug-rerun)" },
+      { "command": "distributedCompute.newCustomModel", "title": "Distributed Compute: New Custom Model File" },
+      { "command": "distributedCompute.enableSparkRay", "title": "Distributed Compute: Enable Spark + Ray Engine" },
+      { "command": "distributedCompute.disableSparkRay", "title": "Distributed Compute: Disable Spark + Ray Engine" },
+      { "command": "distributedCompute.downloadModel", "title": "Download Trained Model", "icon": "$(cloud-download)" },
+      { "command": "distributedCompute.showTrainingRun", "title": "Show Run Details" },
+      { "command": "distributedCompute.deleteTrainingRun", "title": "Delete Training Run" },
+      { "command": "distributedCompute.refreshTraining", "title": "Distributed Compute: Refresh Training Runs", "icon": "$(refresh)" },
       { "command": "distributedCompute.viewJobs", "title": "Distributed Compute: View Jobs" },
       { "command": "distributedCompute.viewLogs", "title": "Distributed Compute: View Execution Logs" },
       { "command": "distributedCompute.cancelExecution", "title": "Distributed Compute: Cancel Execution" },
@@ -66,19 +78,110 @@
       { "command": "distributedCompute.showDiagnostics", "title": "Distributed Compute: Show Diagnostics" }
     ],
     "configuration": {
-      "title": "Distributed Compute",
-      "properties": {
-        "distributedCompute.masterUrl": { "type": "string", "default": "http://localhost:8090", "description": "Base URL of the extension gateway. The default is a master started on this machine with docker compose. Use https:// for remote hosts; http:// is allowed only for local or LAN hosts." },
-        "distributedCompute.autoConnect": { "type": "boolean", "default": false, "description": "Attempt to connect to the configured master on activation." },
-        "distributedCompute.refreshIntervalSeconds": { "type": "number", "default": 15, "minimum": 5, "description": "Polling interval for platform state (minimum 5s)." },
-        "distributedCompute.enableCodeLens": { "type": "boolean", "default": true, "description": "Show Run Distributed CodeLens on configured entrypoints." },
-        "distributedCompute.defaultRuntime": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.+-]{0,31}$", "default": "python", "description": "Default runtime id for new jobs (any id from GET /runtimes that is detected on your nodes, e.g. python, bash, node, go)." },
-        "distributedCompute.defaultTimeoutSeconds": { "type": "number", "default": 600, "minimum": 1, "description": "Default job timeout in seconds." },
-        "distributedCompute.executionPolicy": { "type": "string", "enum": ["safe_background", "balanced", "max_available"], "enumDescriptions": ["Low priority; never starve the worker owner", "Normal priority within the allocated slice", "Use the full allocated slice"], "default": "safe_background", "description": "How hard submitted executions may use each worker's lent slice." },
-        "distributedCompute.showNotifications": { "type": "boolean", "default": true, "description": "Show job lifecycle notifications." },
-        "distributedCompute.logLevel": { "type": "string", "enum": ["error", "warn", "info", "debug"], "default": "info", "description": "Diagnostics Output Channel verbosity." }
-      }
-    },
+        "title": "Distributed Compute",
+        "properties": {
+          "distributedCompute.masterUrl": {
+            "type": "string",
+            "default": "http://localhost:8090",
+            "description": "Base URL of the extension gateway. The default is a master started on this machine with docker compose. Use https:// for remote hosts; http:// is allowed only for local or LAN hosts."
+          },
+          "distributedCompute.autoConnect": {
+            "type": "boolean",
+            "default": false,
+            "description": "Attempt to connect to the configured master on activation."
+          },
+          "distributedCompute.refreshIntervalSeconds": {
+            "type": "number",
+            "default": 15,
+            "minimum": 5,
+            "description": "Polling interval for platform state (minimum 5s)."
+          },
+          "distributedCompute.enableCodeLens": {
+            "type": "boolean",
+            "default": true,
+            "description": "Show Run Distributed CodeLens on configured entrypoints."
+          },
+          "distributedCompute.defaultRuntime": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.+-]{0,31}$",
+            "default": "python",
+            "description": "Default runtime id for new jobs (any id from GET /runtimes that is detected on your nodes, e.g. python, bash, node, go)."
+          },
+          "distributedCompute.defaultTimeoutSeconds": {
+            "type": "number",
+            "default": 600,
+            "minimum": 1,
+            "description": "Default job timeout in seconds."
+          },
+          "distributedCompute.executionPolicy": {
+            "type": "string",
+            "enum": [
+              "safe_background",
+              "balanced",
+              "max_available"
+            ],
+            "enumDescriptions": [
+              "Low priority; never starve the worker owner",
+              "Normal priority within the allocated slice",
+              "Use the full allocated slice"
+            ],
+            "default": "safe_background",
+            "description": "How hard submitted executions may use each worker's lent slice."
+          },
+          "distributedCompute.showNotifications": {
+            "type": "boolean",
+            "default": true,
+            "description": "Show job lifecycle notifications."
+          },
+          "distributedCompute.logLevel": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warn",
+              "info",
+              "debug"
+            ],
+            "default": "info",
+            "description": "Diagnostics Output Channel verbosity."
+          },
+          "distributedCompute.training.defaultEngine": {
+            "type": "string",
+            "enum": [
+              "python",
+              "spark_ray"
+            ],
+            "enumDescriptions": [
+              "Pure Python: nothing extra to install",
+              "Apache Spark + Ray on the master (installed on request)"
+            ],
+            "default": "python",
+            "description": "Engine offered first by Submit Training Job."
+          },
+          "distributedCompute.training.defaultRounds": {
+            "type": "number",
+            "default": 3,
+            "minimum": 1,
+            "description": "Federated rounds (the master averages the model after each)."
+          },
+          "distributedCompute.training.defaultEpochs": {
+            "type": "number",
+            "default": 10,
+            "minimum": 1,
+            "description": "Epochs each worker runs per round."
+          },
+          "distributedCompute.training.defaultLearningRate": {
+            "type": "number",
+            "default": 0.01,
+            "exclusiveMinimum": 0,
+            "description": "Learning rate for built-in and custom models."
+          },
+          "distributedCompute.platformPath": {
+            "type": "string",
+            "default": "",
+            "description": "Folder with the platform's docker-compose.yml. Used to install Spark + Ray on a master running on this machine; found automatically when empty."
+          }
+        }
+      },
     "jsonValidation": [
       { "fileMatch": "distributed.json", "url": "./schemas/distributed.schema.json" }
     ],
@@ -91,7 +194,10 @@
         { "command": "distributedCompute.removeNode", "when": "false" },
         { "command": "distributedCompute.viewNode", "when": "false" },
         { "command": "distributedCompute.configureSlice", "when": "false" },
-        { "command": "distributedCompute.submitTraining", "when": "false" },
+        { "command": "distributedCompute.downloadModel", "when": "false" },
+        { "command": "distributedCompute.showTrainingRun", "when": "false" },
+        { "command": "distributedCompute.deleteTrainingRun", "when": "false" },
+        { "command": "distributedCompute.trainWithModelFile", "when": "editorLangId == python" },
         { "command": "distributedCompute.viewLogs", "when": "false" },
         { "command": "distributedCompute.cancelExecution", "when": "false" },
         { "command": "distributedCompute.retryExecution", "when": "false" },
@@ -101,7 +207,10 @@
         { "command": "distributedCompute.refreshNodes", "when": "view == distributedCompute.nodes", "group": "navigation" },
         { "command": "distributedCompute.addNode", "when": "view == distributedCompute.nodes", "group": "navigation" },
         { "command": "distributedCompute.refreshState", "when": "view == distributedCompute.jobs", "group": "navigation" },
-        { "command": "distributedCompute.refreshState", "when": "view == distributedCompute.executions", "group": "navigation" }
+        { "command": "distributedCompute.refreshState", "when": "view == distributedCompute.executions", "group": "navigation" },
+        { "command": "distributedCompute.submitTraining", "when": "view == distributedCompute.training", "group": "navigation@1" },
+        { "command": "distributedCompute.runTrainingAgain", "when": "view == distributedCompute.training", "group": "navigation@2" },
+        { "command": "distributedCompute.refreshTraining", "when": "view == distributedCompute.training", "group": "navigation@3" }
       ],
       "view/item/context": [
         { "command": "distributedCompute.viewNode", "when": "view == distributedCompute.nodes && viewItem =~ /^node:/", "group": "inline" },
@@ -112,11 +221,20 @@
         { "command": "distributedCompute.viewLogs", "when": "viewItem =~ /^execution:/" },
         { "command": "distributedCompute.cancelExecution", "when": "viewItem =~ /^execution:.*:active$/" },
         { "command": "distributedCompute.retryExecution", "when": "viewItem =~ /^execution:.*:terminal$/" },
-        { "command": "distributedCompute.retrieveResults", "when": "viewItem =~ /^execution:completed:/" }
+        { "command": "distributedCompute.retrieveResults", "when": "viewItem =~ /^execution:completed:/" },
+        { "command": "distributedCompute.downloadModel", "when": "view == distributedCompute.training && viewItem =~ /^training:completed:/", "group": "inline" },
+        { "command": "distributedCompute.downloadModel", "when": "view == distributedCompute.training && viewItem =~ /^training:completed:/", "group": "1_run@1" },
+        { "command": "distributedCompute.showTrainingRun", "when": "view == distributedCompute.training && viewItem =~ /^training:/", "group": "1_run@2" },
+        { "command": "distributedCompute.deleteTrainingRun", "when": "view == distributedCompute.training && viewItem =~ /^training:.*:terminal:/", "group": "2_danger@1" }
+      ],
+      "explorer/context": [
+        { "command": "distributedCompute.trainOnDataset", "when": "resourceExtname =~ /^\\.(csv|json|jsonl|parquet)$/", "group": "distributedCompute@1" },
+        { "command": "distributedCompute.trainWithModelFile", "when": "resourceLangId == python", "group": "distributedCompute@2" }
       ],
       "editor/context": [
         { "command": "distributedCompute.runPythonFile", "when": "resourceLangId == python", "group": "distributedCompute@1" },
-        { "command": "distributedCompute.runWithRuntime", "group": "distributedCompute@2" }
+        { "command": "distributedCompute.runWithRuntime", "group": "distributedCompute@2" },
+        { "command": "distributedCompute.trainWithModelFile", "when": "resourceLangId == python", "group": "distributedCompute@3" }
       ]
     }
   },

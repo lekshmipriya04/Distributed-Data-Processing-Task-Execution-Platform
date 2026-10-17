@@ -1,7 +1,7 @@
 // Distributed Compute — VS Code extension entry point.
 //
 // Wires the connection manager, SecretStorage-backed token store, typed gateway
-// client, the three tree views (Compute Nodes, Jobs, Executions), the status
+// client, the tree views (Compute Nodes, Jobs, Executions, Training Runs), the status
 // bar, and all commands. Nothing contacts a backend until the user configures a
 // master URL and connects, so activation is always clean and offline-safe.
 
@@ -12,6 +12,7 @@ import { Logger } from './utilities/logger';
 import { readSettings } from './configuration/settings';
 import { NodeTreeProvider } from './providers/nodeTreeProvider';
 import { ExecutionTreeProvider } from './providers/executionTreeProvider';
+import { TrainingTreeProvider } from './providers/trainingTreeProvider';
 import { registerCommands } from './commands/register';
 
 let output: vscode.OutputChannel;
@@ -32,18 +33,21 @@ export function activate(context: vscode.ExtensionContext): void {
   const nodeProvider = new NodeTreeProvider(connection, logger);
   const jobsProvider = new ExecutionTreeProvider(connection, logger, false);
   const execProvider = new ExecutionTreeProvider(connection, logger, true);
-  context.subscriptions.push(nodeProvider, jobsProvider, execProvider);
+  const trainingProvider = new TrainingTreeProvider(connection, logger);
+  context.subscriptions.push(nodeProvider, jobsProvider, execProvider, trainingProvider);
 
   context.subscriptions.push(
     vscode.window.createTreeView('distributedCompute.nodes', { treeDataProvider: nodeProvider }),
     vscode.window.createTreeView('distributedCompute.jobs', { treeDataProvider: jobsProvider }),
     vscode.window.createTreeView('distributedCompute.executions', { treeDataProvider: execProvider }),
+    vscode.window.createTreeView('distributedCompute.training', { treeDataProvider: trainingProvider }),
   );
 
   const refreshAll = (): void => {
     nodeProvider.refresh();
     jobsProvider.refresh();
     execProvider.refresh();
+    trainingProvider.refresh();
   };
 
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);

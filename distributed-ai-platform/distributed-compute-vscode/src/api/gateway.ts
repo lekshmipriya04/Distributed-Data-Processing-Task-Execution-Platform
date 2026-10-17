@@ -15,6 +15,7 @@ import {
   type RuntimeInfo,
 } from '../models/execution';
 import { normalizeStatus, type ComputeNode, type NodeList, type NodeSliceRequest } from '../models/node';
+import type { Dataset, EngineInfo, SparkModelInfo, TrainRequest, TrainingRun } from '../models/training';
 
 function badResponse(what: string): never {
   throw new ApiError(`The gateway returned an unexpected ${what} payload.`, 'bad-response');
@@ -45,6 +46,14 @@ function coerceExecution(v: unknown): Execution {
     badResponse('execution');
   }
   return o as unknown as Execution;
+}
+
+function coerceRun(v: unknown): TrainingRun {
+  const o = asObject(v, 'training run');
+  if (typeof o.id !== 'string' || typeof o.model_type !== 'string' || typeof o.status !== 'string') {
+    badResponse('training run');
+  }
+  return o as unknown as TrainingRun;
 }
 
 export class GatewayApi {
@@ -136,5 +145,96 @@ export class GatewayApi {
       signal,
     });
     return coerceExecution(raw);
+  }
+
+  // --- training, engines, datasets (backend shapes, passed through) --------
+
+  async listEngines(refresh = false, signal?: AbortSignal): Promise<EngineInfo[]> {
+    const raw = asObject(
+      await this.client.request<unknown>(`/engines${refresh ? '?refresh=true' : ''}`, { signal, timeoutMs: 30000 }),
+      'engine list',
+    );
+    if (!Array.isArray(raw.items)) {
+      badResponse('engine list');
+    }
+    return raw.items as EngineInfo[];
+  }
+
+  /** Every Spark MLlib model on the master. The first call starts Spark. */
+  async listSparkModels(signal?: AbortSignal): Promise<SparkModelInfo[]> {
+    const raw = asObject(
+      await this.client.request<unknown>('/engines/spark-ray/models', { signal, timeoutMs: 120000 }),
+      'Spark model list',
+    );
+    if (!Array.isArray(raw.items)) {
+      badResponse('Spark model list');
+    }
+    return raw.items as SparkModelInfo[];
+  }
+
+  async listDatasets(signal?: AbortSignal): Promise<Dataset[]> {
+    const raw = asObject(await this.client.request<unknown>('/datasets?limit=200', { signal }), 'dataset list');
+    if (!Array.isArray(raw.items)) {
+      badResponse('dataset list');
+    }
+    return raw.items as Dataset[];
+  }
+
+  /** Upload a local file to storage-service (multipart, like the dashboard). */
+  async uploadDataset(name: string, filename: string, content: Uint8Array, signal?: AbortSignal): Promise<Dataset> {
+    const form = new FormData();
+    form.append('name', name);
+    form.append('file', new Blob([content]), filename);
+    const response = await this.client.requestRaw('/datasets', {
+      method: 'POST',
+      rawBody: form,
+      signal,
+      timeoutMs: 30 * 60 * 1000,
+    });
+    const raw = asObject(await response.json(), 'dataset');
+    if (typeof raw.id !== 'string') {
+      badResponse('dataset');
+    }
+    return raw as unknown as Dataset;
+  }
+
+  async submitTraining(req: TrainRequest, requestId: string, signal?: AbortSignal): Promise<TrainingRun> {
+    // Validation of a Spark model may start Spark on the master first.
+    const raw = await this.client.request<unknown>('/training', {
+      method: 'POST',
+      body: req,
+      requestId,
+      signal,
+      timeoutMs: 120000,
+    });
+    return coerceRun(raw);
+  }
+
+  async listTrainingRuns(signal?: AbortSignal): Promise<TrainingRun[]> {
+    const raw = await this.client.request<unknown>('/training', { signal });
+    if (!Array.isArray(raw)) {
+      badResponse('training run list');
+    }
+    return raw.map(coerceRun);
+  }
+
+  async getTrainingRun(id: string, signal?: AbortSignal): Promise<TrainingRun> {
+    return coerceRun(await this.client.request<unknown>(`/training/${encodeURIComponent(id)}`, { signal }));
+  }
+
+  async deleteTrainingRun(id: string, signal?: AbortSignal): Promise<void> {
+    await this.client.request<unknown>(`/training/${encodeURIComponent(id)}`, { method: 'DELETE', signal });
+  }
+
+  /** The trained model: ONNX, params JSON, or a zipped Spark PipelineModel. */
+  async downloadModel(id: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; filename: string }> {
+    const response = await this.client.requestRaw(`/training/${encodeURIComponent(id)}/model`, {
+      signal,
+      accept: '*/*',
+      timeoutMs: 30 * 60 * 1000,
+    });
+    const disposition = response.headers.get('content-disposition') ?? '';
+    const match = /filename="([^"]+)"/.exec(disposition);
+    return { bytes: new Uint8Array(await response.arrayBuffer()), filename: match?.[1] ?? `model-${id}` };
   }
 }

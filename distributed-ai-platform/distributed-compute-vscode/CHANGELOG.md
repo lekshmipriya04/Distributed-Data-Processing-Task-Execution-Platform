@@ -11,6 +11,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the next connect.
 - `masterUrl` defaults to `http://localhost:8090`, the gateway started by the
   platform's `docker compose`.
+- Training: **Submit Training Job** (dataset → engine → model → target →
+  parameters), **Train on This Dataset** and **Train with This Model File**
+  context menus, **Run Training Again** from `distributed.json`, **New Custom
+  Model File**, and a **Training Runs** view with progress, metrics, details and
+  model download.
+- Custom models (your `model.py`, trained on your workers) and every Spark
+  MLlib model, with grid search.
+- **Enable / Disable Spark + Ray Engine**: installs the optional engine into a
+  master on this machine, only when you ask.
+- Settings: `training.defaultEngine`, `training.defaultRounds`,
+  `training.defaultEpochs`, `training.defaultLearningRate`, `platformPath`.
+- `distributed.json` accepts a `training` block (schema-validated).
+- Error messages from the backend (for example why a training request was
+  rejected) are shown as they are, instead of a generic message.
 
 ### Changed
 - Commands the backend does not support yet are hidden from the Command Palette.

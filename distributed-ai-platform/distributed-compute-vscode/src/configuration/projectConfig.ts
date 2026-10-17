@@ -24,6 +24,82 @@ export interface DistributedConfig {
   resources?: { cpu?: number; memory?: string; gpu?: number };
   execution?: { timeoutSeconds?: number; maxRetries?: number; placement?: Placement };
   output?: string;
+  training?: TrainingConfig;
+}
+
+/** Saved answers of the training wizard; "Run Again" submits them as is. */
+export interface TrainingConfig {
+  /** storage-service dataset id. */
+  dataset: string;
+  /** linear_regression | logistic_regression | cnn | custom | spark:<Estimator> */
+  modelType: string;
+  /** Workspace-relative model.py, for modelType "custom". */
+  modelFile?: string;
+  engine?: 'python' | 'spark_ray';
+  mode?: 'single' | 'multi';
+  targetColumn?: string;
+  featureColumns?: string[];
+  rounds?: number;
+  epochs?: number;
+  learningRate?: number;
+  executionPolicy?: string;
+  modelParams?: Record<string, unknown>;
+  paramGrid?: Record<string, unknown[]>;
+  usesGpu?: boolean;
+}
+
+const MODEL_TYPE = /^(linear_regression|logistic_regression|cnn|custom|spark:[A-Za-z][A-Za-z0-9]{1,63})$/;
+const POLICIES: ReadonlySet<string> = new Set(['safe_background', 'balanced', 'max_available']);
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+export function validateTraining(value: unknown): string[] {
+  const errors: string[] = [];
+  if (!isPlainObject(value)) {
+    return ['"training" must be an object.'];
+  }
+  const t = value;
+  if (typeof t.dataset !== 'string' || t.dataset.trim() === '') {
+    errors.push('"training.dataset" must be a dataset id.');
+  }
+  if (typeof t.modelType !== 'string' || !MODEL_TYPE.test(t.modelType)) {
+    errors.push('"training.modelType" must be a built-in model, "custom", or "spark:<Estimator>".');
+  }
+  if (t.modelType === 'custom' && (typeof t.modelFile !== 'string' || !isSafeRelativePath(t.modelFile))) {
+    errors.push('"training.modelFile" must be a workspace-relative path to model.py when modelType is "custom".');
+  }
+  if (t.engine !== undefined && t.engine !== 'python' && t.engine !== 'spark_ray') {
+    errors.push('"training.engine" must be "python" or "spark_ray".');
+  }
+  if (typeof t.modelType === 'string' && t.modelType.startsWith('spark:') && t.engine !== 'spark_ray') {
+    errors.push('Spark models need "training.engine": "spark_ray".');
+  }
+  if (t.mode !== undefined && t.mode !== 'single' && t.mode !== 'multi') {
+    errors.push('"training.mode" must be "single" or "multi".');
+  }
+  for (const key of ['rounds', 'epochs'] as const) {
+    if (t[key] !== undefined && (typeof t[key] !== 'number' || !Number.isInteger(t[key]) || (t[key] as number) < 1)) {
+      errors.push(`"training.${key}" must be a whole number >= 1.`);
+    }
+  }
+  if (t.learningRate !== undefined && (typeof t.learningRate !== 'number' || t.learningRate <= 0)) {
+    errors.push('"training.learningRate" must be a number > 0.');
+  }
+  if (t.executionPolicy !== undefined && (typeof t.executionPolicy !== 'string' || !POLICIES.has(t.executionPolicy))) {
+    errors.push(`"training.executionPolicy" must be one of ${[...POLICIES].join(', ')}.`);
+  }
+  if (t.featureColumns !== undefined && (!Array.isArray(t.featureColumns) || t.featureColumns.some((c) => typeof c !== 'string'))) {
+    errors.push('"training.featureColumns" must be a list of column names.');
+  }
+  if (t.modelParams !== undefined && !isPlainObject(t.modelParams)) {
+    errors.push('"training.modelParams" must be an object.');
+  }
+  if (t.paramGrid !== undefined && (!isPlainObject(t.paramGrid) || Object.values(t.paramGrid).some((v) => !Array.isArray(v)))) {
+    errors.push('"training.paramGrid" must map parameter names to lists of values.');
+  }
+  return errors;
 }
 
 export interface ValidationResult {
@@ -122,6 +198,10 @@ export function validateConfig(value: unknown): ValidationResult {
     if (e.placement !== undefined && (typeof e.placement !== 'string' || !PLACEMENTS.has(e.placement))) {
       errors.push(`"execution.placement" must be one of ${[...PLACEMENTS].join(', ')}.`);
     }
+  }
+
+  if (c.training !== undefined) {
+    errors.push(...validateTraining(c.training));
   }
 
   return { ok: errors.length === 0, errors };

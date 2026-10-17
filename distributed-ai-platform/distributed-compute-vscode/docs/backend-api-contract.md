@@ -67,11 +67,25 @@ Gateway proxies `/resources` and `/scheduler`; audit
 exact `GET /cluster/status`, `GET /resources`, `GET /health` shapes before wiring
 the cluster dashboard.
 
-## Spark / Ray — removed
+## Training, engines and datasets — EXISTS (gateway pass-through)
 
-The backend no longer has Spark or Ray (commit 52b210f): training is pure Python
-on the master and workers run stdlib scripts. The extension submits any runtime
-id from `GET /runtimes` instead.
+The extension gateway forwards these unchanged (backend snake_case shapes,
+files and error messages), adding the caller's token and request id. Bodies
+stream, so uploads and model downloads are not buffered. Without
+`UPSTREAM_URL` they answer 501; `/datasets` also needs `STORAGE_URL`.
+
+| Gateway route | Upstream |
+|---|---|
+| `GET /engines[?refresh=true]` | ssh-executor `GET /api/v1/ssh/engines` |
+| `GET /engines/spark-ray/models` | ssh-executor `GET /api/v1/ssh/engines/spark_ray/models` |
+| `GET /training`, `POST /training` | ssh-executor `/api/v1/ssh/train` |
+| `GET /training/{id}`, `DELETE /training/{id}` | ssh-executor `/api/v1/ssh/train/{id}` |
+| `GET /training/{id}/model` | ssh-executor `/api/v1/ssh/train/{id}/model` (ONNX, JSON or zip) |
+| `GET /datasets`, `POST /datasets` (multipart `name`, `file`) | storage-service `/api/v1/storage/datasets` |
+
+Spark + Ray is optional and lives on the master only. The extension installs
+it only for a master on `localhost`, by writing `WITH_SPARK_RAY=true` to the
+platform's `.env` and running `docker compose up -d --build ssh-executor`.
 
 ## Open questions for backend owners
 
