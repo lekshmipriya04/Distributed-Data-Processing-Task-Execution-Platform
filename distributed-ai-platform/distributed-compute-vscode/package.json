@@ -68,7 +68,7 @@
     "configuration": {
       "title": "Distributed Compute",
       "properties": {
-        "distributedCompute.masterUrl": { "type": "string", "default": "", "description": "Base URL of the master API Gateway (HTTPS for remote; HTTP allowed only for local dev)." },
+        "distributedCompute.masterUrl": { "type": "string", "default": "http://localhost:8090", "description": "Base URL of the extension gateway. The default is a master started on this machine with docker compose. Use https:// for remote hosts; http:// is allowed only for local or LAN hosts." },
         "distributedCompute.autoConnect": { "type": "boolean", "default": false, "description": "Attempt to connect to the configured master on activation." },
         "distributedCompute.refreshIntervalSeconds": { "type": "number", "default": 15, "minimum": 5, "description": "Polling interval for platform state (minimum 5s)." },
         "distributedCompute.enableCodeLens": { "type": "boolean", "default": true, "description": "Show Run Distributed CodeLens on configured entrypoints." },

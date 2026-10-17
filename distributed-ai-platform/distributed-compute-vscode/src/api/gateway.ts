@@ -54,6 +54,18 @@ export class GatewayApi {
     return this.client.request<Health>('/health', { signal, timeoutMs: 8000 });
   }
 
+  /** One-click sign-in; served only by a local master in development. */
+  async localToken(signal?: AbortSignal): Promise<{ token: string; expiresAt?: string }> {
+    const raw = asObject(
+      await this.client.request<unknown>('/auth/local-token', { method: 'POST', signal, timeoutMs: 8000 }),
+      'local token',
+    );
+    if (typeof raw.token !== 'string' || raw.token === '') {
+      badResponse('local token');
+    }
+    return { token: raw.token, expiresAt: typeof raw.expiresAt === 'string' ? raw.expiresAt : undefined };
+  }
+
   async clusterStatus(signal?: AbortSignal): Promise<ClusterStatus> {
     const raw = await this.client.request<unknown>('/cluster/status', { signal });
     return asObject(raw, 'cluster status') as unknown as ClusterStatus;

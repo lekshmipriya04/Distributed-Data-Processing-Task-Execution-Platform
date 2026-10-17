@@ -9,9 +9,11 @@ control plane, and it never talks to compute nodes directly.
 
 ## Features
 
-- **Connect to your own master.** Configure a gateway URL and paste a JWT bearer
-  token; the token is stored only in VS Code SecretStorage, never in settings or
-  logs. HTTPS is required for remote hosts; HTTP is allowed only for local dev.
+- **One-click connect to your own master.** For a master on this machine or your
+  LAN in development mode, the extension signs in by itself; no token to copy.
+  For a remote or production master, paste a JWT bearer token instead. Tokens
+  are stored only in VS Code SecretStorage, never in settings or logs. HTTPS is
+  required for remote hosts; HTTP is allowed only for local or LAN hosts.
 - **Compute Nodes view.** Live node list with status, CPU/memory
   (total / allocatable / reserved), GPU, enforcement mode, and health. Missing
   backend values render as `Unknown` — never fabricated.
@@ -42,7 +44,7 @@ security boundary.
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `distributedCompute.masterUrl` | `""` | Gateway base URL (https remote; http local only). |
+| `distributedCompute.masterUrl` | `http://localhost:8090` | Gateway base URL (https remote; http local or LAN only). |
 | `distributedCompute.autoConnect` | `false` | Connect on activation. |
 | `distributedCompute.refreshIntervalSeconds` | `15` | Poll interval (floor 5s). |
 | `distributedCompute.defaultRuntime` | `python` | Runtime id for new executions (any id from `GET /runtimes`). |
@@ -50,8 +52,12 @@ security boundary.
 | `distributedCompute.showNotifications` | `true` | Job lifecycle notifications. |
 | `distributedCompute.logLevel` | `info` | Diagnostics output verbosity. |
 
-Run **Distributed Compute: Configure Master URL**, then **Configure
-Authentication**, then **Connect to Master**.
+**Master on this machine** (started with `docker compose`): run
+**Distributed Compute: Connect to Master**. That's it.
+
+**Master elsewhere:** run **Configure Master URL**, then **Configure
+Authentication** to paste a token (local sign-in only works for a master on
+this machine or your LAN in development mode), then **Connect to Master**.
 
 ## Develop
 

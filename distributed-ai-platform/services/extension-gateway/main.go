@@ -43,9 +43,10 @@ func main() {
 	}
 
 	srv := server.New(server.Config{
-		Store:    buildStore(cfg, logger),
-		Validate: buildValidator(cfg, logger),
-		Logger:   logger,
+		Store:      buildStore(cfg, logger),
+		Validate:   buildValidator(cfg, logger),
+		LocalToken: buildLocalToken(cfg, logger),
+		Logger:     logger,
 	})
 
 	httpSrv := server.NewHTTPServer(cfg.ListenAddr, srv.Handler())
@@ -83,6 +84,26 @@ func buildStore(cfg appConfig, logger *slog.Logger) server.Store {
 	}
 	logger.Info("store_upstream", "upstream_url", cfg.UpstreamURL, "timeout", cfg.UpstreamTimeout.String())
 	return st
+}
+
+// localTokenTTL is long because a local single-user install has nobody to
+// re-authenticate against; the extension re-requests a token when it expires.
+const localTokenTTL = 30 * 24 * time.Hour
+
+// buildLocalToken enables one-click sign-in for local installs. It is only
+// on in development, where the Python services already accept anonymous calls
+// as the same user, so it grants nothing those services do not.
+func buildLocalToken(cfg appConfig, logger *slog.Logger) server.LocalTokenIssuer {
+	if cfg.Environment != "development" {
+		return nil
+	}
+	secret := cfg.JWTSecret
+	if secret == "" {
+		// Same default as the Python services, so their check still passes.
+		secret = placeholderJWTSecret
+	}
+	logger.Info("local_sign_in_enabled", "subject", server.LocalSubject)
+	return server.NewLocalTokenIssuer([]byte(secret), server.LocalSubject, localTokenTTL, nil)
 }
 
 func buildValidator(cfg appConfig, logger *slog.Logger) server.TokenValidator {

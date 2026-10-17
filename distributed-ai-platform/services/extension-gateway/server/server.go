@@ -22,9 +22,13 @@ type Config struct {
 	Store Store
 	// Validate checks bearer tokens. nil means DevValidator (tests/local dev
 	// only); main.go always sets it explicitly.
-	Validate  TokenValidator
-	Logger    *slog.Logger
-	RequestID func() string
+	Validate TokenValidator
+	// LocalToken, when set, enables POST /auth/local-token so a local
+	// single-user install can sign in with one click. main.go sets it only
+	// when ENVIRONMENT=development.
+	LocalToken LocalTokenIssuer
+	Logger     *slog.Logger
+	RequestID  func() string
 }
 
 // Server holds the router and dependencies.
@@ -65,6 +69,24 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /executions", s.handleCreateExecution)
 	s.mux.HandleFunc("GET /executions/{id}", s.handleGetExecution)
 	s.mux.HandleFunc("POST /executions/{id}/cancel", s.handleCancelExecution)
+	if s.cfg.LocalToken != nil {
+		s.mux.HandleFunc("POST /auth/local-token", s.handleLocalToken)
+	}
+}
+
+func (s *Server) handleLocalToken(w http.ResponseWriter, r *http.Request) {
+	token, expires, err := s.cfg.LocalToken()
+	if err != nil {
+		s.cfg.Logger.Error("local_token_failed", "err", err.Error())
+		s.writeError(w, r, http.StatusInternalServerError, "local_token_failed", "Could not issue a local token")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	s.writeJSON(w, http.StatusOK, localTokenResponse{
+		Token:     token,
+		Subject:   LocalSubject,
+		ExpiresAt: expires.UTC().Format(time.RFC3339),
+	})
 }
 
 // -- middleware ----------------------------------------------------------
@@ -100,7 +122,7 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 // request context for forwarding upstream.
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
+		if r.URL.Path == "/health" || (s.cfg.LocalToken != nil && r.URL.Path == "/auth/local-token") {
 			next.ServeHTTP(w, r)
 			return
 		}

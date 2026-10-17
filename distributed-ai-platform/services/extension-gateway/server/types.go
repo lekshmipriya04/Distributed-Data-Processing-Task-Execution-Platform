@@ -123,3 +123,14 @@ type apiError struct {
 	Code      string `json:"code"`
 	RequestID string `json:"requestId,omitempty"`
 }
+
+// LocalSubject is the single local user. It matches the Python services'
+// anonymous development user, so the extension and the web dashboard see the
+// same nodes and jobs.
+const LocalSubject = "dev-user"
+
+type localTokenResponse struct {
+	Token     string `json:"token"`
+	Subject   string `json:"subject"`
+	ExpiresAt string `json:"expiresAt"`
+}

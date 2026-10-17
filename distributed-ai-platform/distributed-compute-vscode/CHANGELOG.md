@@ -3,7 +3,17 @@
 All notable changes to the Distributed Compute extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.0.0]
+
+### Added
+- One-click sign-in: connecting to a master on this machine or your LAN in
+  development mode gets a token automatically. An expired token is replaced on
+  the next connect.
+- `masterUrl` defaults to `http://localhost:8090`, the gateway started by the
+  platform's `docker compose`.
+
+### Changed
+- Commands the backend does not support yet are hidden from the Command Palette.
 
 ### Removed
 - Spark and Ray run commands (`runSpark`, `runRay`) and the `spark`/`ray`

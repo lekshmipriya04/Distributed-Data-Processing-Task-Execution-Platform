@@ -11,6 +11,7 @@ import { ApiError } from '../models/http';
 import { readSettings } from '../configuration/settings';
 import { TokenStore } from '../security/secretStorage';
 import { Logger } from '../utilities/logger';
+import { ensureSignedIn } from './signIn';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected';
 
@@ -76,6 +77,22 @@ export class ConnectionManager implements vscode.Disposable {
 
     try {
       await api.health();
+      const signIn = await ensureSignedIn({
+        hasToken: () => this.tokens.has(),
+        storeToken: (token) => this.tokens.set(token),
+        verify: () => api.clusterStatus(),
+        requestLocalToken: () => api.localToken(),
+        isLocalMaster: validation.isLocal === true,
+      });
+      if (!signIn.ok) {
+        this.api = undefined;
+        this.setState('disconnected', signIn.reason);
+        this.logger.warn('connect failed: not signed in');
+        return false;
+      }
+      if (signIn.via === 'local') {
+        this.logger.info('signed in to local master automatically');
+      }
       this.api = api;
       this.setState('connected');
       this.logger.info('connected to master');

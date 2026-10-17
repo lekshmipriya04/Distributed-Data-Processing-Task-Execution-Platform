@@ -102,6 +102,39 @@ func validateHS256(token string, key []byte, now time.Time) error {
 	return nil
 }
 
+// LocalTokenIssuer mints a token for the local single-user setup.
+type LocalTokenIssuer func() (token string, expiresAt time.Time, err error)
+
+// NewLocalTokenIssuer signs HS256 tokens for subject with the given lifetime,
+// in the exact shape validateHS256 and the Python services accept.
+func NewLocalTokenIssuer(secret []byte, subject string, ttl time.Duration, now func() time.Time) LocalTokenIssuer {
+	if now == nil {
+		now = time.Now
+	}
+	key := append([]byte(nil), secret...)
+	return func() (string, time.Time, error) {
+		issued := now()
+		expires := issued.Add(ttl)
+		header, err := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		payload, err := json.Marshal(map[string]any{
+			"sub": subject,
+			"iat": issued.Unix(),
+			"exp": expires.Unix(),
+		})
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		signing := base64.RawURLEncoding.EncodeToString(header) + "." +
+			base64.RawURLEncoding.EncodeToString(payload)
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(signing))
+		return signing + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), expires, nil
+	}
+}
+
 // b64url decodes base64url, tolerating optional '=' padding.
 func b64url(s string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))

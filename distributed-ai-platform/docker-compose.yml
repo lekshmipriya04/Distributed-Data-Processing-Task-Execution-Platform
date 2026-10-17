@@ -1,3 +1,7 @@
+# Every published port listens on this machine only. To reach the dashboard or
+# the VS Code gateway from another computer on your network, run
+#   BIND_ADDR=0.0.0.0 docker compose up -d
+# Worker nodes never connect in: the master connects out to them over SSH.
 networks:
   platform-net:
     driver: bridge
@@ -41,8 +45,8 @@ services:
     command: >
       bash -c "if [ ! -d /hadoop/dfs/name/current ]; then hdfs namenode -format platform -force -nonInteractive; fi && hdfs namenode"
     ports:
-      - "9870:9870"
-      - "9000:9000"
+      - "${BIND_ADDR:-127.0.0.1}:9870:9870"
+      - "${BIND_ADDR:-127.0.0.1}:9000:9000"
     volumes:
       - hadoop_namenode:/hadoop/dfs/name
       - ./infrastructure/docker/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
@@ -128,7 +132,7 @@ services:
     env_file:
       - config/.env
     ports:
-      - "8000:8000"
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
     networks:
       - platform-net
     restart: unless-stopped
@@ -152,7 +156,7 @@ services:
     env_file:
       - config/.env
     ports:
-      - "8001:8001"
+      - "${BIND_ADDR:-127.0.0.1}:8001:8001"
     networks:
       - platform-net
     restart: unless-stopped
@@ -178,7 +182,7 @@ services:
     env_file:
       - config/.env
     ports:
-      - "8011:8011"
+      - "${BIND_ADDR:-127.0.0.1}:8011:8011"
     networks:
       - platform-net
     restart: unless-stopped
@@ -204,7 +208,7 @@ services:
       - LISTEN_ADDR=:8090
       - UPSTREAM_URL=http://ssh-executor:8011
     ports:
-      - "8090:8090"
+      - "${BIND_ADDR:-127.0.0.1}:8090:8090"
     networks:
       - platform-net
     restart: unless-stopped
@@ -220,7 +224,7 @@ services:
       context: frontend
     container_name: frontend
     ports:
-      - "3000:80"
+      - "${BIND_ADDR:-127.0.0.1}:3000:80"
     networks:
       - platform-net
     restart: unless-stopped

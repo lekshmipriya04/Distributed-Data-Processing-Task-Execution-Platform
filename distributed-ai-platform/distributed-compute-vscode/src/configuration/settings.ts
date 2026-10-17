@@ -9,6 +9,7 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 
 const SECTION = 'distributedCompute';
 const MIN_REFRESH_SECONDS = 5;
+export const DEFAULT_MASTER_URL = 'http://localhost:8090';
 
 function cfg(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration(SECTION);
@@ -48,7 +49,7 @@ export function readSettings(): Settings {
   const logLevel = (LOG_LEVELS.has(rawLog) ? rawLog : 'info') as LogLevel;
 
   return {
-    masterUrl: (c.get<string>('masterUrl', '') ?? '').trim(),
+    masterUrl: (c.get<string>('masterUrl', DEFAULT_MASTER_URL) ?? '').trim(),
     autoConnect: c.get<boolean>('autoConnect', false),
     refreshIntervalSeconds,
     enableCodeLens: c.get<boolean>('enableCodeLens', true),

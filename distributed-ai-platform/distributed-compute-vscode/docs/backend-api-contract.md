@@ -10,10 +10,13 @@
 - Public base path: `/api/v1/<service>/...` via the API Gateway
   (`services/api-gateway/routes.py` proxies prefixes `storage, preprocessing,
   training, evaluation, registry, serving, workers, resources, scheduler, ssh`).
-- Auth: **JWT Bearer**. Header `Authorization: Bearer <token>`. Tokens are minted
-  out-of-band (`generate_token.py`); the React client reads from `localStorage`
-  (`platform_jwt_token`). The extension stores the token in VS Code
-  **SecretStorage** and injects the header per request.
+- Auth: **JWT Bearer**. Header `Authorization: Bearer <token>`. With
+  `ENVIRONMENT=development` the extension gateway serves
+  `POST /auth/local-token` (no auth; returns `{token, subject, expiresAt}`),
+  which the extension calls on connect to a local or LAN master. Otherwise
+  tokens are minted out-of-band (`generate_token.py`) and pasted. The extension
+  stores the token in VS Code **SecretStorage** and injects the header per
+  request.
 
 ## SSH executor — EXISTS (`services/ssh-executor/routes.py`)
 
